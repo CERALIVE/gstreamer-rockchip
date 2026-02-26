@@ -363,8 +363,13 @@ gst_mpp_jpeg_dec_send_mpp_packet (GstVideoDecoder * decoder,
   MppFrame mframe = NULL;
   MppTask mtask = NULL;
   MppMeta meta;
+  MPP_RET ret;
 
-  mppdec->mpi->poll (mppdec->mpp_ctx, MPP_PORT_INPUT, timeout_ms);
+  ret = mppdec->mpi->poll (mppdec->mpp_ctx, MPP_PORT_INPUT, timeout_ms);
+  if (ret)
+    /* FIXME: MPP may return an incorrect error value on timeout. */
+    return MPP_ERR_TIMEOUT;
+
   mppdec->mpi->dequeue (mppdec->mpp_ctx, MPP_PORT_INPUT, &mtask);
   if (G_UNLIKELY (!mtask))
     goto error;

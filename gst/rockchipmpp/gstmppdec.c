@@ -1257,6 +1257,8 @@ gst_mpp_dec_send_mpp_packet_unlocked (GstVideoDecoder * decoder, MppPacket mpkt)
       case MPP_OK:
         return GST_FLOW_OK;
       case MPP_ERR_BUFFER_FULL:
+        /* fall-through */
+      case MPP_ERR_TIMEOUT:
         /* Timed out */
         break;
       default:
