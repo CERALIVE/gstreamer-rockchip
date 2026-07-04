@@ -41,6 +41,13 @@ G_DEFINE_ABSTRACT_TYPE (GstMppDec, gst_mpp_dec, GST_TYPE_VIDEO_DECODER);
 #define MPP_OUTPUT_TIMEOUT_MS 200       /* Block timeout for MPP output queue */
 #define MPP_INPUT_TIMEOUT_MS 10 /* Block timeout for MPP input queue */
 
+/* Safety cap on the GstVideoDecoder pending-frame list. Under normal
+ * operation each decoded MPP output consumes exactly one pending input frame,
+ * so the list stays small. If some inputs never get a matching output (orphans)
+ * the list can still creep; past this bound we release the oldest so the
+ * per-output gst_video_decoder_get_frames() walk cannot degrade to O(N^2). */
+#define GST_MPP_DEC_MAX_PENDING_FRAMES 64
+
 #define MPP_TO_GST_PTS(pts) ((pts) * GST_MSECOND)
 
 #define GST_MPP_DEC_TASK_STARTED(decoder) \
@@ -673,6 +680,29 @@ gst_mpp_dec_get_frame (GstVideoDecoder * decoder, GstClockTime pts)
     return NULL;
   }
 
+  /* If the pending list has run away, release the oldest frames beyond the
+   * bound (they are orphans that never got a matching MPP output) so the
+   * per-output list walk cannot go O(N^2). Rate-limited by nature: once
+   * trimmed to the bound this branch stops firing. Then re-fetch the trimmed
+   * list before matching. */
+  {
+    guint n_pending = g_list_length (frames);
+    if (n_pending > GST_MPP_DEC_MAX_PENDING_FRAMES) {
+      guint drop = n_pending - GST_MPP_DEC_MAX_PENDING_FRAMES;
+      GST_WARNING_OBJECT (self, "pending frame list = %u; releasing %u oldest "
+          "(pending cap)", n_pending, drop);
+      for (l = frames; l != NULL && drop > 0; l = l->next, drop--) {
+        GstVideoCodecFrame *f = l->data;
+        gst_video_codec_frame_ref (f);
+        gst_video_decoder_release_frame (decoder, f);
+      }
+      g_list_free_full (frames, (GDestroyNotify) gst_video_codec_frame_unref);
+      frames = gst_video_decoder_get_frames (decoder);
+      if (!frames)
+        return NULL;
+    }
+  }
+
   /* Choose PTS source when getting the first frame */
   if (is_first_frame) {
     /* Find the frame with earliest PTS (including invalid PTS) */
@@ -805,10 +835,21 @@ out:
 
     gst_video_codec_frame_ref (frame);
     self->last_frame = frame;
-  } else if (self->last_frame) {
-    frame = self->last_frame;
-    GST_DEBUG_OBJECT (self, "reusing the last frame (#%d)",
+  } else {
+    /* No PTS match. Consume the oldest pending frame instead of reusing
+     * self->last_frame (already finished; not in the base pending list). The
+     * old reuse consumed zero pending frames per output, so priv->frames never
+     * drained and gst_video_decoder_get_frames() went O(N^2). Invariant: one
+     * MPP output consumes one pending frame. frames is oldest-first (see the
+     * seen_valid_pts branch above). */
+    frame = frames->data;
+    GST_DEBUG_OBJECT (self, "no PTS match; consuming oldest pending frame (#%d)",
         frame->system_frame_number);
+
+    if (self->last_frame)
+      gst_video_codec_frame_unref (self->last_frame);
+    gst_video_codec_frame_ref (frame);
+    self->last_frame = frame;
   }
 
   if (frame) {
