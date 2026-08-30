@@ -56,12 +56,20 @@ bash "${here}/fetch-pinned-deb.sh" "${MPP_RUNTIME_URL}" "${MPP_RUNTIME_SHA256}" 
   "${work}/${MPP_RUNTIME_DEB}"
 dpkg-deb -x "${work}/${MPP_RUNTIME_DEB}" "${work}/mpp"
 
-mpp_lib="$(find "${work}/mpp" -type f -name "${MPP_SONAME}" -print -quit)"
+# No `-type f`: in this package the SONAME is a symlink (librockchip_mpp.so.1 ->
+# librockchip_mpp.so.0, a deliberate upstream compatibility alias). Resolving it
+# is the point — the loader follows the same link on the device.
+mpp_lib="$(find "${work}/mpp" -name "${MPP_SONAME}" -print -quit)"
 [[ -n "${mpp_lib}" ]] || {
   echo "ERROR: ${MPP_SONAME} not found inside ${MPP_RUNTIME_DEB}" >&2
   exit 1
 }
-echo "pinned MPP runtime: ${MPP_SONAME} from ${MPP_RUNTIME_DEB}"
+mpp_lib="$(readlink -f "${mpp_lib}")"
+[[ -f "${mpp_lib}" ]] || {
+  echo "ERROR: ${MPP_SONAME} in ${MPP_RUNTIME_DEB} resolves to no regular file" >&2
+  exit 1
+}
+echo "pinned MPP runtime: ${MPP_SONAME} -> $(basename "${mpp_lib}") from ${MPP_RUNTIME_DEB}"
 
 nm -D --defined-only "${mpp_lib}" | awk 'NF>1 {print $NF}' | bare_names >"${work}/mpp-exports"
 
