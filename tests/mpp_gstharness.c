@@ -111,35 +111,34 @@ GST_START_TEST(test_encoder_reset_drains_old_packets_before_new_session) {
   GstHarness *h = gst_harness_new("mpph264enc");
   fail_unless(h != NULL);
   g_object_set(h->element, "bitrate", 500, "rc-mode", 1, "zero-copy-pkt", FALSE,
-               NULL);
+               "max-pending", 16, NULL);
   gst_pad_set_chain_function(h->sinkpad,
                              GST_DEBUG_FUNCPTR(capture_reset_output));
   gst_harness_set_src_caps_str(
       h, "video/x-raw,format=NV12,width=320,height=240,framerate=30/1");
   gst_harness_play(h);
 
-  push_reset_frame(h, 0);
-  push_reset_frame(h, 1);
-  push_reset_frame(h, 2);
-  fail_unless(wait_for_uint(mpp_mock_enc_queued_packets, 3),
-              "encoder did not queue all three old-session packets");
+  for (guint i = 0; i < 16; i++)
+    push_reset_frame(h, i);
+  fail_unless(wait_for_uint(mpp_mock_enc_queued_packets, 16),
+              "encoder did not queue the maximum old-session backlog");
 
   mpp_mock_enc_release_packets(1);
   fail_unless(wait_for_uint(read_reset_output_count, 1),
               "first packet did not pause the encoder task");
   fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 1);
-  fail_unless_equals_int(mpp_mock_enc_queue_depth(), 2);
+  fail_unless_equals_int(mpp_mock_enc_queue_depth(), 15);
 
   unsigned reset_generation = mpp_mock_enc_reset_generation() + 1;
   fail_unless(gst_element_set_state(h->element, GST_STATE_READY) !=
               GST_STATE_CHANGE_FAILURE);
   fail_unless(mpp_mock_enc_reset_generation() >= reset_generation);
-  fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 3);
+  fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 16);
   fail_unless_equals_int(mpp_mock_enc_queue_depth(), 0);
-  fail_unless(mpp_mock_enc_empty_polls_for_generation(reset_generation) > 0,
-              "the first reset did not poll its packet queue to empty");
+  fail_unless_equals_int(
+      mpp_mock_enc_empty_polls_for_generation(reset_generation), 1);
   fail_unless_equals_int(mpp_mock_enc_duplicate_dequeues(), 0);
-  fail_unless_equals_int(mpp_mock_enc_packet_deinits(), 3);
+  fail_unless_equals_int(mpp_mock_enc_packet_deinits(), 16);
   fail_unless_equals_int(mpp_mock_enc_packet_double_deinits(), 0);
   fail_unless_equals_int(mpp_mock_enc_live_packets(), 0);
   g_print("reset generation %u drained old packets: dequeued=%u depth=%u "
@@ -158,20 +157,53 @@ GST_START_TEST(test_encoder_reset_drains_old_packets_before_new_session) {
   push_reset_frame(h, 100);
   fail_unless(wait_for_uint(read_reset_output_count, 2),
               "new-session packet was not produced");
-  fail_unless_equals_int(reset_output_ids[1], 4);
+  fail_unless_equals_int(reset_output_ids[1], 17);
   fail_unless_equals_uint64(reset_output_pts[1], 100 * (GST_SECOND / 30));
-  fail_unless(wait_for_uint(mpp_mock_enc_packet_deinits, 4),
+  fail_unless(wait_for_uint(mpp_mock_enc_packet_deinits, 17),
               "new-session packet was not released");
-  fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 4);
+  fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 17);
   fail_unless_equals_int(mpp_mock_enc_queue_depth(), 0);
   fail_unless_equals_int(mpp_mock_enc_duplicate_dequeues(), 0);
-  fail_unless_equals_int(mpp_mock_enc_packet_deinits(), 4);
+  fail_unless_equals_int(mpp_mock_enc_packet_deinits(), 17);
   fail_unless_equals_int(mpp_mock_enc_packet_double_deinits(), 0);
   fail_unless_equals_int(mpp_mock_enc_live_packets(), 0);
   g_print("new session output: packet=%u pts=%" G_GUINT64_FORMAT
           " dequeued=%u depth=%u deinits=%u live=%u\n",
           reset_output_ids[1], reset_output_pts[1],
           mpp_mock_enc_dequeued_packets(), mpp_mock_enc_queue_depth(),
+          mpp_mock_enc_packet_deinits(), mpp_mock_enc_live_packets());
+
+  mpp_mock_enc_arm_reset_drain();
+  atomic_store(&fail_first_reset_output, 1);
+  push_reset_frame(h, 200);
+  push_reset_frame(h, 201);
+  fail_unless(wait_for_uint(mpp_mock_enc_queued_packets, 19),
+              "encoder did not queue the variable-backlog reset packets");
+
+  mpp_mock_enc_release_packets(18);
+  fail_unless(wait_for_uint(read_reset_output_count, 3),
+              "packet 18 did not pause the encoder task");
+  fail_unless_equals_int(reset_output_ids[2], 18);
+  fail_unless_equals_uint64(reset_output_pts[2], 200 * (GST_SECOND / 30));
+  fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 18);
+  fail_unless_equals_int(mpp_mock_enc_queue_depth(), 1);
+
+  reset_generation = mpp_mock_enc_reset_generation() + 1;
+  fail_unless(gst_element_set_state(h->element, GST_STATE_READY) !=
+              GST_STATE_CHANGE_FAILURE);
+  fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 19);
+  fail_unless_equals_int(mpp_mock_enc_queue_depth(), 0);
+  fail_unless_equals_int(
+      mpp_mock_enc_empty_polls_for_generation(reset_generation), 1);
+  fail_unless_equals_int(mpp_mock_enc_packet_deinits(), 19);
+  fail_unless_equals_int(mpp_mock_enc_packet_double_deinits(), 0);
+  fail_unless_equals_int(mpp_mock_enc_live_packets(), 0);
+  fail_unless_equals_int(mpp_mock_enc_duplicate_dequeues(), 0);
+  g_print("reset generation %u variable backlog: dequeued=%u depth=%u "
+          "empty-polls=%u deinits=%u live=%u\n",
+          reset_generation, mpp_mock_enc_dequeued_packets(),
+          mpp_mock_enc_queue_depth(),
+          mpp_mock_enc_empty_polls_for_generation(reset_generation),
           mpp_mock_enc_packet_deinits(), mpp_mock_enc_live_packets());
 
   gst_harness_teardown(h);
