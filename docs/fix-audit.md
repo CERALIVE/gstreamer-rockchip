@@ -658,3 +658,16 @@ All three tests must report `OK` in both runs. The registration test's negative 
 must exit nonzero with `No such element or plugin`, proving plugin-load failures cannot
 produce a false green. Detailed native output is retained by Meson in
 `build/meson-logs/testlog.txt`; CI runs the same commands on bookworm and trixie.
+
+### F27 — crop meta removal pointer type
+
+1. **Provenance SHA** — `fe23e6e` (full SHA recorded in repository history).
+2. **Red/green outputs** — the parent fails in the trixie/GCC-14 compile at
+   `gst_buffer_remove_meta (buffer, crop)` with `-Wincompatible-pointer-types`; the fix
+   compiles both bookworm/GCC-12 and trixie/GCC-14 suites cleanly. PR #8 passed both
+   blocking matrix legs.
+3. **Hardware gate** — `hardware-independent` (the explicit embedded `GstMeta` pointer
+   preserves runtime behavior and requires no device access).
+4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh`; before and after: 67 referenced
+   symbols, empty diff. No MPP entry point changed.
+5. **Reviewer verdict** — `confirmed`.
