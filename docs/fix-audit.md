@@ -152,6 +152,34 @@ the same feature flags CI and `debian/rules` use
    should confirm rather than re-derive it.
    Independently reviewed by a separate agent/model (oracle); confirmed via patch-ID comparison + git range-diff against the fetched upstream source (see `.omo/notepads/gstreamer-rockchip-fork/decisions.md` for the full review record).
 
+### 31ee8bd — SKIP-ALREADY-PRESENT (verify-delta adjudication)
+
+1. **Provenance SHA** — `31ee8bd8a6438ee4030291f3cf0de51fab5995e5`, JeffyCN/mirrors
+   `gstreamer-rockchip`, author `Jeffy Chen <jeffy.chen@rock-chips.com>`:
+   `rockchipmpp: Stop using mpp_frame_get_hor_stride_pixel`. The transient
+   `jeffycn-mirror` remote resolved `gstreamer-rockchip` to
+   `a0d45af504099b4b82f3d3377019a63d357e7cef`; `git show` of the full source
+   commit contains one hunk in `gst/rockchipmpp/gstmpp.c`.
+2. **Per-hunk delta comparison** — all source content is already in the
+   `integration/verified-fix-ledger` baseline, so no cherry-pick or stride
+   semantics change was made.
+
+   | Hunk | Current file:lines | Already present | Evidence quote |
+   | --- | --- | --- | --- |
+   | 1 | `gst/rockchipmpp/gstmpp.c:210-221` | yes | **Pre-state removed:** `git grep -n 'mpp_frame_get_hor_stride_pixel' HEAD -- gst/rockchipmpp` returned no matches; the source parent had `guint hstride = mpp_frame_get_hor_stride_pixel (mframe);`. **Post-state present:** `guint hstride = mpp_frame_get_hor_stride (mframe);`; `struct gst_mpp_format *format = GST_MPP_GET_FORMAT (mpp, mpp_format);`; `if (format)`; `hstride = hstride / format->pixel_stride0;`. |
+
+   **Verdict: `SKIP-ALREADY-PRESENT`.** The sole hunk's removal and addition
+   are both already reflected by the baseline. This independently confirms the
+   `3ccc1e3` wrapper-commit finding; it does not rely on that finding as the
+   adjudication evidence.
+3. **Hardware gate** — `hardware-gated`, drill id `d3-hevc10bit-stride`.
+   H4-B3 remains frozen for the HEVC Main10 A/B board drill; this skip changes
+   no stride calculation.
+4. **MPP ABI closure** — not applicable; no code landed and the baseline's
+   67-symbol, empty-diff closure is unchanged.
+5. **Reviewer verdict** — `self-authored adjudication`. I am the sole author
+   of this hunk-by-hunk comparison; no separate-agent review is claimed here.
+
 ## Mock-MPP verdict: WORKING
 
 The host-only seam builds `tests/mock_mpp.c` as `libmppmock.so` against the same
