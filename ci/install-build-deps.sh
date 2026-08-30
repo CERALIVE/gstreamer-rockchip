@@ -31,6 +31,7 @@ apt-get install -y --no-install-recommends \
   ninja-build \
   pkg-config \
   python3 \
+  gstreamer1.0-tools \
   libgstreamer1.0-dev \
   libgstreamer-plugins-base1.0-dev \
   libglib2.0-dev \
