@@ -354,6 +354,64 @@ the same feature flags CI and `debian/rules` use
    highest-risk allocation-contract port is intentionally left on an open branch
    for independent oracle review and is not self-merged.
 
+### b93ecb6 — RGA DMA32 and used-path hunk adjudication
+
+1. **Provenance SHA and hunk resolution** —
+   `b93ecb63b0e50f4b2220cf5219d88d93ad855a21`, kelvinlawson, author
+   `Kelvin Lawson <kelvin.a.lawson@gmail.com>`, derived upstream from
+   BoxCloudIRL `3b58acf`. The full diff was inspected. Its required DMA32 and
+   used shared-core error behavior already predate this fork baseline as
+   independent commits, so this adaptation adds a regression lock rather than
+   duplicating production code.
+
+   | Upstream hunk | Include/exclude | Current-tree resolution |
+   | --- | --- | --- |
+   | `gstmppallocator.c`: request `MPP_BUFFER_FLAGS_DMA32` for the internal DRM group | include | Already present at `gst_mpp_allocator_new()` from inherited `e53dca6`; pinned MPP 1.5.0-1's installed `mpp_buffer.h` defines the flag as `0x00200000`. Added a mock-MPP assertion that records the real group type and requires the flag. |
+   | `gstmpp.c`: reject unknown MPP-to-RGA formats | include (used decoder RGA path) | Already present from inherited `e4c76e0`; no duplicate edit. |
+   | `gstmpp.c`: reject unknown GstVideoInfo-to-RGA formats | include (used encoder and decoder RGA path) | Already present from inherited `e4c76e0`; no duplicate edit. |
+   | `gstmpp.c`: add YUYV/YVYU/UYVY/VYUY and ARGB-family RGA table entries | exclude from this port | These specific formats are not exercised by cerastream's NV12 encoder/used-decoder paths. The entries already exist from inherited `508af8a` and are left unchanged; this task neither claims nor deep-reviews unused-format quality. |
+   | `gstmpp.c`: route RGB16/BGR16 through swapped RGA formats | exclude from this port | Cerastream does not use these formats. The inherited `b3b7924` behavior is retained unchanged; no unused-element/format quality work was performed. |
+
+2. **Red/green outputs** — `meson test -C build --verbose
+   "rockchipmpp decoder dmabuf caps and pending-frame bound"`, aarch64
+   bookworm/GStreamer 1.22. In a disposable parent-tree copy, removing only the
+   inherited DMA32 flag produced:
+
+   ```
+   internal MPP buffer group type flags: 0x3
+   assertion failed (group_types & MPP_BUFFER_FLAGS_DMA32 ==
+     MPP_BUFFER_FLAGS_DMA32): (0 == 2097152)
+   expected_red_exit=1
+   ```
+
+   With the inherited production code intact:
+
+   ```
+   internal MPP buffer group type flags: 0x200003
+   decoder allocator DMA32 request: OK
+   1/1 rockchipmpp decoder dmabuf caps and pending-frame bound OK
+   ```
+
+   This is a regression lock for an already-present required hunk, not evidence
+   that this task introduced the allocator behavior.
+3. **Hardware gate** — `hardware-gated`, drill id
+   `d5-rga-dma32-allocation-soak`. Todo 26 must run the mandatory F19 136-second
+   allocation drill on the vendor-6.1 board and record both
+   `RGA_BLIT failures == 0` and `rga_api version failures == 0`; the mock proves
+   the requested flag, while only the board proves the allocated address is
+   RGA2-accessible throughout the soak.
+4. **MPP ABI closure** — before and after: 67 MPP symbols referenced and
+   present, empty diff against pinned MPP 1.5.0-1. No production hunk was needed;
+   the mock-only recorder adds no undefined symbol to the plugin.
+5. **Reviewer verdict** — `needs-human-review`. Reviewer == author
+   (self-review); no independent-agent verdict is claimed. Self-review compared
+   every upstream hunk with current blame/history, verified the pinned header in
+   the authoritative bookworm container, and kept unused format-table work out
+   of this adaptation. Because this condition resolves to
+   `SKIP-ALREADY-PRESENT` for production code on the highest-risk contract
+   surface, the branch remains open for independent oracle confirmation and is
+   not self-merged.
+
 ## Mock-MPP verdict: WORKING
 
 The host-only seam builds `tests/mock_mpp.c` as `libmppmock.so` against the same

@@ -24,6 +24,7 @@ unsigned mpp_mock_dec_packet_deinits (void);
 unsigned mpp_mock_dec_wrong_owner_deinits (void);
 unsigned mpp_mock_dec_double_deinits (void);
 unsigned mpp_mock_dec_frame_deinits (void);
+unsigned mpp_mock_internal_group_types (void);
 
 #define DEC_WIDTH 320
 #define DEC_HEIGHT 240
@@ -171,6 +172,25 @@ test_dma_drm_peer_selects_dma_drm_caps (void)
 #endif
 
 static void
+test_decoder_allocator_requests_dma32 (void)
+{
+  GstHarness *h = start_decoder (FALSE);
+  unsigned group_types;
+
+  g_print ("== decoder allocator DMA32 request ==\n");
+
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (0)), ==, GST_FLOW_OK);
+  g_assert_true (wait_for_outputs (1));
+  group_types = mpp_mock_internal_group_types ();
+  g_print ("internal MPP buffer group type flags: 0x%x\n", group_types);
+  g_assert_cmpuint (group_types & MPP_BUFFER_FLAGS_DMA32, ==,
+      MPP_BUFFER_FLAGS_DMA32);
+
+  stop_decoder (h);
+  g_print ("decoder allocator DMA32 request: OK\n");
+}
+
+static void
 test_packet_ownership_is_decided_before_send (void)
 {
   GstHarness *h = start_decoder (FALSE);
@@ -316,6 +336,7 @@ main (int argc, char **argv)
 #else
   g_print ("DMA_DRM peer caps negotiation: SKIP (requires GStreamer >= 1.24)\n");
 #endif
+  test_decoder_allocator_requests_dma32 ();
   test_unmatched_pts_pending_list_is_bounded ();
 
   g_print ("mpp-decoder-seam: OK\n");

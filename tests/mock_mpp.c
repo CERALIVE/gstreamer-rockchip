@@ -71,6 +71,7 @@ static atomic_uint dec_packet_deinits;
 static atomic_uint dec_wrong_owner_deinits;
 static atomic_uint dec_double_deinits;
 static atomic_uint dec_frame_deinits;
+static atomic_uint internal_group_types;
 static MockPacket *packet_allocs;
 static RK_U32 dec_width = 320;
 static RK_U32 dec_height = 240;
@@ -242,8 +243,8 @@ static MPP_RET encode_get(MppCtx c, MppPacket *p) {
 MPP_RET mpp_buffer_group_get(MppBufferGroup *group, MppBufferType type,
                              MppBufferMode mode, const char *tag,
                              const char *caller) {
-  (void)type;
-  (void)mode;
+  if (mode == MPP_BUFFER_INTERNAL)
+    atomic_fetch_or(&internal_group_types, (unsigned)type);
   (void)tag;
   (void)caller;
   *group = calloc(1, 8);
@@ -615,6 +616,7 @@ void mpp_mock_dec_arm(unsigned width, unsigned height) {
   atomic_store(&dec_wrong_owner_deinits, 0);
   atomic_store(&dec_double_deinits, 0);
   atomic_store(&dec_frame_deinits, 0);
+  atomic_store(&internal_group_types, 0);
   atomic_store(&dec_enabled, 1);
 }
 void mpp_mock_dec_disarm(void) {
@@ -653,6 +655,9 @@ unsigned mpp_mock_dec_double_deinits(void) {
 }
 unsigned mpp_mock_dec_frame_deinits(void) {
   return atomic_load(&dec_frame_deinits);
+}
+unsigned mpp_mock_internal_group_types(void) {
+  return atomic_load(&internal_group_types);
 }
 void mpp_mock_reset(void) {
   memset(control_counts, 0, sizeof(control_counts));
