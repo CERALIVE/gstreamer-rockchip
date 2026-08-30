@@ -1,0 +1,45 @@
+# Active source-derived encoder contract.
+# Provenance: CERALIVE/gstreamer-rockchip inherited cf155b3 before fork point 755aeb9.
+# Format: element<TAB>normalized golden line. Values remain raw bits per second.
+mpph264enc	rank=257
+mpph264enc	property.bitrate.type=Unsigned Integer
+mpph264enc	property.bitrate.default=0
+mpph264enc	property.bitrate.range=0..2147483647
+mpph264enc	property.zero-copy-pkt.type=Boolean
+mpph264enc	property.zero-copy-pkt.default=true
+mpph264enc	property.rc-mode.type=Enum(GstMppEncRcMode)
+mpph264enc	property.rc-mode.default=1:cbr
+mpph264enc	property.rc-mode.enum_nicks=vbr,cbr,fixqp
+mpph264enc	property.qp-max.type=Unsigned Integer
+mpph264enc	property.qp-max.default=0
+mpph264enc	property.qp-max.range=0..51
+mpph264enc	property.gop.type=Integer
+mpph264enc	property.gop.default=-1
+mpph264enc	property.gop.range=-1..2147483647
+mpph264enc	property.width.type=Unsigned Integer
+mpph264enc	property.width.default=0
+mpph264enc	property.width.range=0..2147483647
+mpph264enc	property.height.type=Unsigned Integer
+mpph264enc	property.height.default=0
+mpph264enc	property.height.range=0..2147483647
+mpph265enc	rank=257
+mpph265enc	property.bitrate.type=Unsigned Integer
+mpph265enc	property.bitrate.default=0
+mpph265enc	property.bitrate.range=0..2147483647
+mpph265enc	property.zero-copy-pkt.type=Boolean
+mpph265enc	property.zero-copy-pkt.default=true
+mpph265enc	property.rc-mode.type=Enum(GstMppEncRcMode)
+mpph265enc	property.rc-mode.default=1:cbr
+mpph265enc	property.rc-mode.enum_nicks=vbr,cbr,fixqp
+mpph265enc	property.qp-max.type=Unsigned Integer
+mpph265enc	property.qp-max.default=0
+mpph265enc	property.qp-max.range=0..51
+mpph265enc	property.gop.type=Integer
+mpph265enc	property.gop.default=-1
+mpph265enc	property.gop.range=-1..2147483647
+mpph265enc	property.width.type=Unsigned Integer
+mpph265enc	property.width.default=0
+mpph265enc	property.width.range=0..2147483647
+mpph265enc	property.height.type=Unsigned Integer
+mpph265enc	property.height.default=0
+mpph265enc	property.height.range=0..2147483647
