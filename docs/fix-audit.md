@@ -827,19 +827,32 @@ refuted the second, so it was not applied. Recorded here rather than dropped sil
 
    ```
    mutant: restore the outer `super_mode != NONE` guard
-     cleared I threshold reached MPP as 90000, expected an unreachable one
+     disabled clear: I threshold reached MPP as 90000, expected 4294967295
    mutant: write the raw property value (no unset mapping)
-     cleared I threshold reached MPP as 0, expected an unreachable one
+     disabled clear: I threshold reached MPP as 0, expected 4294967295
+   mutant: write the thresholds after MPP_ENC_SET_CFG instead of before
+     enable: I threshold reached MPP as 4294967295, expected 90000
    ```
 
    The first is the stale-threshold resurrection the guard causes; the second is the
-   always-trigger value. Neither was caught by the original test, which only checked
-   that a stored value equalled zero.
-3. **Hardware gate** — `hardware-independent`. Whether the write reaches MPP's config
-   object is fully observable in the mock; no board behaviour is claimed. Note the limit
-   of that: the mock records config, it does not run MPP's rate controller, so the test
-   asserts the boundary value MPP's own comparison requires rather than observing a
-   classification. The comparison is quoted from the pinned source at the assertion.
+   always-trigger value; the third is a delivery reordering. None was caught by the
+   original test, which only checked that a stored value equalled zero.
+
+   The third deserves a note, because closing it changed how the test reads its
+   evidence. It first asserted through the mock's live `MppEncCfg` handle, which
+   `cfg_set()` mutates in place — that measures "a setter ran", not "the value was
+   delivered". Demonstrated rather than argued: with the earlier assertions the
+   delivery-reordering mutant passes the whole suite (`Ok: 3, Fail: 0`); with the
+   snapshot assertions it fails as above. Each phase now also asserts that a *new*
+   record appeared, so a pass that delivers nothing at all cannot read a stale one.
+3. **Hardware gate** — `hardware-independent`. What reaches MPP is fully observable in
+   the mock; no board behaviour is claimed. Two limits stated explicitly: the mock
+   records config but does not run MPP's rate controller, so the test asserts the
+   boundary value MPP's own comparison requires rather than observing a classification
+   (the comparison is quoted from the pinned source at the assertion); and the
+   assertions read the snapshot the mock takes **inside its `MPP_ENC_SET_CFG` handler**,
+   not the live `MppEncCfg` object, so they measure delivery rather than merely that a
+   setter was called.
 4. **MPP ABI closure** — before and after: 67 referenced symbols, empty diff. Removing
    a C `if` changes no symbol.
 5. **Reviewer verdict** — `confirmed` for `scene-mode`, `anti-flicker` and
@@ -855,8 +868,20 @@ refuted the second, so it was not applied. Recorded here rather than dropped sil
 
    Pre-existing defect surfaced by that analysis, worth recording separately: because
    both thresholds default to 0, enabling `super-mode=drop` *without* setting a threshold
-   marks every frame super and drops it. That is true on the parent commit too — it is
-   not a regression introduced here, and it is now fixed by the same mapping.
+   makes MPP classify **every** frame as super. The consequence is not a uniform drop —
+   `rc_model_v2.c:1751-1756` exempts intra frames before applying the drop mode:
+
+   ```c
+   MppEncRcDropFrmMode drop_mode = usr_cfg->drop_mode;
+   if (frm->is_intra)
+       drop_mode = MPP_ENC_RC_DROP_FRM_DISABLED;
+   ```
+
+   so P-frames take the `DROP_FRM_NORMAL` branch and are dropped, while intra frames fall
+   through to the disabled branch and may be re-encoded instead. (The `drop_gap`
+   escape on the next line cannot help either: `check_super_frame` zeroes `drop_gap`,
+   and the guard requires it to be non-zero.) That is true on the parent commit too — it
+   is not a regression introduced here, and it is now fixed by the same mapping.
 
    Intra-refresh was examined and deliberately left alone: its zero path already writes
    `rc:refresh_en = 0`, so the reset works and there was nothing to fix. Reviewer ==
@@ -920,15 +945,32 @@ refuted the second, so it was not applied. Recorded here rather than dropped sil
    - *Reported, not closed.* Round-1 review gave a counterexample —
      `width=2^29, height=2^30, fps=256` wrapping `guint64` before the clamp is tested.
      The arithmetic is now bounded step-wise so the wrap cannot occur, but **that change
-     is not covered by a test, because the input is unreachable.**
-     `gst_video_info_from_caps()` rejects any geometry whose frame size passes roughly
-     `G_MAXINT`; measured, 32768x32768 is accepted (1610612736 bytes) and 65536x65536 is
-     refused, as is 16777216x256. The largest reachable frame term is therefore ~2^27,
-     and scaling it by the 256 `fps-out` ceiling reaches ~2^35 — nowhere near a `guint64`
-     wrap. A mutant reverting the step-wise bound to the previous post-hoc clamp
-     **survives the suite**, and is recorded here as surviving rather than papered over.
-     The change is kept as defensive correctness: the helper takes raw `gint` dimensions
-     and should not depend on its only current caller's validation for soundness.
+     is not covered by a test, because the input is unreachable.** A mutant reverting the
+     step-wise bound to the previous post-hoc clamp **survives the suite**, and is
+     recorded here as surviving rather than papered over. The change is kept as defensive
+     correctness: the helper takes raw `gint` dimensions and should not depend on its only
+     current caller's validation for soundness.
+
+     The reachable bound is set by `gst_video_info_from_caps()`, and it is
+     **format-dependent** — it checks `round_up_128(width) * height` against
+     `G_MAXUINT / bpp`, so there is no single ceiling and none of this is a property of
+     this element. Measured by binary search on both suites (identical results under
+     GStreamer 1.22.0 and 1.26.2):
+
+     | format | max area (px) | max frame term (area/8) |
+     |--------|---------------|-------------------------|
+     | NV12   | ~1,431,655,424 | ~178,956,928 |
+     | BGR    | ~1,431,655,424 | ~178,956,928 |
+     | RGB16  | ~2,147,482,624 | ~268,435,328 |
+     | RGBA   | ~1,073,740,800 | ~134,217,600 |
+
+     So the largest frame term this element can be handed is ~268,435,328 (RGB16), not
+     the single `~2^27` figure claimed in the previous revision of this row, which
+     understated it and wrongly implied one universal limit. Scaled by the `fps-out`
+     ceiling of 256 that reaches ~2^36 — still nowhere near a `guint64` wrap, so the
+     conclusion is unchanged even though the numbers were wrong.
+     `test_auto_bitrate_saturates_at_a_large_nv12_geometry` is named for what it is: a
+     large NV12 geometry, not a universal maximum.
 3. **Hardware gate** — `hardware-independent`. Every assertion is about which value the
    plugin computes and hands to MPP. Note the overflow case remains
    REAL-BUT-UNREACHABLE-ON-TARGET per the wave-2 verdict: 8192x8192 at the `fps-out`
