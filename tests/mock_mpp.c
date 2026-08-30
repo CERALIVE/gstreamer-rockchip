@@ -75,6 +75,7 @@ static atomic_uint internal_group_types;
 static MockPacket *packet_allocs;
 static RK_U32 dec_width = 320;
 static RK_U32 dec_height = 240;
+static atomic_int dec_frame_format;
 /* Kept far BELOW every input PTS so the decoder's display-order matcher filters
  * each pending frame out as "future" and settles on no match. Nonzero is
  * load-bearing: gstmppdec.c remaps a zero PTS to GST_CLOCK_TIME_NONE, which
@@ -134,7 +135,7 @@ static MockFrame *dec_new_frame(RK_S64 pts, RK_U32 info_change) {
   MockFrame *f = calloc(1, sizeof(*f));
   if (!f)
     return NULL;
-  f->format = MPP_FMT_YUV420SP;
+  f->format = (MppFrameFormat)atomic_load(&dec_frame_format);
   f->width = dec_width;
   f->height = dec_height;
   f->horizontal_stride = dec_width;
@@ -602,6 +603,7 @@ unsigned mpp_mock_frame_set_buffer_count(void) {
 void mpp_mock_dec_arm(unsigned width, unsigned height) {
   dec_width = (RK_U32)width;
   dec_height = (RK_U32)height;
+  atomic_store(&dec_frame_format, MPP_FMT_YUV420SP);
   atomic_store(&dec_info_change_sent, 0);
   atomic_store(&dec_queued, 0);
   atomic_store(&dec_outputs, 0);
@@ -629,6 +631,9 @@ void mpp_mock_dec_disarm(void) {
 }
 unsigned mpp_mock_dec_queued(void) { return atomic_load(&dec_queued); }
 unsigned mpp_mock_dec_outputs(void) { return atomic_load(&dec_outputs); }
+void mpp_mock_dec_set_frame_format(MppFrameFormat format) {
+  atomic_store(&dec_frame_format, format);
+}
 void mpp_mock_dec_set_put_result(unsigned buffer_full_count,
                                  MPP_RET terminal) {
   atomic_store(&dec_buffer_full_remaining, buffer_full_count);

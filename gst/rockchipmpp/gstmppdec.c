@@ -477,7 +477,8 @@ gst_mpp_dec_update_video_info (GstVideoDecoder * decoder, GstVideoFormat format,
      * then let the peer choose. Keep the existing output_state->info intact:
      * only its caps participate in this negotiation. If the peer is not ready
      * yet, retain the sysmem caps so a later RECONFIGURE can retry. */
-    if (gst_video_info_dma_drm_from_video_info (&drm_info,
+    if (!afbc && !rfbc &&
+        gst_video_info_dma_drm_from_video_info (&drm_info,
             &output_state->info, 0)) {
       GstCaps *drm_caps = gst_video_info_dma_drm_to_caps (&drm_info);
 
@@ -507,6 +508,10 @@ gst_mpp_dec_update_video_info (GstVideoDecoder * decoder, GstVideoFormat format,
           gst_caps_unref (peer_caps);
         }
       }
+    } else if (afbc || rfbc) {
+      /* Private compression flags have no matching DRM modifier yet. */
+      gst_caps_set_features (output_state->caps, 0,
+          gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_DMABUF, NULL));
     }
 #else
     /*

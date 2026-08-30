@@ -15,6 +15,7 @@
 void mpp_mock_dec_arm (unsigned width, unsigned height);
 void mpp_mock_dec_disarm (void);
 unsigned mpp_mock_dec_outputs (void);
+void mpp_mock_dec_set_frame_format (MppFrameFormat format);
 void mpp_mock_dec_set_put_result (unsigned buffer_full_count, MPP_RET terminal);
 unsigned mpp_mock_dec_put_calls (void);
 void mpp_mock_dec_set_next_packet_has_buffer (int has_buffer);
@@ -80,6 +81,22 @@ wait_for_frame_deinits (guint want)
   return TRUE;
 }
 
+static GstCaps *
+wait_for_current_src_caps (GstHarness * h)
+{
+  gint64 deadline = g_get_monotonic_time () + DRAIN_TIMEOUT_US;
+  GstCaps *caps;
+
+  while (!(caps = gst_pad_get_current_caps (
+              GST_VIDEO_DECODER_SRC_PAD (h->element)))) {
+    if (g_get_monotonic_time () > deadline)
+      return NULL;
+    g_usleep (1000);
+  }
+
+  return caps;
+}
+
 static guint
 pending_frame_count (GstHarness * h)
 {
@@ -135,6 +152,41 @@ negotiated_caps_have_dmabuf (gboolean dma_feature)
 }
 
 #if GST_CHECK_VERSION(1, 24, 0)
+static GstHarness *
+start_afbc_decoder (void)
+{
+  GstHarness *h = gst_harness_new ("mppvideodec");
+
+  g_assert_nonnull (h);
+  g_object_set (h->element, "dma-feature", TRUE, "fbc", TRUE, NULL);
+  mpp_mock_dec_arm (DEC_WIDTH, DEC_HEIGHT);
+  mpp_mock_dec_set_frame_format (
+      MPP_FMT_YUV420SP | MPP_FRAME_FBC_AFBC_V2);
+  gst_harness_set_src_caps_str (h, SINK_CAPS_STR);
+  return h;
+}
+
+static gboolean
+query_dma_drm_only (GstPad * pad, GstObject * parent, GstQuery * query)
+{
+  if (GST_QUERY_TYPE (query) == GST_QUERY_CAPS) {
+    GstCaps *accepted = gst_caps_from_string (
+        "video/x-raw(memory:DMABuf),format=(string)DMA_DRM");
+    GstCaps *result;
+    GstCaps *filter;
+
+    gst_query_parse_caps (query, &filter);
+    result = filter ? gst_caps_intersect_full (accepted, filter,
+        GST_CAPS_INTERSECT_FIRST) : gst_caps_ref (accepted);
+    gst_query_set_caps_result (query, result);
+    gst_caps_unref (result);
+    gst_caps_unref (accepted);
+    return TRUE;
+  }
+
+  return gst_pad_query_default (pad, parent, query);
+}
+
 static void
 test_dma_drm_peer_selects_dma_drm_caps (void)
 {
@@ -168,6 +220,40 @@ test_dma_drm_peer_selects_dma_drm_caps (void)
   gst_caps_unref (caps);
   stop_decoder (h);
   g_print ("DMA_DRM peer caps negotiation: OK\n");
+}
+
+static void
+test_afbc_output_is_never_advertised_as_linear_dma_drm (void)
+{
+  GstHarness *h = start_afbc_decoder ();
+  GstCaps *caps;
+  const GstStructure *structure;
+  const gchar *format;
+  gint afbc = 0;
+  gchar *caps_str;
+
+  g_print ("== AFBC output rejects linear DMA_DRM caps ==\n");
+
+  gst_pad_set_query_function (h->sinkpad,
+      GST_DEBUG_FUNCPTR (query_dma_drm_only));
+
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (0)), ==, GST_FLOW_OK);
+  caps = wait_for_current_src_caps (h);
+  g_assert_nonnull (caps);
+  structure = gst_caps_get_structure (caps, 0);
+  format = gst_structure_get_string (structure, "format");
+  caps_str = gst_caps_to_string (caps);
+  g_print ("AFBC frame with DMA_DRM query peer -> negotiated caps %s\n",
+      caps_str);
+
+  g_assert_cmpstr (format, !=, "DMA_DRM");
+  g_assert_true (gst_structure_get_int (structure, "arm-afbc", &afbc));
+  g_assert_cmpint (afbc, ==, 1);
+
+  g_free (caps_str);
+  gst_caps_unref (caps);
+  stop_decoder (h);
+  g_print ("AFBC output rejects linear DMA_DRM caps: OK\n");
 }
 #endif
 
@@ -333,6 +419,7 @@ main (int argc, char **argv)
   test_dma_feature_reaches_negotiated_caps ();
 #if GST_CHECK_VERSION(1, 24, 0)
   test_dma_drm_peer_selects_dma_drm_caps ();
+  test_afbc_output_is_never_advertised_as_linear_dma_drm ();
 #else
   g_print ("DMA_DRM peer caps negotiation: SKIP (requires GStreamer >= 1.24)\n");
 #endif
