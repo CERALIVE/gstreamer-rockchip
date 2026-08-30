@@ -27,3 +27,33 @@ rockchipmpp = library('gstrockchipmpp',
   install : true,
   install_dir : plugins_install_dir,
 )
+
+
+mock_mpp = shared_library('mppmock', '../../tests/mock_mpp.c',
+  c_args : ['-fvisibility=default'],
+  dependencies : [mpp_dep], install : false)
+
+gstcheck_dep = dependency('gstreamer-check-1.0', version : gst_req)
+mpp_harness = executable('mpp-gstharness', '../../tests/mpp_gstharness.c',
+  dependencies : [gst_dep, gstvideo_dep, gstcheck_dep, mpp_dep],
+  link_with : mock_mpp)
+
+test('rockchipmpp GstHarness factories and caps', mpp_harness,
+  depends : [rockchipmpp, mock_mpp],
+  env : [
+    'GST_PLUGIN_PATH=' + meson.project_build_root() / 'gst/rockchipmpp',
+    'MPP_MOCK_LOG=' + meson.project_build_root() / 'mpp-mock-harness.log',
+    'LD_PRELOAD=' + meson.project_build_root() / 'gst/rockchipmpp/libmppmock.so',
+  ],
+  workdir : meson.project_build_root(),
+  is_parallel : false)
+
+test('rockchipmpp plugin registration and properties',
+  find_program('../../tests/plugin_tests.sh'),
+  env : [
+    'MESON_BUILD_ROOT=' + meson.project_build_root(),
+    'MESON_SOURCE_ROOT=' + meson.project_source_root(),
+  ],
+  depends : [rockchipmpp, mock_mpp],
+  workdir : meson.project_build_root(),
+  is_parallel : false)
