@@ -805,28 +805,27 @@ gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
   }
 
   /* Super-frame: bound a single coded frame's size so a scene cut / keyframe
-   * cannot spike the send buffer. */
+   * cannot spike the send buffer. Thresholds are written unconditionally: 0
+   * means "auto", and MPP keeps the last value it was given, so skipping the
+   * write for 0 would leave the previous threshold in force forever. */
   gst_mpp_enc_cfg_set_u32 (self, "rc:super_mode", properties.super_mode);
-  if (properties.super_mode != MPP_ENC_RC_SUPER_FRM_NONE) {
-    if (properties.super_i_thd)
-      gst_mpp_enc_cfg_set_u32 (self, "rc:super_i_thd", properties.super_i_thd);
-    if (properties.super_p_thd)
-      gst_mpp_enc_cfg_set_u32 (self, "rc:super_p_thd", properties.super_p_thd);
-  }
+  gst_mpp_enc_cfg_set_u32 (self, "rc:super_i_thd", properties.super_i_thd);
+  gst_mpp_enc_cfg_set_u32 (self, "rc:super_p_thd", properties.super_p_thd);
 
   /* De-breathing: smooths the GOP bitrate breathing oscillation. */
   gst_mpp_enc_cfg_set_u32 (self, "rc:debreath_en", properties.debreath ? 1 : 0);
-  if (properties.debreath)
-    gst_mpp_enc_cfg_set_u32 (self, "rc:debreath_strength",
-        properties.debreath_strength);
+  gst_mpp_enc_cfg_set_u32 (self, "rc:debreath_strength",
+      properties.debreath_strength);
 
-  /* Content-adaptive tuning. Only emitted when set away from default so older
-   * MPP builds that lack these keys are unaffected. */
-  if (properties.scene_mode)
-    gst_mpp_enc_cfg_set_s32 (self, "tune:scene_mode", properties.scene_mode);
-  if (properties.anti_flicker)
-    gst_mpp_enc_cfg_set_s32 (self, "tune:anti_flicker_str",
-        properties.anti_flicker);
+  /* Content-adaptive tuning. Written on every apply, including at 0: these are
+   * the values an operator steps back down to turn the tuning off, and MPP has
+   * no notion of "unset" -- it keeps whatever it was last told. The keys are
+   * part of the pinned MPP's config surface, and gst_mpp_enc_cfg_set_* now
+   * reports a build that disagrees rather than letting the write vanish. */
+  gst_mpp_enc_cfg_set_s32 (self, "tune:scene_mode", properties.scene_mode);
+  gst_mpp_enc_cfg_set_s32 (self, "tune:anti_flicker_str",
+      properties.anti_flicker);
+
   if (self->cfg_error) {
     GST_ERROR_OBJECT (self, "refusing to apply a config MPP partly rejected");
     return FALSE;

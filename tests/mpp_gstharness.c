@@ -489,6 +489,35 @@ GST_START_TEST(test_rejected_config_key_fails_the_apply) {
 }
 GST_END_TEST
 
+GST_START_TEST(test_zero_valued_tuning_resets_reach_mpp) {
+  mpp_mock_reset();
+  GstHarness *h =
+      start_encoder_harness("video/x-raw,format=NV12,width=320,height=240,"
+                            "framerate=30/1");
+  g_object_set(h->element, "bitrate", 500, "scene-mode", 1, "anti-flicker", 3,
+               "super-mode", 1, "super-i-thd", 90000, "super-p-thd", 30000,
+               "debreath", TRUE, "debreath-strength", 20, NULL);
+  push_runtime_property_frame(h, 0);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("tune:scene_mode"), 1);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("tune:anti_flicker_str"), 3);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_i_thd"), 90000);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_p_thd"), 30000);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:debreath_strength"), 20);
+
+  g_object_set(h->element, "scene-mode", 0, "anti-flicker", 0, "super-i-thd", 0,
+               "super-p-thd", 0, "debreath-strength", 0, NULL);
+  push_runtime_property_frame(h, 1);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("tune:scene_mode"), 0);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("tune:anti_flicker_str"), 0);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_i_thd"), 0);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_p_thd"), 0);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:debreath_strength"), 0);
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
 GST_START_TEST(test_h264_encoder_lifecycle) {
   mpp_mock_reset();
   check_encoder_lifecycle("mpph264enc");
@@ -508,6 +537,7 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_video_decoder_caps_truth);
   tcase_add_test(tc, test_drop_threshold_uses_the_key_mpp_actually_registers);
   tcase_add_test(tc, test_rejected_config_key_fails_the_apply);
+  tcase_add_test(tc, test_zero_valued_tuning_resets_reach_mpp);
   tcase_add_test(tc, test_h264_encoder_lifecycle);
   tcase_add_test(tc, test_h265_encoder_lifecycle);
   tcase_add_test(
