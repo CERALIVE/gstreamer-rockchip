@@ -5,7 +5,7 @@
 #include <rockchip/rk_mpi_cmd.h>
 #include <stdatomic.h>
 extern int mpp_mock_last_cfg_s32(const char *name);
-extern int64_t mpp_mock_last_cfg_value(const char *name);
+extern int64_t mpp_mock_enc_cfg_record_value(unsigned index, const char *name);
 extern unsigned mpp_mock_enc_cfg_record_count(void);
 extern unsigned mpp_mock_enc_cfg_record_dropped(void);
 extern int mpp_mock_enc_cfg_record_s32(unsigned index, const char *name);
@@ -525,47 +525,58 @@ GST_END_TEST
  * SUPER_FRM_DROP that same branch rewrites the rate controller's drop_mode.
  * "Unset" therefore has to reach MPP as a threshold nothing attains.
  */
+static unsigned delivered_enc_cfg(unsigned before, const char *phase) {
+  unsigned now = mpp_mock_enc_cfg_record_count();
+  fail_unless(now > before, "%s: nothing was delivered to MPP_ENC_SET_CFG",
+              phase);
+  return now - 1;
+}
+
+static void check_super_thresholds(unsigned record, const char *phase,
+                                   gint mode, gint64 i_thd, gint64 p_thd) {
+  fail_unless_equals_int(mpp_mock_enc_cfg_record_s32(record, "rc:super_mode"),
+                         mode);
+  fail_unless(mpp_mock_enc_cfg_record_value(record, "rc:super_i_thd") == i_thd,
+              "%s: I threshold reached MPP as %" G_GINT64_FORMAT
+              ", expected %" G_GINT64_FORMAT,
+              phase, mpp_mock_enc_cfg_record_value(record, "rc:super_i_thd"),
+              i_thd);
+  fail_unless(mpp_mock_enc_cfg_record_value(record, "rc:super_p_thd") == p_thd,
+              "%s: P threshold reached MPP as %" G_GINT64_FORMAT
+              ", expected %" G_GINT64_FORMAT,
+              phase, mpp_mock_enc_cfg_record_value(record, "rc:super_p_thd"),
+              p_thd);
+}
+
 GST_START_TEST(test_super_frame_thresholds_reset_to_unreachable_not_zero) {
   mpp_mock_reset();
   GstHarness *h =
       start_encoder_harness("video/x-raw,format=NV12,width=320,height=240,"
                             "framerate=30/1");
+
+  unsigned before = mpp_mock_enc_cfg_record_count();
   g_object_set(h->element, "bitrate", 500, "super-mode", 1, "super-i-thd",
                90000, "super-p-thd", 30000, NULL);
   push_runtime_property_frame(h, 0);
-
-  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_mode"), 1);
-  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_i_thd"), 90000);
-  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_p_thd"), 30000);
+  check_super_thresholds(delivered_enc_cfg(before, "enable"), "enable", 1,
+                         90000, 30000);
 
   /* Thresholds cleared while the mode is OFF must still reach MPP, or they
    * resurrect at the next enable. */
+  before = mpp_mock_enc_cfg_record_count();
   g_object_set(h->element, "super-mode", 0, "super-i-thd", 0, "super-p-thd", 0,
                NULL);
   push_runtime_property_frame(h, 1);
-
-  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_mode"), 0);
-  fail_unless(mpp_mock_last_cfg_value("rc:super_i_thd") == 0xFFFFFFFFLL,
-              "cleared I threshold reached MPP as %" G_GINT64_FORMAT
-              ", expected an unreachable one",
-              mpp_mock_last_cfg_value("rc:super_i_thd"));
-  fail_unless(mpp_mock_last_cfg_value("rc:super_p_thd") == 0xFFFFFFFFLL,
-              "cleared P threshold reached MPP as %" G_GINT64_FORMAT
-              ", expected an unreachable one",
-              mpp_mock_last_cfg_value("rc:super_p_thd"));
+  check_super_thresholds(delivered_enc_cfg(before, "disabled clear"),
+                         "disabled clear", 0, 0xFFFFFFFFLL, 0xFFFFFFFFLL);
 
   /* Re-enabling must neither restore the old thresholds nor hand MPP a 0 that
    * classifies every frame as super. */
+  before = mpp_mock_enc_cfg_record_count();
   g_object_set(h->element, "super-mode", 1, NULL);
   push_runtime_property_frame(h, 2);
-
-  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_mode"), 1);
-  fail_unless(mpp_mock_last_cfg_value("rc:super_i_thd") == 0xFFFFFFFFLL,
-              "re-enabled with I threshold %" G_GINT64_FORMAT,
-              mpp_mock_last_cfg_value("rc:super_i_thd"));
-  fail_unless(mpp_mock_last_cfg_value("rc:super_p_thd") == 0xFFFFFFFFLL,
-              "re-enabled with P threshold %" G_GINT64_FORMAT,
-              mpp_mock_last_cfg_value("rc:super_p_thd"));
+  check_super_thresholds(delivered_enc_cfg(before, "re-enable"), "re-enable", 1,
+                         0xFFFFFFFFLL, 0xFFFFFFFFLL);
   gst_harness_teardown(h);
 }
 GST_END_TEST
@@ -623,10 +634,11 @@ GST_END_TEST
  * a real frame at these geometries is 100MB and 1.6GB respectively.
  *
  * 8192x8192 at the 256 fps-out ceiling puts width*height/8*fps at exactly 2^31,
- * the boundary where 32-bit arithmetic turns negative. 32768x32768 is the
- * largest geometry GStreamer itself accepts (gst_video_info_from_caps rejects
- * anything whose frame size passes ~G_MAXINT), so it is the true upper bound of
- * what this element can ever be handed.
+ * the boundary where 32-bit arithmetic turns negative. 32768x32768 is simply a
+ * large geometry GStreamer accepts for NV12; it is not a universal ceiling,
+ * because gst_video_info_from_caps() bounds the frame by format
+ * (round_up_128(width) * height against G_MAXUINT / bpp), so the limit differs
+ * per format and is not a property of this element.
  */
 static void check_auto_bitrate_saturates(const char *caps) {
   mpp_mock_reset();
@@ -651,7 +663,7 @@ GST_START_TEST(test_auto_bitrate_clamps_instead_of_overflowing) {
 }
 GST_END_TEST
 
-GST_START_TEST(test_auto_bitrate_saturates_at_the_largest_accepted_geometry) {
+GST_START_TEST(test_auto_bitrate_saturates_at_a_large_nv12_geometry) {
   check_auto_bitrate_saturates(
       "video/x-raw,format=NV12,width=32768,height=32768,framerate=30/1");
 }
@@ -743,7 +755,7 @@ Suite *mpp_gstharness_suite(void) {
                  test_auto_bitrate_recomputes_for_runtime_resolution_property);
   tcase_add_test(tc, test_auto_bitrate_keeps_the_zero_sentinel);
   tcase_add_test(tc, test_auto_bitrate_clamps_instead_of_overflowing);
-  tcase_add_test(tc, test_auto_bitrate_saturates_at_the_largest_accepted_geometry);
+  tcase_add_test(tc, test_auto_bitrate_saturates_at_a_large_nv12_geometry);
   tcase_add_test(tc, test_gop_and_auto_bitrate_follow_fps_out);
   tcase_add_test(tc, test_h264_encoder_lifecycle);
   tcase_add_test(tc, test_h265_encoder_lifecycle);

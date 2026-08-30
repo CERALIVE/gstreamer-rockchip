@@ -25,6 +25,9 @@ typedef struct {
   int bps_target;
   int bps_min;
   int bps_max;
+  int super_mode;
+  int64_t super_i_thd;
+  int64_t super_p_thd;
 } MockEncCfgRecord;
 /* Real MPP resolves a config key through a trie and answers MPP_NOK for a name
  * it does not know, writing nothing. Tests arm a name here to reproduce that
@@ -191,6 +194,10 @@ static int cfg_read_s32(MppEncCfg cfg, const char *name) {
   CfgEntry *entry = cfg_find(cfg, name);
   return entry ? (int)entry->value : INT32_MIN;
 }
+static int64_t cfg_read_value(MppEncCfg cfg, const char *name) {
+  CfgEntry *entry = cfg_find(cfg, name);
+  return entry ? entry->value : INT64_MIN;
+}
 static void record_enc_cfg(MppEncCfg cfg) {
   enc_cfg_record_acquire();
   if (enc_cfg_record_count < ENC_CFG_RECORD_CAPACITY) {
@@ -198,6 +205,9 @@ static void record_enc_cfg(MppEncCfg cfg) {
     record->bps_target = cfg_read_s32(cfg, "rc:bps_target");
     record->bps_min = cfg_read_s32(cfg, "rc:bps_min");
     record->bps_max = cfg_read_s32(cfg, "rc:bps_max");
+    record->super_mode = cfg_read_s32(cfg, "rc:super_mode");
+    record->super_i_thd = cfg_read_value(cfg, "rc:super_i_thd");
+    record->super_p_thd = cfg_read_value(cfg, "rc:super_p_thd");
   } else {
     enc_cfg_record_dropped++;
   }
@@ -813,12 +823,7 @@ int mpp_mock_cfg_get_s32(MppEncCfg c, const char *n) {
 int mpp_mock_last_cfg_s32(const char *n) {
   return last_cfg ? mpp_mock_cfg_get_s32(last_cfg, n) : INT32_MIN;
 }
-/* Full stored width, so a test can assert an exact u32 the s32 accessor would
- * truncate (a 0xFFFFFFFF threshold reads back as -1 through that one). */
-int64_t mpp_mock_last_cfg_value(const char *n) {
-  CfgEntry *e = last_cfg ? cfg_find(last_cfg, n) : NULL;
-  return e ? e->value : INT64_MIN;
-}
+
 unsigned mpp_mock_enc_cfg_record_count(void) {
   enc_cfg_record_acquire();
   unsigned count = enc_cfg_record_count;
@@ -842,6 +847,23 @@ int mpp_mock_enc_cfg_record_s32(unsigned index, const char *name) {
       value = record->bps_min;
     else if (!strcmp(name, "rc:bps_max"))
       value = record->bps_max;
+    else if (!strcmp(name, "rc:super_mode"))
+      value = record->super_mode;
+  }
+  enc_cfg_record_release();
+  return value;
+}
+/* Same snapshots, full width: a super-frame threshold of 0xFFFFFFFF does not
+ * survive the s32 accessor above. */
+int64_t mpp_mock_enc_cfg_record_value(unsigned index, const char *name) {
+  int64_t value = INT64_MIN;
+  enc_cfg_record_acquire();
+  if (index < enc_cfg_record_count) {
+    MockEncCfgRecord *record = &enc_cfg_records[index];
+    if (!strcmp(name, "rc:super_i_thd"))
+      value = record->super_i_thd;
+    else if (!strcmp(name, "rc:super_p_thd"))
+      value = record->super_p_thd;
   }
   enc_cfg_record_release();
   return value;
