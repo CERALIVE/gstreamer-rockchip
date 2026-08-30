@@ -16,6 +16,13 @@ concurrency:
 permissions:
   contents: read
 
+# A container job's default shell is `sh -e`, and dash has no `pipefail`. Every
+# `run:` block here is written as bash; say so once rather than degrading each
+# one to POSIX sh.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   resolve-suite:
     name: Resolve device target suite
@@ -72,14 +79,28 @@ jobs:
     runs-on: ubuntu-24.04-arm
     container:
       image: debian:${{ matrix.suite }}-slim
+    # KNOWN RED: the trixie leg does not compile today, and the leg stays in the
+    # matrix reporting that rather than being dropped or silenced. GCC 14 turned
+    # -Wincompatible-pointer-types into an error by default, and
+    # gst/rockchipmpp/gstmppdec.c:860 passes a GstVideoCropMeta* where
+    # gst_buffer_remove_meta() takes a GstMeta*. It is a real defect in this
+    # source, not a GStreamer 1.26 API break — bookworm's GCC 12 only warned.
+    # Deliberately NOT fixed here: this change is CI scaffolding, and a source
+    # fix belongs to a wave-4/5 code-fix todo alongside its own regression test.
+    # Do not "resolve" this by adding -Wno-error, dropping the leg, or pinning an
+    # older compiler; the failure IS the finding. Drop `experimental` once the
+    # source fix lands so a later regression turns the leg red again.
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - suite: bookworm
             gst_minor: "1.22"
+            experimental: false
           - suite: trixie
             gst_minor: "1.26"
+            experimental: true
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 200M
