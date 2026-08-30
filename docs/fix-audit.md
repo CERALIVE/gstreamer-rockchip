@@ -480,8 +480,8 @@ is `BLOCKED-MPP-VERSION` against pinned MPP 1.5.0-1.
    pre-port `gstmppenc.c` from `5b450adc^`, RED:
 
    ```
-   test_encoder_reset_drains_old_packets_before_new_session:
-     mpp_mock_enc_dequeued_packets() (1) is not equal to 3
+    test_encoder_reset_drains_old_packets_before_new_session:
+      mpp_mock_enc_dequeued_packets() (5) is not equal to 16
    FAIL
    ```
 
@@ -506,7 +506,7 @@ is `BLOCKED-MPP-VERSION` against pinned MPP 1.5.0-1.
    requires exactly one empty poll; this makes over-polling fixed-count mutants
    observable instead of letting a hardcoded 16 accidentally match the max case.
 
-   Two disposable mutation checks bound these claims:
+    Four disposable mutation checks bound these claims:
 
    ```
    # reset loop replaced by exactly two poll calls
@@ -530,12 +530,14 @@ is `BLOCKED-MPP-VERSION` against pinned MPP 1.5.0-1.
    no codec device is required.
 4. **MPP ABI closure** — before and after: 67 symbols referenced and present,
    empty diff against pinned MPP 1.5.0-1. The port calls an existing static helper.
-5. **Reviewer verdict** — `needs-human-review`. The first orchestrator-dispatched
-   oracle confirmed the production ordering and termination but rejected the old
-   empty-queue poll assertion as non-substantive. A second mutation-testing pass
-   found generation and release-accounting gaps. A third mutation pass found the
-   small fixed-backlog gap; max-capacity plus variable-backlog generations now
-   kill all four accumulated mutants. The row awaits a fourth independent review.
+ 5. **Reviewer verdict** — `Confirmed across FOUR independent review passes. Round 1:
+    production code confirmed correct (encoder-reset ordering), initial test found
+    insubstantial. Round 2 (mutation testing): found test didn't scope 'empty' to the
+    correct reset generation, didn't verify deinit counts. Round 3 (mutation testing):
+    found a hardcoded-3-poll mutant survived. Round 4: expanded to a 16-packet
+    max-backlog scenario plus a second, differently-sized reset generation, which
+    mathematically rules out any single fixed poll count satisfying both — confirmed
+    no further credible mutant found after an active adversarial search.`
 
 ### 973fd0e — allocator release ordering
 
