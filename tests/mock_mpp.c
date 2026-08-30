@@ -53,6 +53,8 @@ typedef struct MockPacket {
   MppBuffer buffer;
   size_t length;
   unsigned id;
+  int has_intra_meta;
+  int intra;
   int heap;
   int encoder_packet;
   int eos;
@@ -96,6 +98,10 @@ typedef struct {
 #define ENC_PLAN_DEFAULT_LENGTH 1
 static size_t enc_plan_length[ENC_PLAN_CAPACITY];
 static int enc_plan_length_armed[ENC_PLAN_CAPACITY];
+/* Tri-state, mirroring what a real encoder packet can carry: absent meta
+ * (unarmed), present and zero, or present and set. */
+static int enc_plan_intra[ENC_PLAN_CAPACITY];
+static int enc_plan_intra_armed[ENC_PLAN_CAPACITY];
 /* Page-sized and mmap-backed so the plugin's zero-copy branch can import the
  * dmafd and read the payload back, which the shipped default configuration
  * does. A malloc'd pointer has no fd and silently retires that whole path. */
@@ -404,6 +410,9 @@ static MPP_RET encode_put(MppCtx c, MppFrame f) {
                        ? enc_plan_length[tail]
                        : ENC_PLAN_DEFAULT_LENGTH;
   packet->id = tail + 1;
+  packet->has_intra_meta =
+      tail < ENC_PLAN_CAPACITY && enc_plan_intra_armed[tail];
+  packet->intra = packet->has_intra_meta ? enc_plan_intra[tail] : 0;
   packet->encoder_packet = 1;
   packet->alive = 1;
 
@@ -730,6 +739,22 @@ MPP_RET mpp_packet_deinit(MppPacket *packet) {
   *packet = NULL;
   return MPP_OK;
 }
+/* Pointer-range identification: mpp_frame_get_meta() and mpp_packet_get_meta()
+ * both hand back the object itself, so the key must not be read out of a
+ * MockFrame as though it were a MockPacket. */
+static MockPacket *enc_packet_from_meta(MppMeta meta) {
+  MockPacket *p = (MockPacket *)meta;
+  if (p >= enc_packets && p < enc_packets + ENC_PACKET_CAPACITY)
+    return p;
+  return NULL;
+}
+MPP_RET mpp_meta_get_s32(MppMeta meta, MppMetaKey key, RK_S32 *val) {
+  MockPacket *p = enc_packet_from_meta(meta);
+  if (!p || !val || key != KEY_OUTPUT_INTRA || !p->has_intra_meta)
+    return MPP_NOK;
+  *val = (RK_S32)p->intra;
+  return MPP_OK;
+}
 MPP_RET mpp_meta_get_frame(MppMeta meta, MppMetaKey key, MppFrame *frame) {
   (void)key;
   if (!meta || !frame)
@@ -969,6 +994,14 @@ void mpp_mock_enc_set_packet_length(unsigned ordinal, size_t length) {
   enc_plan_length[ordinal] = length;
   enc_plan_length_armed[ordinal] = 1;
 }
+/* Leaving an ordinal unarmed is the negative control: MPP attaches no
+ * KEY_OUTPUT_INTRA at all, which must read differently from a zero. */
+void mpp_mock_enc_set_packet_intra(unsigned ordinal, int intra) {
+  if (ordinal >= ENC_PLAN_CAPACITY)
+    return;
+  enc_plan_intra[ordinal] = intra;
+  enc_plan_intra_armed[ordinal] = 1;
+}
 unsigned mpp_mock_enc_queued_packets(void) {
   return atomic_load(&enc_queued_packets);
 }
@@ -1118,6 +1151,8 @@ void mpp_mock_reset(void) {
   atomic_store(&enc_live_buffers, 0);
   memset(enc_plan_length, 0, sizeof(enc_plan_length));
   memset(enc_plan_length_armed, 0, sizeof(enc_plan_length_armed));
+  memset(enc_plan_intra, 0, sizeof(enc_plan_intra));
+  memset(enc_plan_intra_armed, 0, sizeof(enc_plan_intra_armed));
   mpp_mock_dec_disarm();
   dec_release_packets();
 }

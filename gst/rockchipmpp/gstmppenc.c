@@ -1692,6 +1692,7 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
   MppPacket mpkt;
   MppMeta meta;
   MppBuffer mbuf;
+  RK_S32 output_intra;
   gint pkt_size;
   gboolean zero_copy_pkt;
 
@@ -1707,6 +1708,10 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
   meta = mpp_packet_get_meta (mpkt);
   if (!mpp_meta_get_frame (meta, KEY_INPUT_FRAME, &mframe))
     mpp_frame_deinit (&mframe);
+
+  /* MPP reports whether it coded this output as an intra/IDR picture here. */
+  if (mpp_meta_get_s32 (meta, KEY_OUTPUT_INTRA, &output_intra))
+    output_intra = 0;
 
   /* Wake up the frame producer */
   self->pending_frames--;
@@ -1755,6 +1760,13 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
 
   gst_buffer_replace (&frame->output_buffer, buffer);
   gst_buffer_unref (buffer);
+
+  /* Must precede finish_frame(): the base class turns the sync-point flag into
+   * the downstream DELTA_UNIT flag and its force-key-unit bookkeeping. */
+  if (output_intra)
+    GST_VIDEO_CODEC_FRAME_SET_SYNC_POINT (frame);
+  else
+    GST_VIDEO_CODEC_FRAME_UNSET_SYNC_POINT (frame);
 
   GST_DEBUG_OBJECT (self, "finish frame ts=%" GST_TIME_FORMAT,
       GST_TIME_ARGS (frame->pts));

@@ -21,6 +21,7 @@ extern unsigned mpp_mock_frame_set_buffer_count(void);
 extern void mpp_mock_enc_arm_reset_drain(void);
 extern void mpp_mock_enc_release_packets(unsigned count);
 extern void mpp_mock_enc_set_packet_length(unsigned ordinal, size_t length);
+extern void mpp_mock_enc_set_packet_intra(unsigned ordinal, int intra);
 extern unsigned mpp_mock_enc_queued_packets(void);
 extern unsigned mpp_mock_enc_dequeued_packets(void);
 extern unsigned mpp_mock_enc_queue_depth(void);
@@ -321,6 +322,82 @@ GST_END_TEST
 
 GST_START_TEST(test_zero_length_rc_drop_is_not_pushed_when_copying) {
   check_rc_drop_is_not_pushed(FALSE);
+}
+GST_END_TEST
+
+/*
+ * pre_push() runs inside gst_video_encoder_finish_frame(), holding the very
+ * frame that is about to be pushed, so the sync-point flag is read where the
+ * encoder actually delivers rather than from element state afterwards.
+ */
+#define SYNC_CAPTURE_CAPACITY 8
+static atomic_uint sync_capture_count;
+static gboolean sync_capture_flag[SYNC_CAPTURE_CAPACITY];
+static guint32 sync_capture_frame[SYNC_CAPTURE_CAPACITY];
+
+static GstFlowReturn capture_sync_point(GstVideoEncoder *encoder,
+                                        GstVideoCodecFrame *frame) {
+  (void)encoder;
+  unsigned index = atomic_load(&sync_capture_count);
+  fail_unless(index < G_N_ELEMENTS(sync_capture_flag));
+  sync_capture_flag[index] = GST_VIDEO_CODEC_FRAME_IS_SYNC_POINT(frame);
+  sync_capture_frame[index] = frame->system_frame_number;
+  atomic_store(&sync_capture_count, index + 1);
+  return GST_FLOW_OK;
+}
+
+/*
+ * MPP flags an intra/IDR output with KEY_OUTPUT_INTRA. A sync point must reach
+ * the peer without DELTA_UNIT, and a predicted frame must carry it. The middle
+ * packet has no meta at all, which is what MPP does for most outputs and must
+ * not be confused with a meta carrying zero.
+ */
+GST_START_TEST(test_intra_output_is_marked_as_a_sync_point) {
+  mpp_mock_reset();
+  reset_output_capture();
+  atomic_store(&sync_capture_count, 0);
+  memset(sync_capture_flag, 0, sizeof(sync_capture_flag));
+  memset(sync_capture_frame, 0, sizeof(sync_capture_frame));
+  mpp_mock_enc_set_packet_intra(0, 1);
+  mpp_mock_enc_set_packet_intra(2, 0);
+
+  GstHarness *h = gst_harness_new("mpph264enc");
+  fail_unless(h != NULL);
+  g_object_set(h->element, "bitrate", 500, "rc-mode", 1, NULL);
+  GstVideoEncoderClass *klass = GST_VIDEO_ENCODER_GET_CLASS(h->element);
+  GstFlowReturn (*saved_pre_push)(GstVideoEncoder *, GstVideoCodecFrame *) =
+      klass->pre_push;
+  klass->pre_push = capture_sync_point;
+  gst_pad_set_chain_function(h->sinkpad,
+                             GST_DEBUG_FUNCPTR(capture_output_buffer));
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=320,height=240,framerate=30/1");
+  gst_harness_play(h);
+
+  for (guint i = 0; i < 3; i++)
+    push_reset_frame(h, i);
+  fail_unless(wait_for_uint(mpp_mock_enc_packet_deinits, 3),
+              "encoder did not finish processing every packet");
+
+  fail_unless_equals_int(read_output_capture_count(), 3);
+  fail_unless_equals_int(atomic_load(&sync_capture_count), 3);
+  for (unsigned i = 0; i < 3; i++) {
+    gboolean want_sync = (i == 0);
+    fail_unless_equals_int(sync_capture_frame[i], i);
+    fail_unless(sync_capture_flag[i] == want_sync,
+                "frame %u reached the push path with sync-point=%d, expected %d",
+                i, sync_capture_flag[i], want_sync);
+    fail_unless(output_capture[i].delta_unit == !want_sync,
+                "output %u carried DELTA_UNIT=%d, expected %d", i,
+                output_capture[i].delta_unit, !want_sync);
+  }
+  g_print("intra sync points: sync=%d,%d,%d delta-unit=%d,%d,%d\n",
+          sync_capture_flag[0], sync_capture_flag[1], sync_capture_flag[2],
+          output_capture[0].delta_unit, output_capture[1].delta_unit,
+          output_capture[2].delta_unit);
+
+  klass->pre_push = saved_pre_push;
+  gst_harness_teardown(h);
 }
 GST_END_TEST
 
@@ -911,6 +988,7 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_h265_encoder_lifecycle);
   tcase_add_test(tc, test_zero_length_rc_drop_is_not_pushed_downstream);
   tcase_add_test(tc, test_zero_length_rc_drop_is_not_pushed_when_copying);
+  tcase_add_test(tc, test_intra_output_is_marked_as_a_sync_point);
   tcase_add_test(
       tc, test_runtime_property_snapshot_is_coherent_and_eventually_applied);
   tcase_add_test(tc, test_encoder_reset_drains_old_packets_before_new_session);
