@@ -240,6 +240,11 @@ gst_mpp_dec_reset (GstVideoDecoder * decoder, gboolean drain, gboolean final)
   self->flushing = final;
   self->draining = FALSE;
 
+  if (self->mpp_frame) {
+    mpp_frame_deinit (&self->mpp_frame);
+    self->mpp_frame = NULL;
+  }
+
   self->mpi->reset (self->mpp_ctx);
   self->task_ret = GST_FLOW_OK;
   self->decoded_frames = 0;
@@ -1221,6 +1226,7 @@ gst_mpp_dec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
   GstBuffer *tmp;
   GstFlowReturn ret;
   MppPacket mpkt = NULL;
+  gboolean packet_has_buffer = FALSE;
 
   GST_MPP_DEC_LOCK (decoder);
 
@@ -1259,6 +1265,10 @@ gst_mpp_dec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
 
   mpp_packet_set_pts (mpkt, self->use_mpp_pts ? -1 : (gint64) frame->pts);
 
+  /* Buffered packets transfer to MPP on success and may be recycled before
+   * send_mpp_packet() returns. Snapshot ownership while the packet is ours. */
+  packet_has_buffer = (mpp_packet_get_buffer (mpkt) != NULL);
+
   if (GST_CLOCK_TIME_IS_VALID (frame->pts))
     self->seen_valid_pts = TRUE;
 
@@ -1271,8 +1281,10 @@ gst_mpp_dec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
   else if (G_UNLIKELY (ret != GST_FLOW_OK))
     goto drop;
 
-  /* NOTE: Sub-class takes over the MPP packet when success */
-  mpkt = NULL;
+  if (packet_has_buffer)
+    mpkt = NULL;
+  else
+    mpp_packet_deinit (&mpkt);
   gst_buffer_unmap (frame->input_buffer, &mapinfo);
 
   /* No need to keep input arround */

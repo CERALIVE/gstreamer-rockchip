@@ -17,6 +17,13 @@ void mpp_mock_dec_disarm (void);
 unsigned mpp_mock_dec_outputs (void);
 void mpp_mock_dec_set_put_result (unsigned buffer_full_count, MPP_RET terminal);
 unsigned mpp_mock_dec_put_calls (void);
+void mpp_mock_dec_set_next_packet_has_buffer (int has_buffer);
+unsigned mpp_mock_dec_packet_buffer_queries (void);
+unsigned mpp_mock_dec_packet_post_send_accesses (void);
+unsigned mpp_mock_dec_packet_deinits (void);
+unsigned mpp_mock_dec_wrong_owner_deinits (void);
+unsigned mpp_mock_dec_double_deinits (void);
+unsigned mpp_mock_dec_frame_deinits (void);
 
 #define DEC_WIDTH 320
 #define DEC_HEIGHT 240
@@ -52,6 +59,19 @@ wait_for_outputs (guint want)
   gint64 deadline = g_get_monotonic_time () + DRAIN_TIMEOUT_US;
 
   while (mpp_mock_dec_outputs () < want) {
+    if (g_get_monotonic_time () > deadline)
+      return FALSE;
+    g_usleep (1000);
+  }
+  return TRUE;
+}
+
+static gboolean
+wait_for_frame_deinits (guint want)
+{
+  gint64 deadline = g_get_monotonic_time () + DRAIN_TIMEOUT_US;
+
+  while (mpp_mock_dec_frame_deinits () < want) {
     if (g_get_monotonic_time () > deadline)
       return FALSE;
     g_usleep (1000);
@@ -111,6 +131,61 @@ negotiated_caps_have_dmabuf (gboolean dma_feature)
   gst_caps_unref (caps);
   stop_decoder (h);
   return have_dmabuf;
+}
+
+static void
+test_packet_ownership_is_decided_before_send (void)
+{
+  GstHarness *h = start_decoder (FALSE);
+
+  g_print ("== packet ownership before send ==\n");
+
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (0)), ==, GST_FLOW_OK);
+  g_assert_true (wait_for_outputs (1));
+  g_assert_cmpuint (mpp_mock_dec_packet_buffer_queries (), ==, 1);
+  g_assert_cmpuint (mpp_mock_dec_packet_post_send_accesses (), ==, 0);
+  g_assert_cmpuint (mpp_mock_dec_packet_deinits (), ==, 1);
+  g_assert_cmpuint (mpp_mock_dec_wrong_owner_deinits (), ==, 0);
+  g_assert_cmpuint (mpp_mock_dec_double_deinits (), ==, 0);
+  stop_decoder (h);
+
+  h = start_decoder (FALSE);
+  mpp_mock_dec_set_next_packet_has_buffer (TRUE);
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (1)), ==, GST_FLOW_OK);
+  g_assert_true (wait_for_outputs (1));
+  g_assert_cmpuint (mpp_mock_dec_packet_buffer_queries (), ==, 1);
+  g_assert_cmpuint (mpp_mock_dec_packet_post_send_accesses (), ==, 0);
+  g_assert_cmpuint (mpp_mock_dec_packet_deinits (), ==, 0);
+  g_assert_cmpuint (mpp_mock_dec_wrong_owner_deinits (), ==, 0);
+  g_assert_cmpuint (mpp_mock_dec_double_deinits (), ==, 0);
+
+  g_print ("copy packet released once; buffered packet transferred without "
+      "post-send access\n");
+  stop_decoder (h);
+  g_print ("packet ownership before send: OK\n");
+}
+
+static void
+test_reset_releases_cached_mpp_frame (void)
+{
+  GstHarness *h = start_decoder (FALSE);
+  guint before_reset;
+
+  g_print ("== reset cached-frame cleanup ==\n");
+
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (0)), ==, GST_FLOW_OK);
+  g_assert_true (wait_for_outputs (1));
+  g_assert_true (wait_for_frame_deinits (1));
+  before_reset = mpp_mock_dec_frame_deinits ();
+
+  g_assert_true (gst_harness_push_event (h, gst_event_new_flush_start ()));
+  g_assert_true (gst_harness_push_event (h, gst_event_new_flush_stop (TRUE)));
+  g_assert_cmpuint (mpp_mock_dec_frame_deinits (), ==, before_reset + 1);
+
+  g_print ("cached MPP frame deinits: %u -> %u on reset\n", before_reset,
+      mpp_mock_dec_frame_deinits ());
+  stop_decoder (h);
+  g_print ("reset cached-frame cleanup: OK\n");
 }
 
 static void
@@ -195,6 +270,8 @@ main (int argc, char **argv)
 {
   gst_init (&argc, &argv);
 
+  test_reset_releases_cached_mpp_frame ();
+  test_packet_ownership_is_decided_before_send ();
   test_put_packet_result_drives_fullness ();
   test_dma_feature_reaches_negotiated_caps ();
   test_unmatched_pts_pending_list_is_bounded ();

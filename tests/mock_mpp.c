@@ -23,11 +23,16 @@ typedef struct {
 } MockCfg;
 static int control_counts[512];
 static MppEncCfg last_cfg;
-typedef struct {
+typedef struct MockPacket {
   MppFrame input_frame;
   int heap;
   int eos;
   int extra_data;
+  int alive;
+  int sent;
+  int has_buffer;
+  int mpp_owned;
+  struct MockPacket *next;
 } MockPacket;
 typedef struct {
   int fd;
@@ -59,6 +64,14 @@ static atomic_uint dec_eos_seen;
 static atomic_uint dec_put_calls;
 static atomic_uint dec_buffer_full_remaining;
 static atomic_int dec_put_terminal;
+static atomic_int dec_next_packet_has_buffer;
+static atomic_uint dec_packet_buffer_queries;
+static atomic_uint dec_packet_post_send_accesses;
+static atomic_uint dec_packet_deinits;
+static atomic_uint dec_wrong_owner_deinits;
+static atomic_uint dec_double_deinits;
+static atomic_uint dec_frame_deinits;
+static MockPacket *packet_allocs;
 static RK_U32 dec_width = 320;
 static RK_U32 dec_height = 240;
 /* Kept far BELOW every input PTS so the decoder's display-order matcher filters
@@ -181,6 +194,9 @@ static MPP_RET put_packet_ok(MppCtx c, MppPacket p) {
   MPP_RET terminal = (MPP_RET)atomic_load(&dec_put_terminal);
   if (terminal != MPP_OK)
     return terminal;
+
+  packet->sent = 1;
+  packet->mpp_owned = packet->has_buffer;
 
   if (packet->eos)
     atomic_store(&dec_eos_seen, 1);
@@ -316,6 +332,7 @@ MPP_RET mpp_frame_deinit(MppFrame *frame) {
     return MPP_NOK;
   free(*frame);
   *frame = NULL;
+  atomic_fetch_add(&dec_frame_deinits, 1);
   return MPP_OK;
 }
 MppFrameFormat mpp_frame_get_fmt(MppFrame frame) {
@@ -396,8 +413,13 @@ size_t mpp_packet_get_length(const MppPacket packet) {
   return 0;
 }
 MppBuffer mpp_packet_get_buffer(const MppPacket packet) {
-  (void)packet;
-  return NULL;
+  MockPacket *p = (MockPacket *)packet;
+  if (!p)
+    return NULL;
+  atomic_fetch_add(&dec_packet_buffer_queries, 1);
+  if (p->sent)
+    atomic_fetch_add(&dec_packet_post_send_accesses, 1);
+  return p->has_buffer ? (MppBuffer)p : NULL;
 }
 MPP_RET mpp_packet_init(MppPacket *packet, void *data, size_t size) {
   (void)data;
@@ -408,6 +430,11 @@ MPP_RET mpp_packet_init(MppPacket *packet, void *data, size_t size) {
   if (!p)
     return MPP_NOK;
   p->heap = 1;
+  p->alive = 1;
+  if (atomic_load(&dec_enabled))
+    p->has_buffer = atomic_exchange(&dec_next_packet_has_buffer, 0);
+  p->next = packet_allocs;
+  packet_allocs = p;
   *packet = (MppPacket)p;
   return MPP_OK;
 }
@@ -439,8 +466,15 @@ MPP_RET mpp_packet_deinit(MppPacket *packet) {
   if (!packet)
     return MPP_NOK;
   MockPacket *p = (MockPacket *)*packet;
-  if (p && p->heap)
-    free(p);
+  if (p && p->heap) {
+    if (!p->alive)
+      atomic_fetch_add(&dec_double_deinits, 1);
+    else if (p->mpp_owned)
+      atomic_fetch_add(&dec_wrong_owner_deinits, 1);
+    else
+      atomic_fetch_add(&dec_packet_deinits, 1);
+    p->alive = 0;
+  }
   *packet = NULL;
   return MPP_OK;
 }
@@ -574,9 +608,23 @@ void mpp_mock_dec_arm(unsigned width, unsigned height) {
   atomic_store(&dec_put_calls, 0);
   atomic_store(&dec_buffer_full_remaining, 0);
   atomic_store(&dec_put_terminal, MPP_OK);
+  atomic_store(&dec_next_packet_has_buffer, 0);
+  atomic_store(&dec_packet_buffer_queries, 0);
+  atomic_store(&dec_packet_post_send_accesses, 0);
+  atomic_store(&dec_packet_deinits, 0);
+  atomic_store(&dec_wrong_owner_deinits, 0);
+  atomic_store(&dec_double_deinits, 0);
+  atomic_store(&dec_frame_deinits, 0);
   atomic_store(&dec_enabled, 1);
 }
-void mpp_mock_dec_disarm(void) { atomic_store(&dec_enabled, 0); }
+void mpp_mock_dec_disarm(void) {
+  atomic_store(&dec_enabled, 0);
+  while (packet_allocs) {
+    MockPacket *packet = packet_allocs;
+    packet_allocs = packet->next;
+    free(packet);
+  }
+}
 unsigned mpp_mock_dec_queued(void) { return atomic_load(&dec_queued); }
 unsigned mpp_mock_dec_outputs(void) { return atomic_load(&dec_outputs); }
 void mpp_mock_dec_set_put_result(unsigned buffer_full_count,
@@ -585,6 +633,27 @@ void mpp_mock_dec_set_put_result(unsigned buffer_full_count,
   atomic_store(&dec_put_terminal, terminal);
 }
 unsigned mpp_mock_dec_put_calls(void) { return atomic_load(&dec_put_calls); }
+void mpp_mock_dec_set_next_packet_has_buffer(int has_buffer) {
+  atomic_store(&dec_next_packet_has_buffer, !!has_buffer);
+}
+unsigned mpp_mock_dec_packet_buffer_queries(void) {
+  return atomic_load(&dec_packet_buffer_queries);
+}
+unsigned mpp_mock_dec_packet_post_send_accesses(void) {
+  return atomic_load(&dec_packet_post_send_accesses);
+}
+unsigned mpp_mock_dec_packet_deinits(void) {
+  return atomic_load(&dec_packet_deinits);
+}
+unsigned mpp_mock_dec_wrong_owner_deinits(void) {
+  return atomic_load(&dec_wrong_owner_deinits);
+}
+unsigned mpp_mock_dec_double_deinits(void) {
+  return atomic_load(&dec_double_deinits);
+}
+unsigned mpp_mock_dec_frame_deinits(void) {
+  return atomic_load(&dec_frame_deinits);
+}
 void mpp_mock_reset(void) {
   memset(control_counts, 0, sizeof(control_counts));
   last_cfg = NULL;

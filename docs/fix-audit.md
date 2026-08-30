@@ -234,6 +234,67 @@ the same feature flags CI and `debian/rules` use
    and a persistent non-full error), and the source diff contains no frame-cap,
    encoder, property, or production-code change.
 
+### 5f45bd4 — decoder input-packet ownership snapshot and reset cleanup
+
+1. **Provenance SHA and resolution diff** —
+   `5f45bd4c3868e323d40eda744cb7aa92b430df09`, JeffyCN/mirrors, author
+   `Jeffy Chen <jeffy.chen@rock-chips.com>`. The reset hunk ports literally:
+   before `self->mpi->reset()` it deinitializes `self->mpp_frame` and clears the
+   pointer. The ownership hunk ports the pre-send quote
+   `packet_has_buffer = (mpp_packet_get_buffer (mpkt) != NULL);` and, after a
+   successful send, transfers buffered packets to MPP while deinitializing
+   copy-path packets in the base decoder.
+
+   Resolution against the literal upstream diff: upstream `5f45bd4` sits after
+   `ec14edc` moved video packet submission into the base decoder and after
+   `dcbcd64` moved copy-packet cleanup there. This fork retains the older
+   `GstMppDecClass::send_mpp_packet` callback, whose video implementation quoted
+   `if (!ret) mpp_packet_deinit (&mpkt);`. Applying only the literal
+   `gstmppdec.c` hunk would therefore double-deinitialize copy packets. The
+   adaptation removes that subclass deinit and makes the base decoder the single
+   success-path ownership authority; JPEG packets already carry `MppBuffer` and
+   stay on the transfer branch. No encoder file or property is touched.
+2. **Red/green outputs** — `meson test -C build --print-errorlogs
+   "rockchipmpp decoder dmabuf caps and pending-frame bound"`, native aarch64
+   bookworm container. RED at parent `d2f7874` produced both independent
+   failures:
+
+   ```
+   reset cached-frame cleanup:
+   assertion failed (mpp_mock_dec_frame_deinits () == before_reset + 1): (1 == 2)
+
+   packet ownership before send:
+   assertion failed (mpp_mock_dec_packet_buffer_queries () == 1): (0 == 1)
+   ```
+
+   GREEN at the adaptation:
+
+   ```
+   cached MPP frame deinits: 1 -> 2 on reset
+   copy packet released once; buffered packet transferred without post-send access
+   packet ownership before send: OK
+   1/1 ... OK
+   ```
+
+   The mock is a logical ownership canary: it records buffer queries after send,
+   duplicate deinitialization, and caller deinitialization after MPP ownership
+   transfer. All three counters must stay zero. This catches the UAF/premature
+   release class without depending on allocator address reuse.
+3. **Hardware gate** — `hardware-independent`. Packet ownership transitions and
+   cached-shell cleanup are fully observable through the MPP ABI seam; no DMA
+   import or board-only output buffer is required.
+4. **MPP ABI closure** — before: 67 MPP symbols referenced and present, empty
+   diff. After: 67, empty diff against pinned
+   `librockchip-mpp1_1.5.0-1_arm64.deb`. The adapted layout adds no new MPP ABI
+   requirement.
+5. **Reviewer verdict** — `needs-human-review`. Reviewer == author
+   (self-review); no independent-agent verdict is claimed. Self-review checked
+   both callback implementations: video copy packets now have exactly one base
+   deinit, buffered JPEG packets are transferred, and every error path retains
+   the existing base-level `mpp_packet_deinit()` cleanup. Because this is a
+   cross-layer ownership adaptation, the branch is intentionally left open for
+   independent review rather than self-merged.
+
 ## Mock-MPP verdict: WORKING
 
 The host-only seam builds `tests/mock_mpp.c` as `libmppmock.so` against the same

@@ -244,9 +244,6 @@ gst_mpp_video_dec_send_mpp_packet (GstVideoDecoder * decoder,
   mppdec->mpi->control (mppdec->mpp_ctx, MPP_SET_INPUT_TIMEOUT, &timeout_ms);
 
   ret = mppdec->mpi->decode_put_packet (mppdec->mpp_ctx, mpkt);
-  if (!ret)
-    mpp_packet_deinit (&mpkt);
-
   return ret;
 }
 
