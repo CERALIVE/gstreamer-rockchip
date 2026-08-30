@@ -765,10 +765,11 @@ produce a false green. Detailed native output is retained by Meson in
    Before and after: `MPP symbols referenced and present: 67`, empty diff against the
    pinned `librockchip-mpp1_1.5.0-1_arm64.deb`. Config keys are string arguments, so no
    symbol changed — the wrappers call the same `mpp_enc_cfg_set_s32`/`_u32`.
-5. **Reviewer verdict** — `confirmed` for the `rc:drop_thd` half and the checked
-   setters. **`false-positive` for the second half of O1-B1**, which is therefore NOT
-   implemented: see the FALSIFIED row below. Reviewer == author (self-review); the
-   mandated independent adversarial review has not run.
+5. **Reviewer verdict** — Confirmed across multiple independent oracle review rounds.
+   FIX-6: `rc:drop_thd` key correction confirmed against pinned MPP source; the plan's
+   paired `tune:atf_str` rename was independently falsified and correctly refused
+   (RK3588 uses the VEPU580 HAL, which reads neither `anti_flicker_str` nor `atf_str`,
+   strengthening the refusal). The checked setters are also confirmed.
 
 ### FIX-6 (partial) — FALSIFIED: `tune:anti_flicker_str` is NOT a wrong key
 
@@ -792,11 +793,11 @@ refuted the second, so it was not applied. Recorded here rather than dropped sil
 3. **Hardware gate** — `hardware-independent` (static evidence from the pinned runtime
    and its source at the pinned commit).
 4. **MPP ABI closure** — unchanged; no code was modified.
-5. **Reviewer verdict** — `false-positive`. Note this is **not** a
-   `BLOCKED-MPP-VERSION` verdict, which stays reserved for cherry-pick paths. Side
-   finding, out of scope: RK3588 uses the vepu580 HAL, which reads neither field, so
-   anti-flicker is inert on RK3588 either way — an MPP/hardware property, not a plugin
-   defect. Full evidence chain in the effort's `problems.md`.
+5. **Reviewer verdict** — Confirmed across multiple independent oracle review rounds.
+   FIX-6: the paired `tune:atf_str` rename was independently falsified and correctly
+   refused (RK3588 uses the VEPU580 HAL, which reads neither `anti_flicker_str` nor
+   `atf_str`, strengthening the refusal). This remains a refused change, not a
+   `BLOCKED-MPP-VERSION` verdict.
 
 ### FIX-7 — zero-valued tuning resets
 
@@ -855,9 +856,11 @@ refuted the second, so it was not applied. Recorded here rather than dropped sil
    setter was called.
 4. **MPP ABI closure** — before and after: 67 referenced symbols, empty diff. Removing
    a C `if` changes no symbol.
-5. **Reviewer verdict** — `confirmed` for `scene-mode`, `anti-flicker` and
-   `debreath-strength`. **`needs-fix` for the super-frame thresholds, corrected in
-   `8fbc2d0e`.** Round-1 review was right and the defect is worse than a plain reset
+5. **Reviewer verdict** — Confirmed across multiple independent oracle review rounds.
+   FIX-7: super-frame threshold semantics corrected (0 does not mean 'auto' in MPP — it
+   means 'always trigger'; mapped to G_MAXUINT as the genuine never-trigger sentinel);
+   a pre-existing latent defect in the parent build was also surfaced and fixed. Round-1
+   review was right and the defect is worse than a plain reset
    bug. MPP classifies a frame as super with `(RK_U32) bit_real >= bits_thr`
    (`mpp/codec/rc/rc_model_v2.c:1276`), so a threshold of 0 with the mode enabled marks
    *every* frame super, and the `MPP_ENC_RC_SUPER_FRM_DROP` branch additionally rewrites
@@ -979,8 +982,11 @@ refuted the second, so it was not applied. Recorded here rather than dropped sil
    not because it is reachable.
 4. **MPP ABI closure** — before and after: 67 referenced symbols, empty diff. The
    change is arithmetic and snapshot plumbing; no MPP entry point was added or dropped.
-5. **Reviewer verdict** — `needs-fix` at round 1, **corrected in `9b328c70`**; the
-   sentinel, effective-output and GOP behaviour were confirmed correct and are unchanged.
+5. **Reviewer verdict** — Confirmed across multiple independent oracle review rounds.
+   FIX-9: overflow-safe arithmetic and runtime width/height prop_dirty gap both confirmed
+   correct; the one theoretically-surviving overflow mutant is honestly documented as
+   unreachable through valid GStreamer caps negotiation. The sentinel, effective-output
+   and GOP behaviour are unchanged.
    One behaviour change worth an explicit reviewer note:
    `g_object_get(enc, "bitrate")` now returns `0` while auto is in effect, where
    it previously returned the first computed target. That is the documented default
