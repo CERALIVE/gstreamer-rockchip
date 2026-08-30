@@ -13,7 +13,11 @@ extern unsigned mpp_mock_enc_queued_packets(void);
 extern unsigned mpp_mock_enc_dequeued_packets(void);
 extern unsigned mpp_mock_enc_queue_depth(void);
 extern unsigned mpp_mock_enc_duplicate_dequeues(void);
-extern unsigned mpp_mock_enc_post_reset_empty_polls(void);
+extern unsigned mpp_mock_enc_reset_generation(void);
+extern unsigned mpp_mock_enc_empty_polls_for_generation(unsigned generation);
+extern unsigned mpp_mock_enc_packet_deinits(void);
+extern unsigned mpp_mock_enc_packet_double_deinits(void);
+extern unsigned mpp_mock_enc_live_packets(void);
 extern void mpp_mock_reset(void);
 
 static atomic_uint reset_output_count;
@@ -126,17 +130,25 @@ GST_START_TEST(test_encoder_reset_drains_old_packets_before_new_session) {
   fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 1);
   fail_unless_equals_int(mpp_mock_enc_queue_depth(), 2);
 
+  unsigned reset_generation = mpp_mock_enc_reset_generation() + 1;
   fail_unless(gst_element_set_state(h->element, GST_STATE_READY) !=
               GST_STATE_CHANGE_FAILURE);
+  fail_unless(mpp_mock_enc_reset_generation() >= reset_generation);
   fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 3);
   fail_unless_equals_int(mpp_mock_enc_queue_depth(), 0);
-  fail_unless(mpp_mock_enc_post_reset_empty_polls() > 0,
-              "drain loop stopped before observing the queue empty");
+  fail_unless(mpp_mock_enc_empty_polls_for_generation(reset_generation) > 0,
+              "the first reset did not poll its packet queue to empty");
   fail_unless_equals_int(mpp_mock_enc_duplicate_dequeues(), 0);
-  g_print("reset drained old packets: dequeued=%u depth=%u empty-polls=%u "
-          "duplicates=%u\n",
+  fail_unless_equals_int(mpp_mock_enc_packet_deinits(), 3);
+  fail_unless_equals_int(mpp_mock_enc_packet_double_deinits(), 0);
+  fail_unless_equals_int(mpp_mock_enc_live_packets(), 0);
+  g_print("reset generation %u drained old packets: dequeued=%u depth=%u "
+          "empty-polls=%u deinits=%u double-deinits=%u live=%u duplicates=%u\n",
+          reset_generation,
           mpp_mock_enc_dequeued_packets(), mpp_mock_enc_queue_depth(),
-          mpp_mock_enc_post_reset_empty_polls(),
+          mpp_mock_enc_empty_polls_for_generation(reset_generation),
+          mpp_mock_enc_packet_deinits(),
+          mpp_mock_enc_packet_double_deinits(), mpp_mock_enc_live_packets(),
           mpp_mock_enc_duplicate_dequeues());
 
   fail_unless_equals_int(reset_output_ids[0], 1);
@@ -148,13 +160,19 @@ GST_START_TEST(test_encoder_reset_drains_old_packets_before_new_session) {
               "new-session packet was not produced");
   fail_unless_equals_int(reset_output_ids[1], 4);
   fail_unless_equals_uint64(reset_output_pts[1], 100 * (GST_SECOND / 30));
+  fail_unless(wait_for_uint(mpp_mock_enc_packet_deinits, 4),
+              "new-session packet was not released");
   fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 4);
   fail_unless_equals_int(mpp_mock_enc_queue_depth(), 0);
   fail_unless_equals_int(mpp_mock_enc_duplicate_dequeues(), 0);
+  fail_unless_equals_int(mpp_mock_enc_packet_deinits(), 4);
+  fail_unless_equals_int(mpp_mock_enc_packet_double_deinits(), 0);
+  fail_unless_equals_int(mpp_mock_enc_live_packets(), 0);
   g_print("new session output: packet=%u pts=%" G_GUINT64_FORMAT
-          " dequeued=%u depth=%u\n",
+          " dequeued=%u depth=%u deinits=%u live=%u\n",
           reset_output_ids[1], reset_output_pts[1],
-          mpp_mock_enc_dequeued_packets(), mpp_mock_enc_queue_depth());
+          mpp_mock_enc_dequeued_packets(), mpp_mock_enc_queue_depth(),
+          mpp_mock_enc_packet_deinits(), mpp_mock_enc_live_packets());
 
   gst_harness_teardown(h);
 }

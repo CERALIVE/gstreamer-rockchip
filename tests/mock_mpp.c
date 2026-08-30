@@ -61,6 +61,7 @@ typedef struct {
   MppFrame frame;
 } MockTask;
 #define ENC_PACKET_CAPACITY 16
+#define ENC_RESET_GENERATIONS 16
 static MockPacket enc_packets[ENC_PACKET_CAPACITY];
 static MockBuffer enc_buffers[ENC_PACKET_CAPACITY];
 static unsigned char enc_payloads[ENC_PACKET_CAPACITY];
@@ -73,8 +74,12 @@ static atomic_uint enc_release_limit;
 static atomic_uint enc_queued_packets;
 static atomic_uint enc_dequeued_packets;
 static atomic_uint enc_duplicate_dequeues;
-static atomic_uint enc_post_reset_empty_polls;
 static atomic_ullong enc_dequeue_mask;
+static atomic_uint enc_reset_generation;
+static atomic_uint enc_empty_polls_by_generation[ENC_RESET_GENERATIONS];
+static atomic_uint enc_packet_deinits;
+static atomic_uint enc_packet_double_deinits;
+static atomic_uint enc_live_packets;
 
 /* Off unless a test arms it, so the encoder harness keeps the MPP behavior it
  * was written against. */
@@ -291,6 +296,7 @@ static MPP_RET encode_put(MppCtx c, MppFrame f) {
 
   atomic_store(&enc_tail, tail + 1);
   atomic_fetch_add(&enc_queued_packets, 1);
+  atomic_fetch_add(&enc_live_packets, 1);
   return MPP_OK;
 }
 static MPP_RET encode_get(MppCtx c, MppPacket *p) {
@@ -307,8 +313,9 @@ static MPP_RET encode_get(MppCtx c, MppPacket *p) {
   unsigned head = atomic_load(&enc_head);
   unsigned tail = atomic_load(&enc_tail);
   if (head == tail) {
-    if (atomic_load(&enc_reset_seen))
-      atomic_fetch_add(&enc_post_reset_empty_polls, 1);
+    unsigned generation = atomic_load(&enc_reset_generation);
+    if (generation < ENC_RESET_GENERATIONS)
+      atomic_fetch_add(&enc_empty_polls_by_generation[generation], 1);
     *p = NULL;
     return MPP_OK;
   }
@@ -326,6 +333,7 @@ static MPP_RET encode_get(MppCtx c, MppPacket *p) {
 }
 static MPP_RET mock_reset(MppCtx c) {
   (void)c;
+  atomic_fetch_add(&enc_reset_generation, 1);
   atomic_store(&enc_reset_seen, 1);
   atomic_store(&enc_release_limit, UINT32_MAX);
   return MPP_OK;
@@ -576,9 +584,13 @@ MPP_RET mpp_packet_deinit(MppPacket *packet) {
     return MPP_NOK;
   MockPacket *p = (MockPacket *)*packet;
   if (p && p->encoder_packet) {
-    if (!p->alive)
-      atomic_fetch_add(&enc_duplicate_dequeues, 1);
-    p->alive = 0;
+    if (!p->alive) {
+      atomic_fetch_add(&enc_packet_double_deinits, 1);
+    } else {
+      p->alive = 0;
+      atomic_fetch_add(&enc_packet_deinits, 1);
+      atomic_fetch_sub(&enc_live_packets, 1);
+    }
     *packet = NULL;
     return MPP_OK;
   }
@@ -764,8 +776,22 @@ unsigned mpp_mock_enc_queue_depth(void) {
 unsigned mpp_mock_enc_duplicate_dequeues(void) {
   return atomic_load(&enc_duplicate_dequeues);
 }
-unsigned mpp_mock_enc_post_reset_empty_polls(void) {
-  return atomic_load(&enc_post_reset_empty_polls);
+unsigned mpp_mock_enc_reset_generation(void) {
+  return atomic_load(&enc_reset_generation);
+}
+unsigned mpp_mock_enc_empty_polls_for_generation(unsigned generation) {
+  if (generation >= ENC_RESET_GENERATIONS)
+    return 0;
+  return atomic_load(&enc_empty_polls_by_generation[generation]);
+}
+unsigned mpp_mock_enc_packet_deinits(void) {
+  return atomic_load(&enc_packet_deinits);
+}
+unsigned mpp_mock_enc_packet_double_deinits(void) {
+  return atomic_load(&enc_packet_double_deinits);
+}
+unsigned mpp_mock_enc_live_packets(void) {
+  return atomic_load(&enc_live_packets);
 }
 void mpp_mock_dec_arm(unsigned width, unsigned height) {
   dec_width = (RK_U32)width;
@@ -854,8 +880,13 @@ void mpp_mock_reset(void) {
   atomic_store(&enc_queued_packets, 0);
   atomic_store(&enc_dequeued_packets, 0);
   atomic_store(&enc_duplicate_dequeues, 0);
-  atomic_store(&enc_post_reset_empty_polls, 0);
   atomic_store(&enc_dequeue_mask, 0);
+  atomic_store(&enc_reset_generation, 0);
+  for (unsigned i = 0; i < ENC_RESET_GENERATIONS; i++)
+    atomic_store(&enc_empty_polls_by_generation[i], 0);
+  atomic_store(&enc_packet_deinits, 0);
+  atomic_store(&enc_packet_double_deinits, 0);
+  atomic_store(&enc_live_packets, 0);
   memset(enc_packets, 0, sizeof(enc_packets));
   memset(enc_buffers, 0, sizeof(enc_buffers));
   memset(enc_payloads, 0, sizeof(enc_payloads));
