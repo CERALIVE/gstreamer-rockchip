@@ -378,34 +378,34 @@ gst_mpp_h265_enc_configure_properties (GstVideoEncoder * encoder,
   GstMppEnc *mppenc = GST_MPP_ENC (encoder);
   const GstMppH265EncPropertiesSnapshot *properties = snapshot;
 
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_init", properties->qp_init);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_init", properties->qp_init);
 
   if (properties->rc_mode == MPP_ENC_RC_MODE_FIXQP) {
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min", properties->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max", properties->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min_i", properties->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max_i", properties->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_ip", 0);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min_i", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max_i", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_ip", 0);
   } else {
     /* MPP_ENC_RC_MODE_CBR/MPP_ENC_RC_MODE_VBR/MPP_ENC_RC_MODE_AVBR */
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min",
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min",
         properties->qp_min ? properties->qp_min : 10);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max",
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max",
         properties->qp_max ? properties->qp_max : 51);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min_i",
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min_i",
         properties->qp_min_i ? properties->qp_min_i : 10);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max_i",
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max_i",
         properties->qp_max_i ? properties->qp_max_i : 51);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_ip",
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_ip",
         properties->qp_ip >= 0 ? properties->qp_ip : 2);
   }
 
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:profile", properties->profile);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:tier", properties->tier);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:level", properties->level);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:sao_luma_disable",
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h265:profile", properties->profile);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h265:tier", properties->tier);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h265:level", properties->level);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h265:sao_luma_disable",
       properties->sao ? 0 : 1);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:sao_chroma_disable",
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h265:sao_chroma_disable",
       properties->sao ? 0 : 1);
 }
 

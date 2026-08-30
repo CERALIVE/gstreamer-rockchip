@@ -165,6 +165,28 @@ gst_mpp_enc_video_info_align (GstVideoInfo * info)
   return gst_mpp_video_info_align (info, 0, vstride);
 }
 
+gboolean
+gst_mpp_enc_cfg_set_s32 (GstMppEnc * self, const gchar * key, gint value)
+{
+  if (mpp_enc_cfg_set_s32 (self->mpp_cfg, key, value)) {
+    GST_ERROR_OBJECT (self, "MPP rejected config key '%s' (= %d)", key, value);
+    self->cfg_error = TRUE;
+    return FALSE;
+  }
+  return TRUE;
+}
+
+gboolean
+gst_mpp_enc_cfg_set_u32 (GstMppEnc * self, const gchar * key, guint value)
+{
+  if (mpp_enc_cfg_set_u32 (self->mpp_cfg, key, value)) {
+    GST_ERROR_OBJECT (self, "MPP rejected config key '%s' (= %u)", key, value);
+    self->cfg_error = TRUE;
+    return FALSE;
+  }
+  return TRUE;
+}
+
 static void
 gst_mpp_enc_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec)
@@ -665,6 +687,14 @@ gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
   if (applied)
     *applied = FALSE;
 
+  /* Checked before the prop_dirty early-out on purpose: a pass that latched
+   * cfg_error already cleared prop_dirty, so a later quiescent apply would
+   * otherwise report success for a config MPP never accepted. */
+  if (self->cfg_error) {
+    GST_ERROR_OBJECT (self, "refusing to apply a config MPP partly rejected");
+    return FALSE;
+  }
+
   GST_MPP_ENC_PROP_LOCK (encoder);
   if (!self->prop_dirty) {
     GST_MPP_ENC_PROP_UNLOCK (encoder);
@@ -725,88 +755,83 @@ gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
           &properties.header_mode))
     GST_WARNING_OBJECT (self, "failed to set header mode");
 
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:gop",
+  gst_mpp_enc_cfg_set_s32 (self, "rc:gop",
       properties.gop < 0 ? fps : properties.gop);
-  mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:max_reenc_times",
-      properties.max_reenc);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:mode", properties.rc_mode);
+  gst_mpp_enc_cfg_set_u32 (self, "rc:max_reenc_times", properties.max_reenc);
+  gst_mpp_enc_cfg_set_s32 (self, "rc:mode", properties.rc_mode);
 
   if (!properties.bps || properties.rc_mode == MPP_ENC_RC_MODE_FIXQP) {
     /* BPS settings are ignored */
   } else if (properties.rc_mode == MPP_ENC_RC_MODE_CBR) {
     /* CBR mode has narrow bound */
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:bps_target", properties.bps);
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:bps_max",
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_target", properties.bps);
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_max",
         properties.bps_max ? : properties.bps * 17 / 16);
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:bps_min",
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_min",
         properties.bps_min ? : properties.bps * 15 / 16);
   } else {
     /* MPP_ENC_RC_MODE_VBR/MPP_ENC_RC_MODE_AVBR */
     /* VBR mode has wide bound */
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:bps_target", properties.bps);
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:bps_max",
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_target", properties.bps);
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_max",
         properties.bps_max ? : properties.bps * 17 / 16);
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:bps_min",
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_min",
         properties.bps_min ? : properties.bps * 1 / 16);
   }
 
   /* Output framerate (for runtime decimation) */
   if (properties.fps_out > 0) {
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_out_num",
-        properties.fps_out);
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_out_denorm", 1);
+    gst_mpp_enc_cfg_set_s32 (self, "rc:fps_out_num", properties.fps_out);
+    gst_mpp_enc_cfg_set_s32 (self, "rc:fps_out_denorm", 1);
   } else {
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_out_num",
-        properties.fps_n);
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_out_denorm",
-        properties.fps_d);
+    gst_mpp_enc_cfg_set_s32 (self, "rc:fps_out_num", properties.fps_n);
+    gst_mpp_enc_cfg_set_s32 (self, "rc:fps_out_denorm", properties.fps_d);
   }
 
   /* Frame drop mode */
-  mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:drop_mode", properties.drop_mode);
-  mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:drop_threshold",
-      properties.drop_threshold);
+  gst_mpp_enc_cfg_set_u32 (self, "rc:drop_mode", properties.drop_mode);
+  gst_mpp_enc_cfg_set_u32 (self, "rc:drop_thd", properties.drop_threshold);
 
   /* Rolling intra refresh (per-row). Spreads I-blocks across frames so there
    * are no periodic IDR bitrate spikes, and gives continuous loss recovery on
    * a lossy link. Only enabled when a non-zero row count is requested. */
   if (properties.intra_refresh) {
-    mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:refresh_en", 1);
-    mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:refresh_mode",
+    gst_mpp_enc_cfg_set_u32 (self, "rc:refresh_en", 1);
+    gst_mpp_enc_cfg_set_u32 (self, "rc:refresh_mode",
         MPP_ENC_RC_INTRA_REFRESH_ROW);
-    mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:refresh_num",
-        properties.intra_refresh);
+    gst_mpp_enc_cfg_set_u32 (self, "rc:refresh_num", properties.intra_refresh);
   } else {
-    mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:refresh_en", 0);
+    gst_mpp_enc_cfg_set_u32 (self, "rc:refresh_en", 0);
   }
 
   /* Super-frame: bound a single coded frame's size so a scene cut / keyframe
    * cannot spike the send buffer. */
-  mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:super_mode", properties.super_mode);
+  gst_mpp_enc_cfg_set_u32 (self, "rc:super_mode", properties.super_mode);
   if (properties.super_mode != MPP_ENC_RC_SUPER_FRM_NONE) {
     if (properties.super_i_thd)
-      mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:super_i_thd",
-          properties.super_i_thd);
+      gst_mpp_enc_cfg_set_u32 (self, "rc:super_i_thd", properties.super_i_thd);
     if (properties.super_p_thd)
-      mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:super_p_thd",
-          properties.super_p_thd);
+      gst_mpp_enc_cfg_set_u32 (self, "rc:super_p_thd", properties.super_p_thd);
   }
 
   /* De-breathing: smooths the GOP bitrate breathing oscillation. */
-  mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:debreath_en",
-      properties.debreath ? 1 : 0);
+  gst_mpp_enc_cfg_set_u32 (self, "rc:debreath_en", properties.debreath ? 1 : 0);
   if (properties.debreath)
-    mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:debreath_strength",
+    gst_mpp_enc_cfg_set_u32 (self, "rc:debreath_strength",
         properties.debreath_strength);
 
   /* Content-adaptive tuning. Only emitted when set away from default so older
    * MPP builds that lack these keys are unaffected. */
   if (properties.scene_mode)
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "tune:scene_mode",
-        properties.scene_mode);
+    gst_mpp_enc_cfg_set_s32 (self, "tune:scene_mode", properties.scene_mode);
   if (properties.anti_flicker)
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "tune:anti_flicker_str",
+    gst_mpp_enc_cfg_set_s32 (self, "tune:anti_flicker_str",
         properties.anti_flicker);
+  if (self->cfg_error) {
+    GST_ERROR_OBJECT (self, "refusing to apply a config MPP partly rejected");
+    return FALSE;
+  }
+
   if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_CFG, self->mpp_cfg)) {
     GST_WARNING_OBJECT (self, "failed to set enc cfg");
     return FALSE;
@@ -955,6 +980,8 @@ gst_mpp_enc_start (GstVideoEncoder * encoder)
   if (mpp_enc_cfg_init (&self->mpp_cfg))
     goto err_deinit_frame;
 
+  self->cfg_error = FALSE;
+
   if (self->mpi->control (self->mpp_ctx, MPP_ENC_GET_CFG, self->mpp_cfg))
     goto err_deinit_cfg;
 
@@ -1051,8 +1078,8 @@ gst_mpp_enc_apply_strides (GstVideoEncoder * encoder, gint hstride,
 
   mpp_frame_set_hor_stride (self->mpp_frame, hstride);
   mpp_frame_set_ver_stride (self->mpp_frame, vstride);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:hor_stride", hstride);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:ver_stride", vstride);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:hor_stride", hstride);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:ver_stride", vstride);
 
   if (hstride == GST_MPP_VIDEO_INFO_HSTRIDE (info) &&
       vstride == GST_MPP_VIDEO_INFO_VSTRIDE (info))
@@ -1175,19 +1202,17 @@ gst_mpp_enc_set_format (GstVideoEncoder * encoder, GstVideoCodecState * state)
     GST_VIDEO_INFO_FPS_D (info) = 1;
   }
 
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:format", format);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:width", width);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:height", height);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:format", format);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:width", width);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:height", height);
 
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_in_flex", 0);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_in_num",
-      GST_VIDEO_INFO_FPS_N (info));
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_in_denorm",
+  gst_mpp_enc_cfg_set_s32 (self, "rc:fps_in_flex", 0);
+  gst_mpp_enc_cfg_set_s32 (self, "rc:fps_in_num", GST_VIDEO_INFO_FPS_N (info));
+  gst_mpp_enc_cfg_set_s32 (self, "rc:fps_in_denorm",
       GST_VIDEO_INFO_FPS_D (info));
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_out_flex", 0);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_out_num",
-      GST_VIDEO_INFO_FPS_N (info));
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_out_denorm",
+  gst_mpp_enc_cfg_set_s32 (self, "rc:fps_out_flex", 0);
+  gst_mpp_enc_cfg_set_s32 (self, "rc:fps_out_num", GST_VIDEO_INFO_FPS_N (info));
+  gst_mpp_enc_cfg_set_s32 (self, "rc:fps_out_denorm",
       GST_VIDEO_INFO_FPS_D (info));
 
   return gst_mpp_enc_apply_strides (encoder, hstride, vstride);
@@ -1277,12 +1302,17 @@ gst_mpp_enc_apply_pending_resolution (GstVideoEncoder * encoder)
   mpp_frame_set_width (self->mpp_frame, width);
   mpp_frame_set_height (self->mpp_frame, height);
 
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:format", format);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:width", width);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:height", height);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:format", format);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:width", width);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:height", height);
 
   if (!gst_mpp_enc_apply_strides (encoder, hstride, vstride))
     return FALSE;
+
+  if (self->cfg_error) {
+    GST_ERROR_OBJECT (self, "refusing to apply a config MPP partly rejected");
+    return FALSE;
+  }
 
   if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_CFG, self->mpp_cfg))
     return FALSE;

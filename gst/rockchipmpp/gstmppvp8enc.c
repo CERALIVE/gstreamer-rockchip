@@ -229,13 +229,13 @@ gst_mpp_vp8_enc_configure_properties (GstVideoEncoder * encoder,
   GstMppEnc *mppenc = GST_MPP_ENC (encoder);
   const GstMppVp8EncPropertiesSnapshot *properties = snapshot;
 
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_init", properties->qp_init);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min", properties->qp_min);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max", properties->qp_max);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min_i", properties->qp_min_i);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max_i", properties->qp_max_i);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_ip", properties->qp_ip);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "vp8:disable_ivf", 1);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_init", properties->qp_init);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min", properties->qp_min);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max", properties->qp_max);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min_i", properties->qp_min_i);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max_i", properties->qp_max_i);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_ip", properties->qp_ip);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "vp8:disable_ivf", 1);
 }
 
 static gboolean

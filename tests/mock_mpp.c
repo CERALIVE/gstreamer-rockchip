@@ -26,6 +26,12 @@ typedef struct {
   int bps_min;
   int bps_max;
 } MockEncCfgRecord;
+/* Real MPP resolves a config key through a trie and answers MPP_NOK for a name
+ * it does not know, writing nothing. Tests arm a name here to reproduce that
+ * without needing an MPP build that actually lacks the key. */
+#define ENC_CFG_REJECT_CAPACITY 4
+static char enc_cfg_rejected_keys[ENC_CFG_REJECT_CAPACITY][96];
+static unsigned enc_cfg_rejected_count;
 #define ENC_CFG_RECORD_CAPACITY 4096
 static int control_counts[512];
 static MppEncCfg last_cfg;
@@ -142,6 +148,9 @@ static MPP_RET cfg_set(MppEncCfg c, const char *name, int64_t v, void *ptr,
                        int kind) {
   MockCfg *m = cfg_of(c);
   CfgEntry *entry = NULL;
+  for (unsigned i = 0; i < enc_cfg_rejected_count; i++)
+    if (!strcmp(enc_cfg_rejected_keys[i], name))
+      return MPP_NOK;
   for (unsigned i = 0; i < m->count; i++) {
     if (!strcmp(m->entries[i].key, name)) {
       entry = &m->entries[i];
@@ -831,6 +840,12 @@ int mpp_mock_enc_cfg_record_s32(unsigned index, const char *name) {
   enc_cfg_record_release();
   return value;
 }
+void mpp_mock_enc_cfg_reject_key(const char *key) {
+  if (enc_cfg_rejected_count >= ENC_CFG_REJECT_CAPACITY)
+    return;
+  snprintf(enc_cfg_rejected_keys[enc_cfg_rejected_count++],
+           sizeof(enc_cfg_rejected_keys[0]), "%s", key);
+}
 void mpp_mock_enc_pause_next_bps_target(void) {
   atomic_store(&enc_bps_pause_entered, 0);
   atomic_store(&enc_bps_pause_release, 0);
@@ -982,6 +997,8 @@ void mpp_mock_reset(void) {
   enc_cfg_record_count = 0;
   enc_cfg_record_dropped = 0;
   enc_cfg_record_release();
+  memset(enc_cfg_rejected_keys, 0, sizeof(enc_cfg_rejected_keys));
+  enc_cfg_rejected_count = 0;
   atomic_store(&enc_bps_pause_armed, 0);
   atomic_store(&enc_bps_pause_entered, 0);
   atomic_store(&enc_bps_pause_release, 1);

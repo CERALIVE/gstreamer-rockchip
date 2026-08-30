@@ -358,36 +358,36 @@ gst_mpp_h264_enc_configure_properties (GstVideoEncoder * encoder,
   GstMppEnc *mppenc = GST_MPP_ENC (encoder);
   const GstMppH264EncPropertiesSnapshot *properties = snapshot;
 
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_init", properties->qp_init);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_init", properties->qp_init);
 
   if (properties->rc_mode == MPP_ENC_RC_MODE_FIXQP) {
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min", properties->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max", properties->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min_i", properties->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max_i", properties->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_ip", 0);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min_i", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max_i", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_ip", 0);
   } else {
     /* MPP_ENC_RC_MODE_CBR/MPP_ENC_RC_MODE_VBR/MPP_ENC_RC_MODE_AVBR */
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min",
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min",
         properties->qp_min ? properties->qp_min : 10);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max",
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max",
         properties->qp_max ? properties->qp_max : 51);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min_i",
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min_i",
         properties->qp_min_i ? properties->qp_min_i : 10);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max_i",
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max_i",
         properties->qp_max_i ? properties->qp_max_i : 51);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_ip",
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_ip",
         properties->qp_ip >= 0 ? properties->qp_ip : 2);
   }
 
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h264:profile", properties->profile);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h264:level", properties->level);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h264:profile", properties->profile);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h264:level", properties->level);
 
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h264:trans8x8",
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h264:trans8x8",
       properties->profile == GST_MPP_H264_PROFILE_HIGH);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h264:cabac_en",
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h264:cabac_en",
       properties->profile != GST_MPP_H264_PROFILE_BASELINE);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h264:cabac_idc", 0);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h264:cabac_idc", 0);
 }
 
 static gboolean

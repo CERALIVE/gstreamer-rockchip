@@ -130,6 +130,14 @@ struct _GstMppEnc
   gboolean ref_dirty;
 
   MppEncCfg mpp_cfg;
+
+  /* Sticky for the life of mpp_cfg: set when MPP refuses a config key, which
+   * means the plugin's idea of the MPP config surface disagrees with the MPP it
+   * is running against. The key set is compile-time constant, so a refusal will
+   * repeat on every apply; latching it keeps a rejection from being lost in the
+   * window between the write and the MPP_ENC_SET_CFG that would report it. */
+  gboolean cfg_error;
+
   MppFrame mpp_frame;
 
   MppCodingType mpp_type;
@@ -157,6 +165,15 @@ typedef void (*GstMppEncConfigurePropertiesFunc) (GstVideoEncoder * encoder,
 #else
 #define MPP_ENC_FORMATS MPP_ENC_IN_FORMATS
 #endif
+
+/* Checked wrappers around mpp_enc_cfg_set_*. MPP answers MPP_NOK for a key it
+ * does not know and writes nothing, so an unchecked setter turns a misspelt or
+ * version-drifted key into a tunable that silently never takes effect. Every
+ * config write in this plugin goes through these. */
+gboolean gst_mpp_enc_cfg_set_s32 (GstMppEnc * self, const gchar * key,
+    gint value);
+gboolean gst_mpp_enc_cfg_set_u32 (GstMppEnc * self, const gchar * key,
+    guint value);
 
 gboolean gst_mpp_enc_apply_properties (GstVideoEncoder * encoder);
 gboolean gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,

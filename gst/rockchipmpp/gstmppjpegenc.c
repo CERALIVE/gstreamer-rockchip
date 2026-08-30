@@ -182,10 +182,9 @@ gst_mpp_jpeg_enc_configure_properties (GstVideoEncoder * encoder,
   GstMppEnc *mppenc = GST_MPP_ENC (encoder);
   const GstMppJpegEncPropertiesSnapshot *properties = snapshot;
 
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "jpeg:q_factor",
-      properties->q_factor);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "jpeg:qf_min", properties->qf_min);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "jpeg:qf_max", properties->qf_max);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "jpeg:q_factor", properties->q_factor);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "jpeg:qf_min", properties->qf_min);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "jpeg:qf_max", properties->qf_max);
 }
 
 static gboolean

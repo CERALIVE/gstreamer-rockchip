@@ -8,6 +8,7 @@ extern int mpp_mock_last_cfg_s32(const char *name);
 extern unsigned mpp_mock_enc_cfg_record_count(void);
 extern unsigned mpp_mock_enc_cfg_record_dropped(void);
 extern int mpp_mock_enc_cfg_record_s32(unsigned index, const char *name);
+extern void mpp_mock_enc_cfg_reject_key(const char *key);
 extern void mpp_mock_enc_pause_next_bps_target(void);
 extern unsigned mpp_mock_enc_bps_target_paused(void);
 extern void mpp_mock_enc_resume_bps_target(void);
@@ -440,6 +441,54 @@ static void check_encoder_lifecycle(const char *factory) {
               "encoder frame must stay inside the mock MPP ABI");
   gst_harness_teardown(h);
 }
+static GstHarness *start_encoder_harness(const char *caps) {
+  GstHarness *h = gst_harness_new("mpph264enc");
+  fail_unless(h != NULL);
+  g_object_set(h->element, "rc-mode", 1, "zero-copy-pkt", FALSE, NULL);
+  gst_harness_set_src_caps_str(h, caps);
+  gst_harness_set_drop_buffers(h, TRUE);
+  gst_harness_play(h);
+  return h;
+}
+
+GST_START_TEST(test_drop_threshold_uses_the_key_mpp_actually_registers) {
+  mpp_mock_reset();
+  GstHarness *h =
+      start_encoder_harness("video/x-raw,format=NV12,width=320,height=240,"
+                            "framerate=30/1");
+  g_object_set(h->element, "bitrate", 500, "drop-mode", 1, "drop-threshold", 42,
+               NULL);
+  push_runtime_property_frame(h, 0);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:drop_thd"), 42);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:drop_threshold"), INT32_MIN);
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
+GST_START_TEST(test_rejected_config_key_fails_the_apply) {
+  mpp_mock_reset();
+  mpp_mock_enc_cfg_reject_key("rc:drop_thd");
+
+  GstHarness *h = gst_harness_new("mpph264enc");
+  fail_unless(h != NULL);
+  g_object_set(h->element, "bitrate", 500, "rc-mode", 1, "zero-copy-pkt", FALSE,
+               NULL);
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=320,height=240,framerate=30/1");
+  gst_harness_set_drop_buffers(h, TRUE);
+  gst_harness_play(h);
+
+  GstBuffer *frame = gst_buffer_new_allocate(NULL, 115200, NULL);
+  fail_unless(frame != NULL);
+  GST_BUFFER_PTS(frame) = 0;
+  GST_BUFFER_DURATION(frame) = GST_SECOND / 30;
+  fail_unless_equals_int(gst_harness_push(h, frame), GST_FLOW_NOT_NEGOTIATED);
+  fail_unless_equals_int(mpp_mock_control_count(MPP_ENC_SET_CFG), 0);
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
 GST_START_TEST(test_h264_encoder_lifecycle) {
   mpp_mock_reset();
   check_encoder_lifecycle("mpph264enc");
@@ -457,6 +506,8 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_factories_properties);
   tcase_add_test(tc, test_jpeg_caps_with_harness);
   tcase_add_test(tc, test_video_decoder_caps_truth);
+  tcase_add_test(tc, test_drop_threshold_uses_the_key_mpp_actually_registers);
+  tcase_add_test(tc, test_rejected_config_key_fails_the_apply);
   tcase_add_test(tc, test_h264_encoder_lifecycle);
   tcase_add_test(tc, test_h265_encoder_lifecycle);
   tcase_add_test(
