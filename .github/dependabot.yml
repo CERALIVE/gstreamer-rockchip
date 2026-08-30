@@ -1,0 +1,16 @@
+version: 2
+
+# `github-actions` only. This is a pure C/meson repository: there is no
+# package.json, no Cargo.toml, and no lockfile of any kind for Dependabot to
+# scan. The MPP and RGA packages the build installs are deliberately URL+SHA
+# pinned (ci/mpp-pin.env) to the exact artifacts the device image ships, so they
+# are a human decision, not an ecosystem Dependabot may bump.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"

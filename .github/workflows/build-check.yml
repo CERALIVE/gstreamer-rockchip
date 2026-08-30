@@ -1,0 +1,194 @@
+name: Build Check
+
+# `push` is constrained to `main` on purpose: with a bare `push:` every PR-branch
+# push would run this workflow twice, and `concurrency:` does NOT dedupe it —
+# refs/heads/<branch> and refs/pull/N/merge hash to different groups.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, "integration/**"]
+
+concurrency:
+  group: build-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-suite:
+    name: Resolve device target suite
+    runs-on: ubuntu-latest
+    outputs:
+      suite: ${{ steps.read.outputs.suite }}
+      glibc_floor: ${{ steps.read.outputs.glibc_floor }}
+      gst_runtime_minor: ${{ steps.read.outputs.gst_runtime_minor }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # The values reach the build job as OUTPUTS, never `$GITHUB_ENV`. GitHub
+      # selects a job's `container:` before that job's first step runs, so a
+      # same-job export is structurally too late to name the image — which is
+      # exactly what the build matrix needs it for.
+      - name: Read ci/target-suite.env
+        id: read
+        run: |
+          set -euo pipefail
+          # shellcheck source=ci/target-suite.env
+          source ci/target-suite.env
+          for key in TARGET_SUITE GLIBC_FLOOR GST_RUNTIME_MINOR; do
+            if [ -z "${!key:-}" ]; then
+              echo "ERROR: $key is not declared in ci/target-suite.env" >&2
+              exit 1
+            fi
+          done
+          {
+            echo "suite=${TARGET_SUITE}"
+            echo "glibc_floor=${GLIBC_FLOOR}"
+            echo "gst_runtime_minor=${GST_RUNTIME_MINOR}"
+          } >> "$GITHUB_OUTPUT"
+          echo "target suite ${TARGET_SUITE} · glibc floor ${GLIBC_FLOOR} · GStreamer ${GST_RUNTIME_MINOR}"
+
+      # Without this, flipping TARGET_SUITE to a suite the matrix does not build
+      # would silently retire the GLIBC gate: its step condition would match no
+      # leg and the workflow would stay green having checked nothing.
+      - name: Assert the declared target suite is a matrix leg
+        run: |
+          set -euo pipefail
+          suite='${{ steps.read.outputs.suite }}'
+          if ! grep -qE "^ +- suite: ${suite}\$" .github/workflows/build-check.yml; then
+            echo "ERROR: ci/target-suite.env declares TARGET_SUITE=${suite}, but the" >&2
+            echo "       build matrix has no '- suite: ${suite}' leg, so the GLIBC" >&2
+            echo "       floor gate would never run." >&2
+            exit 1
+          fi
+          echo "target suite ${suite} is covered by the build matrix"
+
+  build:
+    name: ${{ matrix.suite }} · GStreamer ${{ matrix.gst_minor }} · arm64
+    needs: resolve-suite
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: debian:${{ matrix.suite }}-slim
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: bookworm
+            gst_minor: "1.22"
+          - suite: trixie
+            gst_minor: "1.26"
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 200M
+    steps:
+      # The slim image has no git, and `actions/checkout` silently degrades to a
+      # history-less REST tarball without it. Base tooling therefore installs
+      # BEFORE the checkout, not after.
+      - name: Install base tooling
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git
+
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install build dependencies (suite packages + pinned MPP/RGA)
+        run: bash ci/install-build-deps.sh
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ matrix.suite }}-arm64-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.suite }}-arm64-
+
+      - name: Configure bounded ccache
+        run: ccache -M "$CCACHE_MAXSIZE"
+
+      # Proves the container really ships the GStreamer this leg claims to test.
+      # A declared minor nobody measured is how a "1.26 leg" quietly becomes a
+      # second 1.22 leg after a base-image change.
+      - name: Assert the container's GStreamer minor
+        run: |
+          set -euo pipefail
+          actual="$(pkg-config --modversion gstreamer-1.0 | cut -d. -f1,2)"
+          if [ "$actual" != "${{ matrix.gst_minor }}" ]; then
+            echo "ERROR: debian:${{ matrix.suite }}-slim ships GStreamer $actual," >&2
+            echo "       but this matrix leg declares ${{ matrix.gst_minor }}." >&2
+            exit 1
+          fi
+          echo "debian:${{ matrix.suite }}-slim ships GStreamer $actual"
+
+      # `CC="ccache gcc"` is the meson way — meson has no compiler-launcher
+      # option, it reads the compiler out of the environment at setup time.
+      # The feature flags mirror debian/rules so CI builds what the package does.
+      - name: meson setup
+        run: |
+          set -euo pipefail
+          export CC="ccache gcc"
+          meson setup build \
+            -Drkximage=enabled \
+            -Drockchipmpp=enabled \
+            -Dkmssrc=enabled \
+            -Drga=enabled
+
+      - name: meson compile
+        run: meson compile -C build
+
+      - name: meson test
+        run: meson test -C build --print-errorlogs
+
+      - name: Verify the plugin was built
+        run: |
+          set -euo pipefail
+          ls -la build/gst/rockchipmpp/libgstrockchipmpp.so
+          file build/gst/rockchipmpp/libgstrockchipmpp.so
+
+      # Run the gate's own fail-red proof in the SAME environment that is about
+      # to gate the build — same bash, same objdump, same target-suite.env.
+      - name: Prove the GLIBC gate fails red
+        run: bash ci/check-glibc-floor.test.sh
+
+      # Enforced only on the TARGET leg, and the condition reads the declared
+      # suite rather than a literal. A forward-compatibility leg builds against a
+      # NEWER glibc by construction, so gating it would fail every trixie build
+      # for a reason that says nothing about the device.
+      - name: GLIBC floor gate (target suite only)
+        if: matrix.suite == needs.resolve-suite.outputs.suite
+        run: bash ci/check-glibc-floor.sh build/gst/rockchipmpp/libgstrockchipmpp.so
+
+      - name: Note the forward-compatibility leg
+        if: matrix.suite != needs.resolve-suite.outputs.suite
+        run: |
+          echo "${{ matrix.suite }} is a forward-compatibility leg, not the device"
+          echo "target (${{ needs.resolve-suite.outputs.suite }}). It proves the"
+          echo "source still builds on GStreamer ${{ matrix.gst_minor }}; the GLIBC"
+          echo "floor is a property of the target suite and is not asserted here."
+
+      # Suite-independent: it asks whether the MPP entry points this build calls
+      # exist in the exact library the device installs.
+      - name: MPP ABI closure gate
+        run: bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so
+
+      - name: Save ccache
+        if: github.event_name != 'pull_request'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ matrix.suite }}-arm64-${{ github.sha }}
+
+      - name: Build Summary
+        if: always()
+        run: |
+          {
+            echo "## ${{ matrix.suite }} · GStreamer ${{ matrix.gst_minor }} · arm64"
+            echo
+            echo "- device target suite: \`${{ needs.resolve-suite.outputs.suite }}\` (GLIBC floor \`${{ needs.resolve-suite.outputs.glibc_floor }}\`)"
+            echo "- GLIBC floor gate: ${{ matrix.suite == needs.resolve-suite.outputs.suite && 'enforced' || 'not applicable (forward-compat leg)' }}"
+            echo "- MPP ABI closure: checked against the URL+SHA-pinned \`librockchip-mpp1 1.5.0-1\`"
+          } >> "$GITHUB_STEP_SUMMARY"
