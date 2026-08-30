@@ -7,6 +7,21 @@ extern int mpp_mock_last_cfg_s32(const char *name);
 extern unsigned mpp_mock_control_count(int cmd);
 extern unsigned mpp_mock_frame_set_buffer_count(void);
 extern void mpp_mock_reset(void);
+
+/* gst_mpp_enc_handle_frame() only queues the frame and broadcasts; the
+ * mpp_frame_set_buffer() call happens later on the encoder's srcpad task
+ * thread. Sampling the counter straight after gst_harness_push() therefore
+ * races the encode task, so wait for it instead. */
+static gboolean wait_for_encoder_frame(void) {
+  gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+  while (!mpp_mock_frame_set_buffer_count()) {
+    if (g_get_monotonic_time() > deadline)
+      return FALSE;
+    g_usleep(1000);
+  }
+  return TRUE;
+}
+
 static void check_factory(const char *name, const char *property) {
   GstElementFactory *f = gst_element_factory_find(name);
   fail_unless(f != NULL, "missing %s", name);
@@ -110,7 +125,7 @@ static void check_encoder_lifecycle(const char *factory) {
   fail_unless(mpp_mock_control_count(MPP_ENC_SET_CFG) > 0);
   fail_unless(mpp_mock_control_count(MPP_ENC_SET_SEI_CFG) > 0);
   fail_unless(mpp_mock_control_count(MPP_ENC_SET_HEADER_MODE) > 0);
-  fail_unless(mpp_mock_frame_set_buffer_count() > 0,
+  fail_unless(wait_for_encoder_frame(),
               "encoder frame must stay inside the mock MPP ABI");
   gst_harness_teardown(h);
 }
