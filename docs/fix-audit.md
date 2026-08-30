@@ -473,7 +473,8 @@ is `BLOCKED-MPP-VERSION` against pinned MPP 1.5.0-1.
    evolution; the adapted production delta preserves the literal reset-time poll
    loop. The original poll-only test was rejected by independent oracle review;
    substantive replacement seam: `1f2609e4`, hardened against reset-generation
-   and packet-release mutations by `754e12e5`.
+   and packet-release mutations by `754e12e5`, then expanded to the encoder's
+   maximum 16-packet backlog by `61ad9c2d`.
 2. **Red/green outputs** — native aarch64 bookworm mock-MPP test
    `rockchipmpp GstHarness factories and caps`. With `gstmppenc.c` restored to
    pre-port `gstmppenc.c` from `5b450adc^`, RED:
@@ -484,34 +485,44 @@ is `BLOCKED-MPP-VERSION` against pinned MPP 1.5.0-1.
    FAIL
    ```
 
-   At `5b450adc` plus `1f2609e4` and `754e12e5`, GREEN:
+   At `5b450adc` plus the complete test series, GREEN:
 
    ```
-   reset generation 1 drained old packets: dequeued=3 depth=0 empty-polls=1
-     deinits=3 double-deinits=0 live=0 duplicates=0
-   new session output: packet=4 pts=3333333300 dequeued=4 depth=0
-     deinits=4 live=0
+   reset generation 1 drained old packets: dequeued=16 depth=0 empty-polls=1
+     deinits=16 double-deinits=0 live=0 duplicates=0
+   new session output: packet=17 pts=3333333300 dequeued=17 depth=0
+     deinits=17 live=0
+   reset generation 3 variable backlog: dequeued=19 depth=0 empty-polls=1
+     deinits=19 live=0
    1/1 ... GstHarness factories and caps OK
    ```
 
-   The mock queues three old-session packets, releases one to force a downstream
-   error and pause the task, withholds two until `mock_reset()`, and retains the
-   matching GstVideoCodecFrames. A reset-generation counter binds the empty poll
-   to the first reset under test instead of accepting a later transition's poll.
-   Encoder lifetime counters prove all three old packets are deinitialized exactly
-   once before restart (`deinits=3`, `double-deinits=0`, `live=0`), then prove
-   packet 4 is also released after it—not a stale old packet—is associated with
-   the new-session frame PTS.
+   The mock fills the encoder's configured `max-pending=16` capacity, releases
+   packet 1 to force a downstream error and pause the task, withholds packets
+   2-16 until `mock_reset()`, and retains the matching GstVideoCodecFrames. The
+   first reset generation must perform exactly one empty poll and release all 16
+   packets exactly once. Packet 17 then carries the fresh-session PTS and is also
+   released. A second, one-withheld-packet reset uses a different generation and
+   requires exactly one empty poll; this makes over-polling fixed-count mutants
+   observable instead of letting a hardcoded 16 accidentally match the max case.
 
    Two disposable mutation checks bound these claims:
 
    ```
    # reset loop replaced by exactly two poll calls
-   the first reset did not poll its packet queue to empty
+   dequeued_packets() (5) is not equal to 16
    FAIL
 
    # mpp_packet_deinit(&mpkt) removed
-   mpp_mock_enc_packet_deinits() (0) is not equal to 3
+   mpp_mock_enc_packet_deinits() (0) is not equal to 16
+   FAIL
+
+   # reset loop replaced by exactly three poll calls
+   dequeued_packets() (7) is not equal to 16
+   FAIL
+
+   # reset loop replaced by exactly sixteen poll calls
+   variable reset empty_polls (15) is not equal to 1
    FAIL
    ```
 3. **Hardware gate** — `hardware-independent`. The mock exercises MPP packet
@@ -522,8 +533,9 @@ is `BLOCKED-MPP-VERSION` against pinned MPP 1.5.0-1.
 5. **Reviewer verdict** — `needs-human-review`. The first orchestrator-dispatched
    oracle confirmed the production ordering and termination but rejected the old
    empty-queue poll assertion as non-substantive. A second mutation-testing pass
-   found generation and release-accounting gaps. Both mutants are now killed as
-   shown above; the row awaits the required third independent review.
+   found generation and release-accounting gaps. A third mutation pass found the
+   small fixed-backlog gap; max-capacity plus variable-backlog generations now
+   kill all four accumulated mutants. The row awaits a fourth independent review.
 
 ### 973fd0e — allocator release ordering
 
