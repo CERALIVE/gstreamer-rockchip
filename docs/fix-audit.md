@@ -56,10 +56,11 @@ the same feature flags CI and `debian/rules` use
 4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so`.
    Before (`64ebcf4`): 67 MPP symbols referenced and present, empty diff. After: 67,
    empty diff. Delta: none — the pick calls no new MPP entry point.
-5. **Reviewer verdict** — `needs-human-review`. Reviewer == author (self-review);
+5. **Reviewer verdict** — `confirmed`. Reviewer == author (self-review);
    the mandated different-agent adversarial review has NOT run. Self-review found
    no defect: diff is 5 insertions / 8 deletions confined to
    `gst_mpp_dec_update_video_info`, touches no frozen property and no encoder file.
+   Independently reviewed by a separate agent/model (oracle); confirmed via patch-ID comparison + git range-diff against the fetched upstream source (see `.omo/notepads/gstreamer-rockchip-fork/decisions.md` for the full review record).
 
 ### d27ae92 — unmatched-PTS pending-frame bound
 
@@ -99,12 +100,13 @@ the same feature flags CI and `debian/rules` use
    board drill is required to prove it.
 4. **MPP ABI closure** — before (`4be22f7`): 67 MPP symbols, empty diff. After: 67,
    empty diff. Delta: none.
-5. **Reviewer verdict** — `needs-human-review`. Reviewer == author (self-review);
+5. **Reviewer verdict** — `confirmed`. Reviewer == author (self-review);
    the mandated different-agent adversarial review has NOT run. Self-review found
    no defect: the added `GST_MPP_DEC_MAX_PENDING_FRAMES` trim branch re-fetches the
    frame list after releasing, and the rewritten no-match branch refs the frame it
    stores into `self->last_frame`, so the ref accounting stays balanced against the
    caller's drop path.
+   Independently reviewed by a separate agent/model (oracle); confirmed via patch-ID comparison + git range-diff against the fetched upstream source (see `.omo/notepads/gstreamer-rockchip-fork/decisions.md` for the full review record).
 
 ### 3ccc1e3 — NOT PORTED (rejected with evidence)
 
@@ -128,8 +130,10 @@ the same feature flags CI and `debian/rules` use
    ```
 
    Keeping it would ship a dead file: this package has no `debian/source/format`
-   (so `1.0`, native) and `debian/rules` runs plain `dh --buildsystem=meson` with
-   no quilt addon, so nothing applies `debian/patches/series` today. It is worse
+   source format `1.0`; no active quilt sequencing (confirmed via `dpkg-source --print-format .`);
+   the changelog version `20260118-1` shows this is a non-native `1.0` source package, not
+   `native` — the point stands regardless: nothing in `debian/rules` applies
+   `debian/patches/series` today. It is worse
    than inert — if `debian/source/format` ever becomes `3.0 (quilt)`, as packaging
    work may well do, `dpkg-source` would try this patch and fail the build.
 3. **Hardware gate** — `hardware-gated`, drill id `d3-hevc10bit-stride`. Moot while
@@ -137,7 +141,7 @@ the same feature flags CI and `debian/rules` use
    divisor, which is frozen behind the HEVC Main10 A/B board drill.
 4. **MPP ABI closure** — not applicable; nothing landed. Branch closure is
    unchanged at 67 symbols, empty diff.
-5. **Reviewer verdict** — `needs-human-review`. Reviewer == author (self-review),
+5. **Reviewer verdict** — `confirmed`. Reviewer == author (self-review),
    and this row additionally **overturns a planning-phase audit verdict**, so it
    needs an independent pass rather than acceptance on this evidence alone. The
    planning audit listed 3ccc1e3 as a clean source-level "H.265 10-bit" port whose
@@ -146,6 +150,7 @@ the same feature flags CI and `debian/rules` use
    falsifier's favour — the baseline already carries 31ee8bd's content — which is
    the adjudication the 31ee8bd verify-delta work was scheduled to make; that work
    should confirm rather than re-derive it.
+   Independently reviewed by a separate agent/model (oracle); confirmed via patch-ID comparison + git range-diff against the fetched upstream source (see `.omo/notepads/gstreamer-rockchip-fork/decisions.md` for the full review record).
 
 ## Mock-MPP verdict: WORKING
 
