@@ -5,6 +5,7 @@
 #include <rockchip/rk_mpi_cmd.h>
 #include <stdatomic.h>
 extern int mpp_mock_last_cfg_s32(const char *name);
+extern int64_t mpp_mock_last_cfg_value(const char *name);
 extern unsigned mpp_mock_enc_cfg_record_count(void);
 extern unsigned mpp_mock_enc_cfg_record_dropped(void);
 extern int mpp_mock_enc_cfg_record_s32(unsigned index, const char *name);
@@ -505,14 +506,12 @@ GST_START_TEST(test_zero_valued_tuning_resets_reach_mpp) {
   fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_p_thd"), 30000);
   fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:debreath_strength"), 20);
 
-  g_object_set(h->element, "scene-mode", 0, "anti-flicker", 0, "super-i-thd", 0,
-               "super-p-thd", 0, "debreath-strength", 0, NULL);
+  g_object_set(h->element, "scene-mode", 0, "anti-flicker", 0,
+               "debreath-strength", 0, NULL);
   push_runtime_property_frame(h, 1);
 
   fail_unless_equals_int(mpp_mock_last_cfg_s32("tune:scene_mode"), 0);
   fail_unless_equals_int(mpp_mock_last_cfg_s32("tune:anti_flicker_str"), 0);
-  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_i_thd"), 0);
-  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_p_thd"), 0);
   fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:debreath_strength"), 0);
   gst_harness_teardown(h);
 }
@@ -526,6 +525,59 @@ static void push_sized_frame(GstHarness *h, guint index, gsize size,
   GST_BUFFER_DURATION(frame) = GST_SECOND / fps;
   fail_unless_equals_int(gst_harness_push(h, frame), GST_FLOW_OK);
 }
+
+/*
+ * The super-frame thresholds are NOT plain zero-resettable fields, so they are
+ * asserted apart from the four above. MPP classifies a frame as super with
+ * `(RK_U32) bit_real >= bits_thr` (mpp/codec/rc/rc_model_v2.c:1276), so writing
+ * a raw 0 while the mode is on marks every frame super -- and under
+ * SUPER_FRM_DROP that same branch rewrites the rate controller's drop_mode.
+ * "Unset" therefore has to reach MPP as a threshold nothing attains.
+ */
+GST_START_TEST(test_super_frame_thresholds_reset_to_unreachable_not_zero) {
+  mpp_mock_reset();
+  GstHarness *h =
+      start_encoder_harness("video/x-raw,format=NV12,width=320,height=240,"
+                            "framerate=30/1");
+  g_object_set(h->element, "bitrate", 500, "super-mode", 1, "super-i-thd",
+               90000, "super-p-thd", 30000, NULL);
+  push_runtime_property_frame(h, 0);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_mode"), 1);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_i_thd"), 90000);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_p_thd"), 30000);
+
+  /* Thresholds cleared while the mode is OFF must still reach MPP, or they
+   * resurrect at the next enable. */
+  g_object_set(h->element, "super-mode", 0, "super-i-thd", 0, "super-p-thd", 0,
+               NULL);
+  push_runtime_property_frame(h, 1);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_mode"), 0);
+  fail_unless(mpp_mock_last_cfg_value("rc:super_i_thd") == 0xFFFFFFFFLL,
+              "cleared I threshold reached MPP as %" G_GINT64_FORMAT
+              ", expected an unreachable one",
+              mpp_mock_last_cfg_value("rc:super_i_thd"));
+  fail_unless(mpp_mock_last_cfg_value("rc:super_p_thd") == 0xFFFFFFFFLL,
+              "cleared P threshold reached MPP as %" G_GINT64_FORMAT
+              ", expected an unreachable one",
+              mpp_mock_last_cfg_value("rc:super_p_thd"));
+
+  /* Re-enabling must neither restore the old thresholds nor hand MPP a 0 that
+   * classifies every frame as super. */
+  g_object_set(h->element, "super-mode", 1, NULL);
+  push_runtime_property_frame(h, 2);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:super_mode"), 1);
+  fail_unless(mpp_mock_last_cfg_value("rc:super_i_thd") == 0xFFFFFFFFLL,
+              "re-enabled with I threshold %" G_GINT64_FORMAT,
+              mpp_mock_last_cfg_value("rc:super_i_thd"));
+  fail_unless(mpp_mock_last_cfg_value("rc:super_p_thd") == 0xFFFFFFFFLL,
+              "re-enabled with P threshold %" G_GINT64_FORMAT,
+              mpp_mock_last_cfg_value("rc:super_p_thd"));
+  gst_harness_teardown(h);
+}
+GST_END_TEST
 
 GST_START_TEST(test_auto_bitrate_recomputes_for_new_output_geometry) {
   mpp_mock_reset();
@@ -626,6 +678,7 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_drop_threshold_uses_the_key_mpp_actually_registers);
   tcase_add_test(tc, test_rejected_config_key_fails_the_apply);
   tcase_add_test(tc, test_zero_valued_tuning_resets_reach_mpp);
+  tcase_add_test(tc, test_super_frame_thresholds_reset_to_unreachable_not_zero);
   tcase_add_test(tc, test_auto_bitrate_recomputes_for_new_output_geometry);
   tcase_add_test(tc, test_auto_bitrate_keeps_the_zero_sentinel);
   tcase_add_test(tc, test_auto_bitrate_clamps_instead_of_overflowing);

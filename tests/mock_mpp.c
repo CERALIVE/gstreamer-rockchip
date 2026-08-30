@@ -813,6 +813,12 @@ int mpp_mock_cfg_get_s32(MppEncCfg c, const char *n) {
 int mpp_mock_last_cfg_s32(const char *n) {
   return last_cfg ? mpp_mock_cfg_get_s32(last_cfg, n) : INT32_MIN;
 }
+/* Full stored width, so a test can assert an exact u32 the s32 accessor would
+ * truncate (a 0xFFFFFFFF threshold reads back as -1 through that one). */
+int64_t mpp_mock_last_cfg_value(const char *n) {
+  CfgEntry *e = last_cfg ? cfg_find(last_cfg, n) : NULL;
+  return e ? e->value : INT64_MIN;
+}
 unsigned mpp_mock_enc_cfg_record_count(void) {
   enc_cfg_record_acquire();
   unsigned count = enc_cfg_record_count;

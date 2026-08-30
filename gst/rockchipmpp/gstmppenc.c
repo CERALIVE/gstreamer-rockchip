@@ -545,6 +545,20 @@ typedef struct
 } GstMppEncPropertiesSnapshot;
 
 /*
+ * MPP classifies a coded frame as "super" with `(RK_U32) bit_real >= bits_thr`
+ * (mpp/codec/rc/rc_model_v2.c:1276 at the pinned 1.5.0-1). A threshold of 0
+ * therefore matches EVERY frame the moment super-frame mode is enabled, and in
+ * MPP_ENC_RC_SUPER_FRM_DROP that branch also rewrites the rate controller's own
+ * drop_mode/drop_gap. 0 is this element's documented "unset" value, so it maps
+ * to a threshold no real frame can reach rather than one every frame reaches.
+ */
+static guint
+gst_mpp_enc_super_threshold (guint threshold)
+{
+  return threshold ? threshold : G_MAXUINT;
+}
+
+/*
  * The framerate the encoder actually emits, which is what both the automatic
  * bitrate and the default GOP must be sized against. fps-out decimates output
  * independently of the input caps, so a 60-in/30-out pipeline that sizes either
@@ -863,12 +877,14 @@ gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
   }
 
   /* Super-frame: bound a single coded frame's size so a scene cut / keyframe
-   * cannot spike the send buffer. Thresholds are written unconditionally: 0
-   * means "auto", and MPP keeps the last value it was given, so skipping the
-   * write for 0 would leave the previous threshold in force forever. */
+   * cannot spike the send buffer. Written unconditionally, including when the
+   * mode is off, because MPP keeps the last value it was given and a stale
+   * threshold would otherwise resurrect when the mode is switched back on. */
   gst_mpp_enc_cfg_set_u32 (self, "rc:super_mode", properties.super_mode);
-  gst_mpp_enc_cfg_set_u32 (self, "rc:super_i_thd", properties.super_i_thd);
-  gst_mpp_enc_cfg_set_u32 (self, "rc:super_p_thd", properties.super_p_thd);
+  gst_mpp_enc_cfg_set_u32 (self, "rc:super_i_thd",
+      gst_mpp_enc_super_threshold (properties.super_i_thd));
+  gst_mpp_enc_cfg_set_u32 (self, "rc:super_p_thd",
+      gst_mpp_enc_super_threshold (properties.super_p_thd));
 
   /* De-breathing: smooths the GOP bitrate breathing oscillation. */
   gst_mpp_enc_cfg_set_u32 (self, "rc:debreath_en", properties.debreath ? 1 : 0);
