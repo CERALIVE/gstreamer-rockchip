@@ -472,7 +472,8 @@ is `BLOCKED-MPP-VERSION` against pinned MPP 1.5.0-1.
    JeffyCN/mirrors, author Jeffy Chen. The conflict was only surrounding fork
    evolution; the adapted production delta preserves the literal reset-time poll
    loop. The original poll-only test was rejected by independent oracle review;
-   substantive replacement seam: `1f2609e4`.
+   substantive replacement seam: `1f2609e4`, hardened against reset-generation
+   and packet-release mutations by `754e12e5`.
 2. **Red/green outputs** — native aarch64 bookworm mock-MPP test
    `rockchipmpp GstHarness factories and caps`. With `gstmppenc.c` restored to
    pre-port `gstmppenc.c` from `5b450adc^`, RED:
@@ -483,19 +484,36 @@ is `BLOCKED-MPP-VERSION` against pinned MPP 1.5.0-1.
    FAIL
    ```
 
-   At `5b450adc` plus `1f2609e4`, GREEN:
+   At `5b450adc` plus `1f2609e4` and `754e12e5`, GREEN:
 
    ```
-   reset drained old packets: dequeued=3 depth=0 empty-polls=2 duplicates=0
+   reset generation 1 drained old packets: dequeued=3 depth=0 empty-polls=1
+     deinits=3 double-deinits=0 live=0 duplicates=0
    new session output: packet=4 pts=3333333300 dequeued=4 depth=0
+     deinits=4 live=0
    1/1 ... GstHarness factories and caps OK
    ```
 
    The mock queues three old-session packets, releases one to force a downstream
    error and pause the task, withholds two until `mock_reset()`, and retains the
-   matching GstVideoCodecFrames. It proves both withheld packets are consumed
-   once, polling reaches a genuinely empty queue, and packet 4—not a stale old
-   packet—is associated with the new-session frame PTS.
+   matching GstVideoCodecFrames. A reset-generation counter binds the empty poll
+   to the first reset under test instead of accepting a later transition's poll.
+   Encoder lifetime counters prove all three old packets are deinitialized exactly
+   once before restart (`deinits=3`, `double-deinits=0`, `live=0`), then prove
+   packet 4 is also released after it—not a stale old packet—is associated with
+   the new-session frame PTS.
+
+   Two disposable mutation checks bound these claims:
+
+   ```
+   # reset loop replaced by exactly two poll calls
+   the first reset did not poll its packet queue to empty
+   FAIL
+
+   # mpp_packet_deinit(&mpkt) removed
+   mpp_mock_enc_packet_deinits() (0) is not equal to 3
+   FAIL
+   ```
 3. **Hardware gate** — `hardware-independent`. The mock exercises MPP packet
    retention plus real GstVideoEncoder frame accounting and state transitions;
    no codec device is required.
@@ -503,8 +521,9 @@ is `BLOCKED-MPP-VERSION` against pinned MPP 1.5.0-1.
    empty diff against pinned MPP 1.5.0-1. The port calls an existing static helper.
 5. **Reviewer verdict** — `needs-human-review`. The first orchestrator-dispatched
    oracle confirmed the production ordering and termination but rejected the old
-   empty-queue poll assertion as non-substantive. The strengthened red/green test
-   above resolves that finding and now awaits the required second oracle pass.
+   empty-queue poll assertion as non-substantive. A second mutation-testing pass
+   found generation and release-accounting gaps. Both mutants are now killed as
+   shown above; the row awaits the required third independent review.
 
 ### 973fd0e — allocator release ordering
 
@@ -576,8 +595,9 @@ plugin. It covers:
   hardware. It stays disarmed unless a test arms it, so the encoder harness keeps the
   MPP behavior it was written against.
 - a bounded encoder packet FIFO that can pause after one output, retain multiple
-  packets until reset, count duplicate dequeues and empty polls, and expose packet
-  ids as one-byte payloads for old/new-session association checks;
+  packets until reset, attribute empty polls to a specific reset generation,
+  count exact-once packet release/live state and duplicate dequeues, and expose
+  packet ids as one-byte payloads for old/new-session association checks;
 - JPEG task-port behavior with a scripted input-poll timeout and a withheld
   dequeue task, so timeout classification and retry are tested together.
 
