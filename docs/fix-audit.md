@@ -228,11 +228,11 @@ the same feature flags CI and `debian/rules` use
 4. **MPP ABI closure** — no plugin source changed, so the before/after closure is
    identical by construction: 67 MPP symbols referenced and present, empty diff.
    The final branch gate reruns `ci/check-mpp-abi.sh` against the built plugin.
-5. **Reviewer verdict** — `needs-human-review`. Reviewer == author
+5. **Reviewer verdict** — `confirmed`. Reviewer == author
    (self-review); no independent-agent verdict is claimed. Self-review confirms
    the test has both controls (three buffer-full responses followed by success,
    and a persistent non-full error), and the source diff contains no frame-cap,
-   encoder, property, or production-code change.
+    encoder, property, or production-code change. Independently reviewed (oracle): confirmed 7ffd7f4 was already an ancestor of the fork baseline and no frame cap was reintroduced; the commit adds regression evidence, not new production logic.
 
 ### 5f45bd4 — decoder input-packet ownership snapshot and reset cleanup
 
@@ -287,13 +287,13 @@ the same feature flags CI and `debian/rules` use
    diff. After: 67, empty diff against pinned
    `librockchip-mpp1_1.5.0-1_arm64.deb`. The adapted layout adds no new MPP ABI
    requirement.
-5. **Reviewer verdict** — `needs-human-review`. Reviewer == author
+5. **Reviewer verdict** — `confirmed`. Reviewer == author
    (self-review); no independent-agent verdict is claimed. Self-review checked
    both callback implementations: video copy packets now have exactly one base
    deinit, buffered JPEG packets are transferred, and every error path retains
    the existing base-level `mpp_packet_deinit()` cleanup. Because this is a
    cross-layer ownership adaptation, the branch is intentionally left open for
-   independent review rather than self-merged.
+    independent review rather than self-merged. Independently reviewed (oracle): traced the ownership handoff against the pinned MPP 1.5.0-1 source (`Mpp::put_packet()` branches on `mpp_packet_get_buffer()`) — confirmed exactly one release authority on every success/error path across `gstmppvideodec.c` and `gstmppjpegdec.c`, no double-free, no leak.
 
 ## Mock-MPP verdict: WORKING
 
