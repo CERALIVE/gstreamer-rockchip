@@ -725,3 +725,172 @@ produce a false green. Detailed native output is retained by Meson in
 4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh`; before and after: 67 referenced
    symbols, empty diff. No MPP entry point changed.
 5. **Reviewer verdict** — `confirmed`.
+
+### FIX-6 — MPP config key correctness and checked setters
+
+1. **Provenance SHA** — `0f81dfa0c465a16b6ffdc64bd77ff0c797da40a6`. First-party fix
+   (no upstream pick). Ledger origin O1-B1 + H5-B1.
+2. **Red/green outputs** — `meson test -C build --print-errorlogs`, cases
+   `test_drop_threshold_uses_the_key_mpp_actually_registers` and
+   `test_rejected_config_key_fails_the_apply` in `tests/mpp_gstharness.c`.
+
+   RED at the parent (`395d5ef8`, encoder sources restored to pre-fix content):
+
+   ```
+   77%: Checks: 9, Failures: 2, Errors: 0
+   test_drop_threshold_uses_the_key_mpp_actually_registers:0:
+     'mpp_mock_last_cfg_s32("rc:drop_thd")' (-2147483648) is not equal to '42' (42)
+   test_rejected_config_key_fails_the_apply:0:
+     'gst_harness_push(h, frame)' (0) is not equal to 'GST_FLOW_NOT_NEGOTIATED' (-4)
+   ```
+
+   `-2147483648` is the mock's "key absent" sentinel: the parent wrote the value under
+   a key MPP does not register, so `rc:drop_thd` never appeared at all. The second
+   failure is the silent-discard defect itself — a rejected key produced a perfectly
+   successful buffer push.
+
+   GREEN at the fix: `Ok: 3, Fail: 0` across all three meson tests.
+
+   Mutation check (the fix is load-bearing, not decorative): removing
+   `self->cfg_error = TRUE;` from `gst_mpp_enc_cfg_set_u32` while keeping the warning
+   returns `test_rejected_config_key_fails_the_apply` to red with the identical
+   `(0) is not equal to (-4)`, confirming the assertion tracks the latch and not the
+   log line.
+3. **Hardware gate** — `hardware-independent`. The key name is verified against the
+   pinned MPP's own registration table and its shipped `.so`, and the rejection path is
+   exercised through the mock; neither needs a board. The behavioural consequence on
+   hardware (drop-threshold now actually reaching the rate controller) rides the
+   existing encoder soak drill and claims nothing here.
+4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so`.
+   Before and after: `MPP symbols referenced and present: 67`, empty diff against the
+   pinned `librockchip-mpp1_1.5.0-1_arm64.deb`. Config keys are string arguments, so no
+   symbol changed — the wrappers call the same `mpp_enc_cfg_set_s32`/`_u32`.
+5. **Reviewer verdict** — `confirmed` for the `rc:drop_thd` half and the checked
+   setters. **`false-positive` for the second half of O1-B1**, which is therefore NOT
+   implemented: see the FALSIFIED row below. Reviewer == author (self-review); the
+   mandated independent adversarial review has not run.
+
+### FIX-6 (partial) — FALSIFIED: `tune:anti_flicker_str` is NOT a wrong key
+
+O1-B1 asserted two invalid keys. Verification against the pinned MPP *before* editing
+refuted the second, so it was not applied. Recorded here rather than dropped silently.
+
+1. **Provenance SHA** — no commit; the claim was refused. Evidence gathered from
+   `librockchip-mpp1_1.5.0-1_arm64.deb`
+   (SHA-256 `fe839d41010def25b2c096581815fd26214680bf9720fc47ff2c7afe501f6bcd`) and the
+   MPP tree at `194af181db3a02a095c01db84e176d972e19b216`.
+2. **Red/green outputs** — none, and deliberately so. Both `tune:anti_flicker_str` and
+   `tune:atf_str` are registered keys at the pinned MPP
+   (`mpp/base/mpp_enc_cfg.cpp:269` and `:281`), writing *different* struct fields under
+   *different* change bits (`MPP_ENC_TUNE_CFG_CHANGE_ANTI_FLICKER_STR` = `1<<3`,
+   `MPP_ENC_TUNE_CFG_CHANGE_ATF_STR` = `1<<17`; `inc/rk_venc_cmd.h:1527,1539,1554,1567`).
+   `tune.anti_flicker_str` is range-checked by MPP (`mpp/codec/mpp_enc_impl.cpp:897-900`)
+   and read by the vepu510 HALs (`hal_h265e_vepu510.c:939`,
+   `hal_h264e_vepu510.c:1146,1954`). `tune.atf_str` has **no reader anywhere in the MPP
+   tree** — a tree-wide `grep -rn "\.atf_str\|->atf_str"` returns nothing. Making the
+   specified change would have moved a live tunable onto a dead field.
+3. **Hardware gate** — `hardware-independent` (static evidence from the pinned runtime
+   and its source at the pinned commit).
+4. **MPP ABI closure** — unchanged; no code was modified.
+5. **Reviewer verdict** — `false-positive`. Note this is **not** a
+   `BLOCKED-MPP-VERSION` verdict, which stays reserved for cherry-pick paths. Side
+   finding, out of scope: RK3588 uses the vepu580 HAL, which reads neither field, so
+   anti-flicker is inert on RK3588 either way — an MPP/hardware property, not a plugin
+   defect. Full evidence chain in the effort's `problems.md`.
+
+### FIX-7 — zero-valued tuning resets
+
+1. **Provenance SHA** — `844453d323848b7265105d6adfb7d50b97d44e60`. First-party fix.
+   Ledger origin O1-B2.
+2. **Red/green outputs** — `meson test -C build --print-errorlogs`, case
+   `test_zero_valued_tuning_resets_reach_mpp` in `tests/mpp_gstharness.c`. The test
+   raises `scene-mode`, `anti-flicker`, `super-i-thd`, `super-p-thd` and
+   `debreath-strength`, asserts each landed, then returns all five to 0 and asserts
+   each reset landed.
+
+   RED at the parent (`395d5ef8`):
+
+   ```
+   90%: Checks: 10, Failures: 1, Errors: 0
+   test_zero_valued_tuning_resets_reach_mpp:0:
+     'mpp_mock_last_cfg_s32("tune:scene_mode")' (1) is not equal to '0' (0)
+   ```
+
+   The stale `1` is the defect: the property was set to 0, the getter reported 0, and
+   MPP went on using 1. GREEN at the fix: `Ok: 3, Fail: 0`.
+3. **Hardware gate** — `hardware-independent`. Whether the write reaches MPP's config
+   object is fully observable in the mock; no board behaviour is claimed.
+4. **MPP ABI closure** — before and after: 67 referenced symbols, empty diff. Removing
+   a C `if` changes no symbol.
+5. **Reviewer verdict** — `confirmed`. Intra-refresh was examined and deliberately left
+   alone: its zero path already writes `rc:refresh_en = 0`, so the reset works and there
+   was nothing to fix. Reviewer == author (self-review).
+
+### FIX-9 — auto bitrate and GOP from effective output
+
+1. **Provenance SHA** — `16b61e3d596f2cc091bf772e6e2331c210c04b17`. First-party fix.
+   Ledger origin O1-B4, with the H5-B2 arithmetic ride-along per ADJ-4.
+2. **Red/green outputs** — `meson test -C build --print-errorlogs`, four cases in
+   `tests/mpp_gstharness.c`, deliberately split so each defect is independently red
+   rather than masked by whichever assertion fires first.
+
+   RED at the parent (`395d5ef8`):
+
+   ```
+   71%: Checks: 14, Failures: 4, Errors: 0
+   test_auto_bitrate_recomputes_for_new_output_geometry:0:
+     'mpp_mock_last_cfg_s32("rc:bps_target")' (288000) is not equal to '640*480/8*30' (1152000)
+   test_auto_bitrate_keeps_the_zero_sentinel:0:
+     'reported' (288000) is not equal to '0' (0)
+   test_auto_bitrate_clamps_instead_of_overflowing:0:
+     'mpp_mock_last_cfg_s32("rc:bps_target")' (251658240) is not equal to 'G_MAXINT' (2147483647)
+   test_gop_and_auto_bitrate_follow_fps_out:0:
+     'mpp_mock_last_cfg_s32("rc:gop")' (60) is not equal to '30' (30)
+   ```
+
+   Reading those four: the target stayed at the 320x240 value after the source
+   renegotiated to 640x480; the `bitrate` property reported a number the user never
+   set, proving the sentinel had been overwritten; the 8192x8192 case used the input
+   rate instead of `fps-out`; and the default GOP came from the 60 fps input rather
+   than the 30 fps output.
+
+   GREEN at the fix: `Ok: 3, Fail: 0`.
+
+   Mutation check on the arithmetic: reverting
+   `bps = width; bps = bps * height / 8 * fps;` (all `guint64`) to 32-bit
+   `bps = width * height / 8 * fps` turns `test_auto_bitrate_clamps_instead_of_overflowing`
+   red with `rc:bps_target` = `-2147483648` — the exact wrap. The `guint64` promotion
+   and `G_MAXINT` clamp are therefore pinned by a test, not merely asserted.
+3. **Hardware gate** — `hardware-independent`. Every assertion is about which value the
+   plugin computes and hands to MPP. Note the overflow case remains
+   REAL-BUT-UNREACHABLE-ON-TARGET per the wave-2 verdict: 8192x8192 at the `fps-out`
+   ceiling of 256 is the smallest geometry the property ranges admit that reaches 2^31,
+   which no CeraLive capture path produces. It is pinned because it is cheap to pin,
+   not because it is reachable.
+4. **MPP ABI closure** — before and after: 67 referenced symbols, empty diff. The
+   change is arithmetic and snapshot plumbing; no MPP entry point was added or dropped.
+5. **Reviewer verdict** — `confirmed`. One behaviour change worth an explicit reviewer
+   note: `g_object_get(enc, "bitrate")` now returns `0` while auto is in effect, where
+   it previously returned the first computed target. That is the documented default
+   (`0 = Auto`) and the property's name, type, flags and default are all unchanged, so
+   the frozen property surface (F21) and the parity gate are unaffected — parity output
+   is byte-identical to the parent. Reviewer == author (self-review); the mandated
+   independent adversarial review has not run.
+
+### Verification of the three rows above
+
+Native `debian:bookworm-slim` aarch64 container, pinned MPP 1.5.0-1 / RGA 2.2.0-1,
+built with `-Drkximage=enabled -Drockchipmpp=enabled -Dkmssrc=enabled -Drga=enabled`:
+
+```sh
+meson setup build -Drkximage=enabled -Drockchipmpp=enabled -Dkmssrc=enabled -Drga=enabled
+meson compile -C build
+meson test -C build --print-errorlogs
+bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so
+bash tests/parity-check.sh
+```
+
+`parity-check.sh` exits 77 (honest off-board skip of the runtime leg) with the
+source-derived contract checks passing, on both the parent and the branch; the two
+outputs are byte-identical, which is the differential form this repo's parity
+evidence uses.
