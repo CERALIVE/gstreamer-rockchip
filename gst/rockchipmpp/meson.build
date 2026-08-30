@@ -48,6 +48,20 @@ test('rockchipmpp GstHarness factories and caps', mpp_harness,
   workdir : meson.project_build_root(),
   is_parallel : false)
 
+decoder_seam = executable('mpp-decoder-seam', '../../tests/mpp_decoder_seam.c',
+  dependencies : [gst_dep, gstvideo_dep, gstallocators_dep, gstcheck_dep, mpp_dep],
+  link_with : mock_mpp)
+
+test('rockchipmpp decoder dmabuf caps and pending-frame bound', decoder_seam,
+  depends : [rockchipmpp, mock_mpp],
+  env : [
+    'GST_PLUGIN_PATH=' + meson.project_build_root() / 'gst/rockchipmpp',
+    'MPP_MOCK_LOG=' + meson.project_build_root() / 'mpp-mock-decoder.log',
+    'LD_PRELOAD=' + meson.project_build_root() / 'gst/rockchipmpp/libmppmock.so',
+  ],
+  workdir : meson.project_build_root(),
+  is_parallel : false)
+
 test('rockchipmpp plugin registration and properties',
   find_program('../../tests/plugin_tests.sh'),
   env : [

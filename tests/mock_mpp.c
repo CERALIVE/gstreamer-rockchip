@@ -25,6 +25,9 @@ static int control_counts[512];
 static MppEncCfg last_cfg;
 typedef struct {
   MppFrame input_frame;
+  int heap;
+  int eos;
+  int extra_data;
 } MockPacket;
 typedef struct {
   int fd;
@@ -39,10 +42,27 @@ typedef struct {
   RK_U32 horizontal_stride;
   RK_U32 vertical_stride;
   MppBuffer buffer;
+  RK_S64 pts;
+  RK_U32 info_change;
 } MockFrame;
 static _Atomic(MppFrame) queued_frame;
 static atomic_uint frame_set_buffer_count;
 static MockPacket output_packet;
+
+/* Off unless a test arms it, so the encoder harness keeps the MPP behavior it
+ * was written against. */
+static atomic_int dec_enabled;
+static atomic_int dec_info_change_sent;
+static atomic_uint dec_queued;
+static atomic_uint dec_outputs;
+static atomic_uint dec_eos_seen;
+static RK_U32 dec_width = 320;
+static RK_U32 dec_height = 240;
+/* Kept far BELOW every input PTS so the decoder's display-order matcher filters
+ * each pending frame out as "future" and settles on no match. Nonzero is
+ * load-bearing: gstmppdec.c remaps a zero PTS to GST_CLOCK_TIME_NONE, which
+ * matches the oldest frame instead of missing. */
+static RK_S64 dec_stale_pts = 1;
 static MockCfg *cfg_of(MppEncCfg c) { return (MockCfg *)c; }
 static MPP_RET cfg_set(MppEncCfg c, const char *name, int64_t v, void *ptr,
                        int kind) {
@@ -93,15 +113,61 @@ static MPP_RET enq_ok(MppCtx c, MppPortType t, MppTask p) {
   (void)p;
   return MPP_OK;
 }
+static MockFrame *dec_new_frame(RK_S64 pts, RK_U32 info_change) {
+  MockFrame *f = calloc(1, sizeof(*f));
+  if (!f)
+    return NULL;
+  f->format = MPP_FMT_YUV420SP;
+  f->width = dec_width;
+  f->height = dec_height;
+  f->horizontal_stride = dec_width;
+  f->vertical_stride = dec_height;
+  f->pts = pts;
+  f->info_change = info_change;
+  return f;
+}
 static MPP_RET get_frame_ok(MppCtx c, MppFrame *p) {
   (void)c;
-  if (p)
-    *p = NULL;
-  return MPP_NOK;
+  if (!p)
+    return MPP_NOK;
+  *p = NULL;
+  if (!atomic_load(&dec_enabled))
+    return MPP_NOK;
+
+  if (!atomic_load(&dec_info_change_sent)) {
+    int unsent = 0;
+    if (!atomic_load(&dec_queued))
+      return MPP_OK;
+    if (atomic_compare_exchange_strong(&dec_info_change_sent, &unsent, 1)) {
+      *p = (MppFrame)dec_new_frame(-1, 1);
+      return *p ? MPP_OK : MPP_NOK;
+    }
+  }
+
+  unsigned queued = atomic_load(&dec_queued);
+  while (queued &&
+         !atomic_compare_exchange_weak(&dec_queued, &queued, queued - 1))
+    ;
+  if (!queued)
+    return MPP_OK;
+
+  /* First data output carries an invalid PTS so the decoder abandons MPP
+   * timestamps and matches on the input PTS the test controls. */
+  RK_S64 pts = atomic_fetch_add(&dec_outputs, 1) ? dec_stale_pts : -1;
+  /* No MppBuffer: the decode loop rejects the frame and takes its drop path,
+   * which is what releases the pending frame this output was matched to. */
+  *p = (MppFrame)dec_new_frame(pts, 0);
+  return *p ? MPP_OK : MPP_NOK;
 }
 static MPP_RET put_packet_ok(MppCtx c, MppPacket p) {
   (void)c;
-  (void)p;
+  MockPacket *packet = (MockPacket *)p;
+  if (!atomic_load(&dec_enabled) || !packet)
+    return MPP_OK;
+  if (packet->eos)
+    atomic_store(&dec_eos_seen, 1);
+  else if (!packet->extra_data)
+    atomic_fetch_add(&dec_queued, 1);
   return MPP_OK;
 }
 static MPP_RET control(MppCtx c, MpiCmd cmd, MppParam p) {
@@ -272,6 +338,40 @@ void mpp_frame_set_buffer(MppFrame frame, MppBuffer buffer) {
   atomic_fetch_add(&frame_set_buffer_count, 1);
 }
 
+RK_S64 mpp_frame_get_pts(const MppFrame frame) {
+  return ((MockFrame *)frame)->pts;
+}
+void mpp_frame_set_pts(MppFrame frame, RK_S64 pts) {
+  ((MockFrame *)frame)->pts = pts;
+}
+RK_U32 mpp_frame_get_info_change(const MppFrame frame) {
+  return ((MockFrame *)frame)->info_change;
+}
+RK_U32 mpp_frame_get_eos(const MppFrame frame) {
+  (void)frame;
+  return 0;
+}
+RK_U32 mpp_frame_get_discard(const MppFrame frame) {
+  (void)frame;
+  return 0;
+}
+RK_U32 mpp_frame_get_errinfo(const MppFrame frame) {
+  (void)frame;
+  return 0;
+}
+RK_U32 mpp_frame_get_mode(const MppFrame frame) {
+  (void)frame;
+  return 0;
+}
+RK_U32 mpp_frame_get_offset_x(const MppFrame frame) {
+  (void)frame;
+  return 0;
+}
+RK_U32 mpp_frame_get_offset_y(const MppFrame frame) {
+  (void)frame;
+  return 0;
+}
+
 MppMeta mpp_packet_get_meta(const MppPacket packet) { return (MppMeta)packet; }
 size_t mpp_packet_get_length(const MppPacket packet) {
   (void)packet;
@@ -281,9 +381,49 @@ MppBuffer mpp_packet_get_buffer(const MppPacket packet) {
   (void)packet;
   return NULL;
 }
+MPP_RET mpp_packet_init(MppPacket *packet, void *data, size_t size) {
+  (void)data;
+  (void)size;
+  if (!packet)
+    return MPP_NOK;
+  MockPacket *p = calloc(1, sizeof(*p));
+  if (!p)
+    return MPP_NOK;
+  p->heap = 1;
+  *packet = (MppPacket)p;
+  return MPP_OK;
+}
+void mpp_packet_set_pts(MppPacket packet, RK_S64 pts) {
+  (void)packet;
+  (void)pts;
+}
+void mpp_packet_set_size(MppPacket packet, size_t size) {
+  (void)packet;
+  (void)size;
+}
+void mpp_packet_set_length(MppPacket packet, size_t size) {
+  (void)packet;
+  (void)size;
+}
+MPP_RET mpp_packet_set_eos(MppPacket packet) {
+  if (!packet)
+    return MPP_NOK;
+  ((MockPacket *)packet)->eos = 1;
+  return MPP_OK;
+}
+MPP_RET mpp_packet_set_extra_data(MppPacket packet) {
+  if (!packet)
+    return MPP_NOK;
+  ((MockPacket *)packet)->extra_data = 1;
+  return MPP_OK;
+}
 MPP_RET mpp_packet_deinit(MppPacket *packet) {
-  if (packet)
-    *packet = NULL;
+  if (!packet)
+    return MPP_NOK;
+  MockPacket *p = (MockPacket *)*packet;
+  if (p && p->heap)
+    free(p);
+  *packet = NULL;
   return MPP_OK;
 }
 MPP_RET mpp_meta_get_frame(MppMeta meta, MppMetaKey key, MppFrame *frame) {
@@ -406,10 +546,23 @@ unsigned mpp_mock_control_count(int cmd) {
 unsigned mpp_mock_frame_set_buffer_count(void) {
   return atomic_load(&frame_set_buffer_count);
 }
+void mpp_mock_dec_arm(unsigned width, unsigned height) {
+  dec_width = (RK_U32)width;
+  dec_height = (RK_U32)height;
+  atomic_store(&dec_info_change_sent, 0);
+  atomic_store(&dec_queued, 0);
+  atomic_store(&dec_outputs, 0);
+  atomic_store(&dec_eos_seen, 0);
+  atomic_store(&dec_enabled, 1);
+}
+void mpp_mock_dec_disarm(void) { atomic_store(&dec_enabled, 0); }
+unsigned mpp_mock_dec_queued(void) { return atomic_load(&dec_queued); }
+unsigned mpp_mock_dec_outputs(void) { return atomic_load(&dec_outputs); }
 void mpp_mock_reset(void) {
   memset(control_counts, 0, sizeof(control_counts));
   last_cfg = NULL;
   atomic_store(&queued_frame, NULL);
   atomic_store(&frame_set_buffer_count, 0);
   memset(&output_packet, 0, sizeof(output_packet));
+  mpp_mock_dec_disarm();
 }
