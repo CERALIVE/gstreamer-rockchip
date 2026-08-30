@@ -32,7 +32,16 @@ typedef struct {
   int index;
   unsigned refs;
 } MockBuffer;
+typedef struct {
+  MppFrameFormat format;
+  RK_U32 width;
+  RK_U32 height;
+  RK_U32 horizontal_stride;
+  RK_U32 vertical_stride;
+  MppBuffer buffer;
+} MockFrame;
 static _Atomic(MppFrame) queued_frame;
+static atomic_uint frame_set_buffer_count;
 static MockPacket output_packet;
 static MockCfg *cfg_of(MppEncCfg c) { return (MockCfg *)c; }
 static MPP_RET cfg_set(MppEncCfg c, const char *name, int64_t v, void *ptr,
@@ -212,6 +221,57 @@ MPP_RET mpp_buffer_set_index_with_caller(MppBuffer buffer, int index,
   return MPP_OK;
 }
 
+MPP_RET mpp_frame_init(MppFrame *frame) {
+  if (!frame)
+    return MPP_NOK;
+  *frame = calloc(1, sizeof(MockFrame));
+  return *frame ? MPP_OK : MPP_NOK;
+}
+MPP_RET mpp_frame_deinit(MppFrame *frame) {
+  if (!frame || !*frame)
+    return MPP_NOK;
+  free(*frame);
+  *frame = NULL;
+  return MPP_OK;
+}
+MppFrameFormat mpp_frame_get_fmt(MppFrame frame) {
+  return ((MockFrame *)frame)->format;
+}
+void mpp_frame_set_fmt(MppFrame frame, MppFrameFormat format) {
+  ((MockFrame *)frame)->format = format;
+}
+RK_U32 mpp_frame_get_width(const MppFrame frame) {
+  return ((MockFrame *)frame)->width;
+}
+void mpp_frame_set_width(MppFrame frame, RK_U32 width) {
+  ((MockFrame *)frame)->width = width;
+}
+RK_U32 mpp_frame_get_height(const MppFrame frame) {
+  return ((MockFrame *)frame)->height;
+}
+void mpp_frame_set_height(MppFrame frame, RK_U32 height) {
+  ((MockFrame *)frame)->height = height;
+}
+RK_U32 mpp_frame_get_hor_stride(const MppFrame frame) {
+  return ((MockFrame *)frame)->horizontal_stride;
+}
+void mpp_frame_set_hor_stride(MppFrame frame, RK_U32 stride) {
+  ((MockFrame *)frame)->horizontal_stride = stride;
+}
+RK_U32 mpp_frame_get_ver_stride(const MppFrame frame) {
+  return ((MockFrame *)frame)->vertical_stride;
+}
+void mpp_frame_set_ver_stride(MppFrame frame, RK_U32 stride) {
+  ((MockFrame *)frame)->vertical_stride = stride;
+}
+MppBuffer mpp_frame_get_buffer(const MppFrame frame) {
+  return ((MockFrame *)frame)->buffer;
+}
+void mpp_frame_set_buffer(MppFrame frame, MppBuffer buffer) {
+  ((MockFrame *)frame)->buffer = buffer;
+  atomic_fetch_add(&frame_set_buffer_count, 1);
+}
+
 MppMeta mpp_packet_get_meta(const MppPacket packet) { return (MppMeta)packet; }
 size_t mpp_packet_get_length(const MppPacket packet) {
   (void)packet;
@@ -343,9 +403,13 @@ unsigned mpp_mock_control_count(int cmd) {
          : cmd == MPP_ENC_SET_HEADER_MODE ? (unsigned)control_counts[2]
                                           : 0;
 }
+unsigned mpp_mock_frame_set_buffer_count(void) {
+  return atomic_load(&frame_set_buffer_count);
+}
 void mpp_mock_reset(void) {
   memset(control_counts, 0, sizeof(control_counts));
   last_cfg = NULL;
   atomic_store(&queued_frame, NULL);
+  atomic_store(&frame_set_buffer_count, 0);
   memset(&output_packet, 0, sizeof(output_packet));
 }

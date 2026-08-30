@@ -5,6 +5,7 @@
 #include <rockchip/rk_mpi_cmd.h>
 extern int mpp_mock_last_cfg_s32(const char *name);
 extern unsigned mpp_mock_control_count(int cmd);
+extern unsigned mpp_mock_frame_set_buffer_count(void);
 extern void mpp_mock_reset(void);
 static void check_factory(const char *name, const char *property) {
   GstElementFactory *f = gst_element_factory_find(name);
@@ -109,6 +110,8 @@ static void check_encoder_lifecycle(const char *factory) {
   fail_unless(mpp_mock_control_count(MPP_ENC_SET_CFG) > 0);
   fail_unless(mpp_mock_control_count(MPP_ENC_SET_SEI_CFG) > 0);
   fail_unless(mpp_mock_control_count(MPP_ENC_SET_HEADER_MODE) > 0);
+  fail_unless(mpp_mock_frame_set_buffer_count() > 0,
+              "encoder frame must stay inside the mock MPP ABI");
   gst_harness_teardown(h);
 }
 GST_START_TEST(test_h264_encoder_lifecycle) {
