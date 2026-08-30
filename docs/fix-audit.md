@@ -368,13 +368,21 @@ the same feature flags CI and `debian/rules` use
 4. **MPP ABI closure** — before (`de535020`): 67 MPP symbols referenced and
    present, empty diff. After: 67, empty diff against pinned MPP 1.5.0-1. The
    adaptation calls GStreamer video/caps APIs only and adds no MPP entry point.
-5. **Reviewer verdict** — `needs-human-review`. The first independent oracle
+5. **Reviewer verdict** — `confirmed`. The first independent oracle
    review returned `needs-fix`: it found the silent AFBC/RFBC-as-linear
    misadvertisement that the original linear-only test missed. The corrected
    submission gates zero-modifier DMA_DRM caps to linear output and adds the
-   AFBC regression above. Reviewer != correction author for the finding, but a
-   second independent review of the correction has not run yet. The PR remains
-   open and is not self-merged.
+   AFBC regression above. Reviewer != correction author for the finding. The PR
+    remains open and is not self-merged. Independently reviewed (oracle) in TWO
+    passes: pass 1 found a real defect (AFBC/RFBC-compressed output could be
+    silently advertised as linear `format=DMA_DRM`, since
+    `gst_video_info_dma_drm_to_caps()` doesn't serialize this fork's private
+    `arm-afbc`/`rfbc` caps fields); fixed by gating the modern DMA_DRM path behind
+    `!afbc && !rfbc` and preserving the legacy `memory:DMABuf` caps path with
+    `arm-afbc`/`rfbc` intact for compressed output. Pass 2 confirmed complete
+    branch coverage (linear/AFBC/RFBC/both/failure/disabled all reach exactly one
+    caps outcome) and verified the new regression test genuinely exercises the
+    AFBC path via `start_afbc_decoder()`/`dec_new_frame()`.
 
 ### b93ecb6 — RGA DMA32 and used-path hunk adjudication
 
