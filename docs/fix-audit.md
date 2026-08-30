@@ -614,9 +614,13 @@ is `BLOCKED-MPP-VERSION` against pinned MPP 1.5.0-1.
 
    A delayed-clear mutant moved `prop_dirty = FALSE` after
    `MPP_ENC_SET_CFG`; the same test rejected it with `the final quiescent bitrate
-   was never applied`. The correct locked handoff was then restored. An optional
-   TSAN build compiled, but qemu could not start its aarch64 runtime
-   (`unsupported VMA range`, found 47 bits); this produced no sanitizer finding.
+   was never applied`. The correct locked handoff was then restored. **TSAN
+   execution: NOT DONE.** The aarch64 TSAN binary failed to start under QEMU
+   emulation (`unsupported VMA range`, found 47 bits). This is an environment
+   limitation, not a test result, and no sanitizer conclusion can be drawn. The
+   deterministic mock-sequencing test reproduces both the torn-read and
+   lost-update failure modes under controlled thread barriers and independently
+   satisfies the plan's stated `TSAN OR mock-sequencing` acceptance criterion.
    `PARITY_SOURCE_ONLY=1 bash tests/parity-check.sh` passed both source-derived
    contracts. A full mock-host invocation then passed `mpph264enc` and
    `mpph265enc` runtime parity (including every frozen property line) before the
