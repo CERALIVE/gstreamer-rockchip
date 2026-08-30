@@ -6,6 +6,7 @@
 extern int mpp_mock_last_cfg_s32(const char *name);
 extern unsigned mpp_mock_control_count(int cmd);
 extern unsigned mpp_mock_frame_set_buffer_count(void);
+extern unsigned mpp_mock_enc_poll_calls_after_reset(void);
 extern void mpp_mock_reset(void);
 
 /* gst_mpp_enc_handle_frame() only queues the frame and broadcasts; the
@@ -42,6 +43,21 @@ GST_START_TEST(test_factories_properties) {
   check_factory("mpph265enc", "bitrate");
   check_factory("mppvideodec", "fbc");
   check_factory("mppjpegdec", "format");
+}
+GST_END_TEST
+GST_START_TEST(test_encoder_reset_polls_leftover_packet) {
+  mpp_mock_reset();
+
+  GstHarness *h = gst_harness_new("mpph264enc");
+  fail_unless(h != NULL);
+  gst_harness_play(h);
+
+  fail_unless(gst_element_set_state(h->element, GST_STATE_READY) !=
+              GST_STATE_CHANGE_FAILURE);
+  fail_unless(mpp_mock_enc_poll_calls_after_reset() > 0,
+              "encoder reset did not inspect MPP's leftover output queue");
+
+  gst_harness_teardown(h);
 }
 GST_END_TEST
 GST_START_TEST(test_jpeg_caps_with_harness) {
@@ -148,6 +164,7 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_video_decoder_caps_truth);
   tcase_add_test(tc, test_h264_encoder_lifecycle);
   tcase_add_test(tc, test_h265_encoder_lifecycle);
+  tcase_add_test(tc, test_encoder_reset_polls_leftover_packet);
   suite_add_tcase(s, tc);
   return s;
 }

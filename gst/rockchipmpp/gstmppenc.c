@@ -742,6 +742,8 @@ gst_mpp_enc_set_src_caps (GstVideoEncoder * encoder, GstCaps * caps)
   return gst_video_encoder_negotiate (encoder);
 }
 
+static gboolean gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder);
+
 static void
 gst_mpp_enc_stop_task (GstVideoEncoder * encoder, gboolean drain)
 {
@@ -793,6 +795,11 @@ gst_mpp_enc_reset (GstVideoEncoder * encoder, gboolean drain, gboolean final)
   self->draining = FALSE;
 
   self->mpi->reset (self->mpp_ctx);
+
+  /* MPP leaves encoder output queued across reset. Drain through the normal
+   * output path so stale packets cannot be assigned to the next session. */
+  while (gst_mpp_enc_poll_packet_locked (encoder));
+
   self->task_ret = GST_FLOW_OK;
   self->pending_frames = 0;
 

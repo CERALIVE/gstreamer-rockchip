@@ -52,6 +52,8 @@ typedef struct {
 } MockFrame;
 static _Atomic(MppFrame) queued_frame;
 static atomic_uint frame_set_buffer_count;
+static atomic_int enc_reset_seen;
+static atomic_uint enc_poll_calls_after_reset;
 static MockPacket output_packet;
 
 /* Off unless a test arms it, so the encoder harness keeps the MPP behavior it
@@ -230,15 +232,22 @@ static MPP_RET encode_put(MppCtx c, MppFrame f) {
 }
 static MPP_RET encode_get(MppCtx c, MppPacket *p) {
   (void)c;
-  MppFrame f = atomic_exchange(&queued_frame, NULL);
   if (!p)
     return MPP_NOK;
+  if (atomic_load(&enc_reset_seen))
+    atomic_fetch_add(&enc_poll_calls_after_reset, 1);
+  MppFrame f = atomic_exchange(&queued_frame, NULL);
   if (!f) {
     *p = NULL;
     return MPP_OK;
   }
   output_packet.input_frame = f;
   *p = (MppPacket)&output_packet;
+  return MPP_OK;
+}
+static MPP_RET mock_reset(MppCtx c) {
+  (void)c;
+  atomic_store(&enc_reset_seen, 1);
   return MPP_OK;
 }
 MPP_RET mpp_buffer_group_get(MppBufferGroup *group, MppBufferType type,
@@ -496,7 +505,7 @@ MPP_RET mpp_create(MppCtx *ctx, MppApi **mpi) {
   api.encode_put_frame = encode_put;
   api.encode_get_packet = encode_get;
   api.control = control;
-  api.reset = ok;
+  api.reset = mock_reset;
   api.poll = port_ok;
   api.dequeue = deq_ok;
   api.enqueue = enq_ok;
@@ -600,6 +609,9 @@ unsigned mpp_mock_control_count(int cmd) {
 unsigned mpp_mock_frame_set_buffer_count(void) {
   return atomic_load(&frame_set_buffer_count);
 }
+unsigned mpp_mock_enc_poll_calls_after_reset(void) {
+  return atomic_load(&enc_poll_calls_after_reset);
+}
 void mpp_mock_dec_arm(unsigned width, unsigned height) {
   dec_width = (RK_U32)width;
   dec_height = (RK_U32)height;
@@ -669,6 +681,8 @@ void mpp_mock_reset(void) {
   last_cfg = NULL;
   atomic_store(&queued_frame, NULL);
   atomic_store(&frame_set_buffer_count, 0);
+  atomic_store(&enc_reset_seen, 0);
+  atomic_store(&enc_poll_calls_after_reset, 0);
   memset(&output_packet, 0, sizeof(output_packet));
   mpp_mock_dec_disarm();
 }
