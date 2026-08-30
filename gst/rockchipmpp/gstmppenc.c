@@ -581,30 +581,49 @@ gst_mpp_enc_effective_fps_out (const GstMppEncPropertiesSnapshot * properties)
 
 /*
  * The bitrate=0 "auto" target: an eighth of a raw 8-bit luma plane per output
- * frame. Evaluated in 64-bit and clamped, because the product overflows a
- * signed 32-bit int somewhere above 8K-class geometry and MPP's rc:bps_* fields
- * are RK_S32 regardless.
+ * frame, saturated at G_MAXINT because MPP's rc:bps_* fields are RK_S32.
+ *
+ * The frame term is bounded BEFORE it is scaled by the framerate rather than
+ * after. width and height are each only bounded by G_MAXINT, so the product can
+ * reach 2^59 after the shift, and multiplying that by a framerate first would
+ * wrap guint64 itself -- leaving a post-hoc `> G_MAXINT` test looking at a
+ * small wrapped value and silently returning it as if it were in range.
  */
 static guint
 gst_mpp_enc_auto_bitrate (gint width, gint height, gint fps)
 {
-  guint64 bps;
+  guint64 frame_bits;
+  guint64 limit = G_MAXINT;
 
   if (width <= 0 || height <= 0 || fps <= 0)
     return 0;
 
-  bps = width;
-  bps = bps * height / 8 * fps;
+  frame_bits = width;
+  frame_bits = frame_bits * height / 8;
 
-  return bps > (guint64) G_MAXINT ? (guint) G_MAXINT : (guint) bps;
+  if (frame_bits > limit / (guint64) fps)
+    return (guint) G_MAXINT;
+
+  return (guint) (frame_bits * fps);
 }
 
+/*
+ * Scale a bitrate by a small ratio, saturating at G_MAXINT. Same rule as above:
+ * the operand is bounded against the numerator before the multiply, so no
+ * intermediate can wrap.
+ */
 static gint
 gst_mpp_enc_scale_bitrate (guint bps, guint numerator, guint denominator)
 {
-  guint64 scaled = (guint64) bps * numerator / denominator;
+  guint64 scaled = bps;
+  guint64 limit = G_MAXINT;
 
-  return scaled > (guint64) G_MAXINT ? G_MAXINT : (gint) scaled;
+  if (scaled > G_MAXUINT64 / (guint64) numerator)
+    return G_MAXINT;
+
+  scaled = scaled * numerator / denominator;
+
+  return scaled > limit ? G_MAXINT : (gint) scaled;
 }
 
 /*

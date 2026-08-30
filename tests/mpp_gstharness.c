@@ -517,15 +517,6 @@ GST_START_TEST(test_zero_valued_tuning_resets_reach_mpp) {
 }
 GST_END_TEST
 
-static void push_sized_frame(GstHarness *h, guint index, gsize size,
-                             gint fps) {
-  GstBuffer *frame = gst_buffer_new_allocate(NULL, size, NULL);
-  fail_unless(frame != NULL);
-  GST_BUFFER_PTS(frame) = index * (GST_SECOND / fps);
-  GST_BUFFER_DURATION(frame) = GST_SECOND / fps;
-  fail_unless_equals_int(gst_harness_push(h, frame), GST_FLOW_OK);
-}
-
 /*
  * The super-frame thresholds are NOT plain zero-resettable fields, so they are
  * asserted apart from the four above. MPP classifies a frame as super with
@@ -579,6 +570,15 @@ GST_START_TEST(test_super_frame_thresholds_reset_to_unreachable_not_zero) {
 }
 GST_END_TEST
 
+static void push_sized_frame(GstHarness *h, guint index, gsize size,
+                             gint fps) {
+  GstBuffer *frame = gst_buffer_new_allocate(NULL, size, NULL);
+  fail_unless(frame != NULL);
+  GST_BUFFER_PTS(frame) = index * (GST_SECOND / fps);
+  GST_BUFFER_DURATION(frame) = GST_SECOND / fps;
+  fail_unless_equals_int(gst_harness_push(h, frame), GST_FLOW_OK);
+}
+
 GST_START_TEST(test_auto_bitrate_recomputes_for_new_output_geometry) {
   mpp_mock_reset();
   GstHarness *h =
@@ -617,22 +617,81 @@ GST_START_TEST(test_auto_bitrate_keeps_the_zero_sentinel) {
 }
 GST_END_TEST
 
-/* 8192x8192 at the 256 fps-out ceiling is the smallest geometry the property
- * ranges allow that pushes width*height/8*fps to exactly 2^31, so 32-bit
- * arithmetic here yields a negative rc:bps_target rather than a clamp. */
-GST_START_TEST(test_auto_bitrate_clamps_instead_of_overflowing) {
+/*
+ * The automatic target is derived while the caps event is handled, so these
+ * saturation cases need no buffer -- which is what makes them affordable, since
+ * a real frame at these geometries is 100MB and 1.6GB respectively.
+ *
+ * 8192x8192 at the 256 fps-out ceiling puts width*height/8*fps at exactly 2^31,
+ * the boundary where 32-bit arithmetic turns negative. 32768x32768 is the
+ * largest geometry GStreamer itself accepts (gst_video_info_from_caps rejects
+ * anything whose frame size passes ~G_MAXINT), so it is the true upper bound of
+ * what this element can ever be handed.
+ */
+static void check_auto_bitrate_saturates(const char *caps) {
   mpp_mock_reset();
   GstHarness *h = gst_harness_new("mpph264enc");
   fail_unless(h != NULL);
   g_object_set(h->element, "rc-mode", 1, "zero-copy-pkt", FALSE, "fps-out", 256,
                NULL);
-  gst_harness_set_src_caps_str(
-      h, "video/x-raw,format=NV12,width=8192,height=8192,framerate=30/1");
-  gst_harness_set_drop_buffers(h, TRUE);
-  gst_harness_play(h);
-  push_sized_frame(h, 0, (gsize)8192 * 8192 * 3 / 2, 30);
+  gst_harness_set_src_caps_str(h, caps);
 
   fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:bps_target"), G_MAXINT);
+  /* The derived bounds saturate too. In CBR they are target*17/16 and
+   * target*15/16, which overflow a signed 32-bit int at this target. */
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:bps_max"), G_MAXINT);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:bps_min"),
+                         (gint)((gint64)G_MAXINT * 15 / 16));
+  gst_harness_teardown(h);
+}
+
+GST_START_TEST(test_auto_bitrate_clamps_instead_of_overflowing) {
+  check_auto_bitrate_saturates(
+      "video/x-raw,format=NV12,width=8192,height=8192,framerate=30/1");
+}
+GST_END_TEST
+
+GST_START_TEST(test_auto_bitrate_saturates_at_the_largest_accepted_geometry) {
+  check_auto_bitrate_saturates(
+      "video/x-raw,format=NV12,width=32768,height=32768,framerate=30/1");
+}
+GST_END_TEST
+
+/*
+ * The runtime width/height ladder reaches the encoder through
+ * gst_mpp_enc_apply_pending_resolution(), a different path from a caps change:
+ * apply_strides() cannot mark properties dirty here because it is handed the
+ * strides it just read back out of the same info, so its equality check always
+ * short-circuits. Without an explicit prop_dirty on that path the automatic
+ * bitrate keeps the geometry it was first negotiated with.
+ */
+GST_START_TEST(test_auto_bitrate_recomputes_for_runtime_resolution_property) {
+  mpp_mock_reset();
+  GstHarness *h =
+      start_encoder_harness("video/x-raw,format=NV12,width=320,height=240,"
+                            "framerate=30/1");
+  push_sized_frame(h, 0, 115200, 30);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:bps_target"),
+                         320 * 240 / 8 * 30);
+
+  g_object_set(h->element, "width", 160, "height", 120, NULL);
+
+  /* The rescale itself needs real RGA hardware, so these pushes are expected to
+   * fail downstream of the config work; the assertion is on what reached MPP,
+   * not on the flow return. The first frame runs apply_pending_resolution, the
+   * second is when the re-derived config is applied. */
+  for (guint i = 1; i < 4; i++) {
+    GstBuffer *frame = gst_buffer_new_allocate(NULL, 115200, NULL);
+    fail_unless(frame != NULL);
+    GST_BUFFER_PTS(frame) = i * (GST_SECOND / 30);
+    GST_BUFFER_DURATION(frame) = GST_SECOND / 30;
+    gst_harness_push(h, frame);
+  }
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("prep:width"), 160);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("prep:height"), 120);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:bps_target"),
+                         160 * 120 / 8 * 30);
   gst_harness_teardown(h);
 }
 GST_END_TEST
@@ -680,8 +739,11 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_zero_valued_tuning_resets_reach_mpp);
   tcase_add_test(tc, test_super_frame_thresholds_reset_to_unreachable_not_zero);
   tcase_add_test(tc, test_auto_bitrate_recomputes_for_new_output_geometry);
+  tcase_add_test(tc,
+                 test_auto_bitrate_recomputes_for_runtime_resolution_property);
   tcase_add_test(tc, test_auto_bitrate_keeps_the_zero_sentinel);
   tcase_add_test(tc, test_auto_bitrate_clamps_instead_of_overflowing);
+  tcase_add_test(tc, test_auto_bitrate_saturates_at_the_largest_accepted_geometry);
   tcase_add_test(tc, test_gop_and_auto_bitrate_follow_fps_out);
   tcase_add_test(tc, test_h264_encoder_lifecycle);
   tcase_add_test(tc, test_h265_encoder_lifecycle);
