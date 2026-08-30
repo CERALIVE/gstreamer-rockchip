@@ -942,7 +942,18 @@ unsigned mpp_mock_enc_packet_double_deinits(void) {
 unsigned mpp_mock_enc_live_packets(void) {
   return atomic_load(&enc_live_packets);
 }
+static void dec_release_packets(void) {
+  while (packet_allocs) {
+    MockPacket *packet = packet_allocs;
+    packet_allocs = packet->next;
+    free(packet);
+  }
+}
 void mpp_mock_dec_arm(unsigned width, unsigned height) {
+  /* The previous element is long gone by the time a test arms again, so this
+   * is the only point where reclaiming the arena cannot free a packet some
+   * element still owns and will deinitialize as it stops. */
+  dec_release_packets();
   dec_width = (RK_U32)width;
   dec_height = (RK_U32)height;
   atomic_store(&dec_frame_format, MPP_FMT_YUV420SP);
@@ -966,14 +977,9 @@ void mpp_mock_dec_arm(unsigned width, unsigned height) {
   atomic_store(&jpeg_last_input_poll_timed_out, 0);
   atomic_store(&dec_enabled, 1);
 }
-void mpp_mock_dec_disarm(void) {
-  atomic_store(&dec_enabled, 0);
-  while (packet_allocs) {
-    MockPacket *packet = packet_allocs;
-    packet_allocs = packet->next;
-    free(packet);
-  }
-}
+/* Stops the mock producing so a harness teardown can drain, but deliberately
+ * keeps the packet arena alive for the element that is still stopping. */
+void mpp_mock_dec_disarm(void) { atomic_store(&dec_enabled, 0); }
 unsigned mpp_mock_dec_queued(void) { return atomic_load(&dec_queued); }
 unsigned mpp_mock_dec_outputs(void) { return atomic_load(&dec_outputs); }
 void mpp_mock_dec_set_frame_format(MppFrameFormat format) {
@@ -1053,4 +1059,5 @@ void mpp_mock_reset(void) {
   memset(enc_buffers, 0, sizeof(enc_buffers));
   memset(enc_payloads, 0, sizeof(enc_payloads));
   mpp_mock_dec_disarm();
+  dec_release_packets();
 }
