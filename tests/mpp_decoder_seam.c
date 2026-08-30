@@ -133,6 +133,43 @@ negotiated_caps_have_dmabuf (gboolean dma_feature)
   return have_dmabuf;
 }
 
+#if GST_CHECK_VERSION(1, 24, 0)
+static void
+test_dma_drm_peer_selects_dma_drm_caps (void)
+{
+  GstHarness *h = start_decoder (TRUE);
+  GstCaps *caps;
+  const GstStructure *structure;
+  const gchar *format;
+  const gchar *drm_format;
+  gchar *caps_str;
+
+  g_print ("== DMA_DRM peer caps negotiation ==\n");
+
+  gst_harness_set_sink_caps_str (h,
+      "video/x-raw(memory:DMABuf),format=(string)DMA_DRM");
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (0)), ==, GST_FLOW_OK);
+  g_assert_true (wait_for_outputs (1));
+
+  caps = gst_pad_get_current_caps (GST_VIDEO_DECODER_SRC_PAD (h->element));
+  g_assert_nonnull (caps);
+  structure = gst_caps_get_structure (caps, 0);
+  format = gst_structure_get_string (structure, "format");
+  drm_format = gst_structure_get_string (structure, "drm-format");
+  caps_str = gst_caps_to_string (caps);
+  g_print ("DMA_DRM-only peer -> negotiated caps %s\n", caps_str);
+
+  g_assert_cmpstr (format, ==, "DMA_DRM");
+  g_assert_nonnull (drm_format);
+  g_assert_true (g_str_has_prefix (drm_format, "NV12"));
+
+  g_free (caps_str);
+  gst_caps_unref (caps);
+  stop_decoder (h);
+  g_print ("DMA_DRM peer caps negotiation: OK\n");
+}
+#endif
+
 static void
 test_packet_ownership_is_decided_before_send (void)
 {
@@ -274,6 +311,11 @@ main (int argc, char **argv)
   test_packet_ownership_is_decided_before_send ();
   test_put_packet_result_drives_fullness ();
   test_dma_feature_reaches_negotiated_caps ();
+#if GST_CHECK_VERSION(1, 24, 0)
+  test_dma_drm_peer_selects_dma_drm_caps ();
+#else
+  g_print ("DMA_DRM peer caps negotiation: SKIP (requires GStreamer >= 1.24)\n");
+#endif
   test_unmatched_pts_pending_list_is_bounded ();
 
   g_print ("mpp-decoder-seam: OK\n");

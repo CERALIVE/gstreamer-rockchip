@@ -29,6 +29,10 @@
 #include "gstmppallocator.h"
 #include "gstmppdec.h"
 
+#if GST_CHECK_VERSION(1, 24, 0)
+#include <gst/video/video-info-dma.h>
+#endif
+
 #define GST_CAT_DEFAULT mpp_dec_debug
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
 
@@ -466,12 +470,52 @@ gst_mpp_dec_update_video_info (GstVideoDecoder * decoder, GstVideoFormat format,
   }
 
   if (self->dma_feature) {
+#if GST_CHECK_VERSION(1, 24, 0)
+    GstVideoInfoDmaDrm drm_info;
+
+    /* Offer both legacy DMABuf caps and DMA_DRM caps with a linear modifier,
+     * then let the peer choose. Keep the existing output_state->info intact:
+     * only its caps participate in this negotiation. If the peer is not ready
+     * yet, retain the sysmem caps so a later RECONFIGURE can retry. */
+    if (gst_video_info_dma_drm_from_video_info (&drm_info,
+            &output_state->info, 0)) {
+      GstCaps *drm_caps = gst_video_info_dma_drm_to_caps (&drm_info);
+
+      if (drm_caps) {
+        GstCaps *offer = gst_caps_copy (output_state->caps);
+        GstCaps *peer_caps;
+
+        gst_caps_set_features (offer, 0,
+            gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_DMABUF, NULL));
+        gst_caps_append (offer, drm_caps);
+
+        peer_caps = gst_pad_peer_query_caps (decoder->srcpad, offer);
+        gst_caps_unref (offer);
+
+        if (peer_caps && !gst_caps_is_empty (peer_caps) &&
+            !gst_caps_is_any (peer_caps)) {
+          GstCaps *chosen = gst_caps_fixate (peer_caps);
+
+          if (gst_caps_features_contains (gst_caps_get_features (chosen, 0),
+                  GST_CAPS_FEATURE_MEMORY_DMABUF)) {
+            gst_caps_unref (output_state->caps);
+            output_state->caps = chosen;
+          } else {
+            gst_caps_unref (chosen);
+          }
+        } else if (peer_caps) {
+          gst_caps_unref (peer_caps);
+        }
+      }
+    }
+#else
     /*
-     * Keep output_state->caps fixed for gst_pad_set_caps(), and force
-     * DMABuf memory feature when requested by dma-feature=true.
+     * GStreamer before 1.24 has no DMA_DRM caps API. Preserve the legacy
+     * DMABuf negotiation used by the bookworm/GStreamer 1.22 build.
      */
     gst_caps_set_features (output_state->caps, 0,
         gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_DMABUF, NULL));
+#endif
   }
 
   *info = output_state->info;

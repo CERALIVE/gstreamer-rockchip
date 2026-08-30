@@ -295,6 +295,65 @@ the same feature flags CI and `debian/rules` use
    cross-layer ownership adaptation, the branch is intentionally left open for
     independent review rather than self-merged. Independently reviewed (oracle): traced the ownership handoff against the pinned MPP 1.5.0-1 source (`Mpp::put_packet()` branches on `mpp_packet_get_buffer()`) — confirmed exactly one release authority on every success/error path across `gstmppvideodec.c` and `gstmppjpegdec.c`, no double-free, no leak.
 
+### 892f662 — selective DMA_DRM caps negotiation
+
+1. **Provenance SHA and hunk resolution** —
+   `892f662465b54de9fe10b9c691f64d3dbe047248`, kelvinlawson, author
+   `Kelvin Lawson <kelvin.a.lawson@gmail.com>`. The complete two-hunk diff was
+   inspected before adaptation. Only the negotiation block was ported; the
+   fork's output-state construction, FBC flags, `self->info` assignment,
+   negotiation call, and stride alignment remain unchanged.
+
+   | Upstream hunk | Decision | Resolution |
+   | --- | --- | --- |
+   | Include `gst/video/video-info-dma.h` | include, adapted | Guarded with `GST_CHECK_VERSION(1, 24, 0)` because the bookworm/GStreamer 1.22 build does not ship this header. |
+   | Replace the `dma_feature` caps block with peer-selected legacy DMABuf + DMA_DRM offers | include, selective | Ported inside the existing function without replacing the function. On GStreamer 1.24+, only `output_state->caps` can be replaced; `output_state->info` remains the fork's existing NV12 state. Empty/ANY/unready peers retain sysmem caps for a later RECONFIGURE. GStreamer 1.22 keeps the exact legacy DMABuf feature path. |
+   | Any output-state/FBC/stride behavior outside the two source hunks | exclude | Not present in the upstream diff and intentionally untouched; this is the auditor's selective-port boundary. |
+
+2. **Red/green outputs** — `meson test -C build --verbose
+   "rockchipmpp decoder dmabuf caps and pending-frame bound"`. The new case
+   supplies a DMA_DRM-only downstream peer through GstHarness. On the aarch64
+   trixie/GStreamer 1.26 build, with only the pre-existing GCC-14 crop-meta cast
+   applied to the disposable container copy so the test could execute:
+
+   RED at parent `de535020`:
+
+   ```
+   DMA_DRM-only peer -> negotiated caps video/x-raw(memory:DMABuf), format=(string)NV12, ...
+   assertion failed (format == "DMA_DRM"): ("NV12" == "DMA_DRM")
+   expected_dma_drm_red_exit=1
+   ```
+
+   GREEN after the selective port:
+
+   ```
+   DMA_DRM-only peer -> negotiated caps video/x-raw(memory:DMABuf),
+     format=(string)DMA_DRM, ..., drm-format=(string)NV12
+   DMA_DRM peer caps negotiation: OK
+   1/1 rockchipmpp decoder dmabuf caps and pending-frame bound OK
+   ```
+
+   The aarch64 bookworm/GStreamer 1.22 leg prints the explicit version skip for
+   DMA_DRM and keeps both existing controls green: `dma-feature=true` negotiates
+   legacy `video/x-raw(memory:DMABuf), format=NV12`, while
+   `dma-feature=false` negotiates plain `video/x-raw`.
+3. **Hardware gate** — `hardware-gated`, drill id
+   `d4-dma-drm-allocation-soak`. Todo 26 must run the mandatory F19 136-second
+   allocation drill on the vendor-6.1 board and record both
+   `RGA_BLIT failures == 0` and `rga_api version failures == 0`, including the
+   1080-to-1088 alignment/import path. CI proves caps selection, not the physical
+   DMA allocation/import contract.
+4. **MPP ABI closure** — before (`de535020`): 67 MPP symbols referenced and
+   present, empty diff. After: 67, empty diff against pinned MPP 1.5.0-1. The
+   adaptation calls GStreamer video/caps APIs only and adds no MPP entry point.
+5. **Reviewer verdict** — `needs-human-review`. Reviewer == author
+   (self-review); no independent-agent verdict is claimed. Self-review verified
+   that the source delta is confined to the guarded include and the existing
+   `dma_feature` block, the legacy 1.22 behavior stays byte-for-byte in its
+   compile-time branch, and no output-state/FBC/stride code moved. This
+   highest-risk allocation-contract port is intentionally left on an open branch
+   for independent oracle review and is not self-merged.
+
 ## Mock-MPP verdict: WORKING
 
 The host-only seam builds `tests/mock_mpp.c` as `libmppmock.so` against the same
