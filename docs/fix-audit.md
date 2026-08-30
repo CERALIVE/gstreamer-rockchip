@@ -818,13 +818,49 @@ refuted the second, so it was not applied. Recorded here rather than dropped sil
 
    The stale `1` is the defect: the property was set to 0, the getter reported 0, and
    MPP went on using 1. GREEN at the fix: `Ok: 3, Fail: 0`.
+
+   **Amended after review round 1** — the super-frame thresholds were split out of this
+   set, because zero is *not* a safe value for them (see field 5). The additional case
+   `test_super_frame_thresholds_reset_to_unreachable_not_zero` walks
+   enable -> clear-while-disabled -> re-enable and asserts what actually reaches MPP at
+   each step. Two mutants confirm it discriminates:
+
+   ```
+   mutant: restore the outer `super_mode != NONE` guard
+     cleared I threshold reached MPP as 90000, expected an unreachable one
+   mutant: write the raw property value (no unset mapping)
+     cleared I threshold reached MPP as 0, expected an unreachable one
+   ```
+
+   The first is the stale-threshold resurrection the guard causes; the second is the
+   always-trigger value. Neither was caught by the original test, which only checked
+   that a stored value equalled zero.
 3. **Hardware gate** — `hardware-independent`. Whether the write reaches MPP's config
-   object is fully observable in the mock; no board behaviour is claimed.
+   object is fully observable in the mock; no board behaviour is claimed. Note the limit
+   of that: the mock records config, it does not run MPP's rate controller, so the test
+   asserts the boundary value MPP's own comparison requires rather than observing a
+   classification. The comparison is quoted from the pinned source at the assertion.
 4. **MPP ABI closure** — before and after: 67 referenced symbols, empty diff. Removing
    a C `if` changes no symbol.
-5. **Reviewer verdict** — `confirmed`. Intra-refresh was examined and deliberately left
-   alone: its zero path already writes `rc:refresh_en = 0`, so the reset works and there
-   was nothing to fix. Reviewer == author (self-review).
+5. **Reviewer verdict** — `confirmed` for `scene-mode`, `anti-flicker` and
+   `debreath-strength`. **`needs-fix` for the super-frame thresholds, corrected in
+   `8fbc2d0e`.** Round-1 review was right and the defect is worse than a plain reset
+   bug. MPP classifies a frame as super with `(RK_U32) bit_real >= bits_thr`
+   (`mpp/codec/rc/rc_model_v2.c:1276`), so a threshold of 0 with the mode enabled marks
+   *every* frame super, and the `MPP_ENC_RC_SUPER_FRM_DROP` branch additionally rewrites
+   the rate controller's own `drop_mode` and `drop_gap` — silently clobbering the
+   element's `drop-mode` setting. `super_i_thd`/`super_p_thd` are `RK_U32` copied without
+   range validation (`mpp_enc_impl.cpp:621-629`), so the element now maps its documented
+   unset value (0) to `G_MAXUINT`, a threshold no real frame reaches.
+
+   Pre-existing defect surfaced by that analysis, worth recording separately: because
+   both thresholds default to 0, enabling `super-mode=drop` *without* setting a threshold
+   marks every frame super and drops it. That is true on the parent commit too — it is
+   not a regression introduced here, and it is now fixed by the same mapping.
+
+   Intra-refresh was examined and deliberately left alone: its zero path already writes
+   `rc:refresh_en = 0`, so the reset works and there was nothing to fix. Reviewer ==
+   independent oracle for round 1; round 2 pending.
 
 ### FIX-9 — auto bitrate and GOP from effective output
 
@@ -861,6 +897,38 @@ refuted the second, so it was not applied. Recorded here rather than dropped sil
    `bps = width * height / 8 * fps` turns `test_auto_bitrate_clamps_instead_of_overflowing`
    red with `rc:bps_target` = `-2147483648` — the exact wrap. The `guint64` promotion
    and `G_MAXINT` clamp are therefore pinned by a test, not merely asserted.
+
+   **Amended after review round 1** — three gaps closed, one gap reported as
+   uncloseable:
+
+   - *Derived bounds were unasserted.* The saturation cases now also assert
+     `rc:bps_max` and `rc:bps_min`. Mutant reverting **only** `gst_mpp_enc_scale_bitrate`
+     to 32-bit is now caught in both cases:
+     `'rc:bps_max' (134217726) is not equal to 'G_MAXINT' (2147483647)`.
+     It passed undetected before.
+   - *The runtime width/height path was unasserted.* Added
+     `test_auto_bitrate_recomputes_for_runtime_resolution_property`. The caps-change test
+     could not cover it: `gst_mpp_enc_apply_strides()` is handed the strides it just read
+     back out of the same `info`, so its equality check short-circuits and it never marks
+     properties dirty on that path. Mutant removing **only** the
+     `self->prop_dirty = TRUE;` line from `gst_mpp_enc_apply_pending_resolution()` is now
+     caught: `'rc:bps_target' (288000) is not equal to '160 * 120 / 8 * 30' (72000)`.
+   - *Saturation cases no longer allocate.* The automatic target is derived while the
+     caps event is handled, so both cases assert straight after
+     `gst_harness_set_src_caps_str()` and push nothing — which is what makes the
+     32768x32768 case affordable at all (a real frame there is 1.6GB).
+   - *Reported, not closed.* Round-1 review gave a counterexample —
+     `width=2^29, height=2^30, fps=256` wrapping `guint64` before the clamp is tested.
+     The arithmetic is now bounded step-wise so the wrap cannot occur, but **that change
+     is not covered by a test, because the input is unreachable.**
+     `gst_video_info_from_caps()` rejects any geometry whose frame size passes roughly
+     `G_MAXINT`; measured, 32768x32768 is accepted (1610612736 bytes) and 65536x65536 is
+     refused, as is 16777216x256. The largest reachable frame term is therefore ~2^27,
+     and scaling it by the 256 `fps-out` ceiling reaches ~2^35 — nowhere near a `guint64`
+     wrap. A mutant reverting the step-wise bound to the previous post-hoc clamp
+     **survives the suite**, and is recorded here as surviving rather than papered over.
+     The change is kept as defensive correctness: the helper takes raw `gint` dimensions
+     and should not depend on its only current caller's validation for soundness.
 3. **Hardware gate** — `hardware-independent`. Every assertion is about which value the
    plugin computes and hands to MPP. Note the overflow case remains
    REAL-BUT-UNREACHABLE-ON-TARGET per the wave-2 verdict: 8192x8192 at the `fps-out`
@@ -869,13 +937,15 @@ refuted the second, so it was not applied. Recorded here rather than dropped sil
    not because it is reachable.
 4. **MPP ABI closure** — before and after: 67 referenced symbols, empty diff. The
    change is arithmetic and snapshot plumbing; no MPP entry point was added or dropped.
-5. **Reviewer verdict** — `confirmed`. One behaviour change worth an explicit reviewer
-   note: `g_object_get(enc, "bitrate")` now returns `0` while auto is in effect, where
+5. **Reviewer verdict** — `needs-fix` at round 1, **corrected in `9b328c70`**; the
+   sentinel, effective-output and GOP behaviour were confirmed correct and are unchanged.
+   One behaviour change worth an explicit reviewer note:
+   `g_object_get(enc, "bitrate")` now returns `0` while auto is in effect, where
    it previously returned the first computed target. That is the documented default
    (`0 = Auto`) and the property's name, type, flags and default are all unchanged, so
    the frozen property surface (F21) and the parity gate are unaffected — parity output
-   is byte-identical to the parent. Reviewer == author (self-review); the mandated
-   independent adversarial review has not run.
+   is byte-identical to the parent. Reviewer == independent oracle for round 1; round 2
+   pending.
 
 ### Verification of the three rows above
 
