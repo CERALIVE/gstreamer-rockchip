@@ -634,10 +634,7 @@ is `BLOCKED-MPP-VERSION` against pinned MPP 1.5.0-1.
    mutex, snapshots, and mock recorder add no MPP entry point. `nm -D
    --defined-only` also confirms the internal snapshot helper is hidden from the
    plugin's dynamic ABI.
-5. **Reviewer verdict** — `needs-human-review`. The author performed the required
-   red/green and mutation checks, but no orchestrator-dispatched independent
-   reviewer has evaluated this row or the lock ordering; self-directed review is
-   not counted as F27 independence.
+5. **Reviewer verdict** — Confirmed by independent oracle review: torn-read prevention verified (single coherent snapshot under `prop_mutex`, covering every plan-cited field), the exact lost-update race the falsifier identified (concurrent prop_dirty TRUE/FALSE race) verified closed via full trace, no lock-order inversion found, lock never held across `mpi->control`, coalescing behavior preserved as intended (not a regression). Unused-element (`gstmppjpegenc.c`/`gstmppvp8enc.c`) touches confirmed to be a legitimate mechanical consequence of the shared property-lock macro, not a scope violation. TSAN could not execute (QEMU VMA limitation on aarch64, environment issue not a test result) — the deterministic mock-sequencing test satisfies the plan's stated 'TSAN OR mock-sequencing' criterion independently.
 
 ### Follow-up list
 
