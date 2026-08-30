@@ -42,6 +42,11 @@ struct _GstMppEnc
   GstVideoEncoder parent;
 
   GMutex mutex;
+  /* Runtime properties use a dedicated mutex rather than mutex above because
+   * the frame mutex spans MPP control calls. A separate lock lets the encode
+   * path acknowledge one coherent property snapshot, then release it before
+   * calling MPP, so property setters cannot deadlock behind the streaming path. */
+  GMutex prop_mutex;
   GstAllocator *allocator;
   GstVideoCodecState *input_state;
 
@@ -132,6 +137,16 @@ struct _GstMppEnc
   MppApi *mpi;
 };
 
+#define GST_MPP_ENC_PROP_LOCK(encoder) \
+  g_mutex_lock (&GST_MPP_ENC (encoder)->prop_mutex)
+#define GST_MPP_ENC_PROP_UNLOCK(encoder) \
+  g_mutex_unlock (&GST_MPP_ENC (encoder)->prop_mutex)
+
+typedef void (*GstMppEncSnapshotPropertiesFunc) (GstVideoEncoder * encoder,
+    gpointer snapshot);
+typedef void (*GstMppEncConfigurePropertiesFunc) (GstVideoEncoder * encoder,
+    gconstpointer snapshot);
+
 #define MPP_ENC_IN_FORMATS \
     "NV12, I420, YUY2, UYVY, " \
     "BGR16, RGB16, BGR, RGB, " \
@@ -144,6 +159,10 @@ struct _GstMppEnc
 #endif
 
 gboolean gst_mpp_enc_apply_properties (GstVideoEncoder * encoder);
+gboolean gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
+    GstMppEncSnapshotPropertiesFunc snapshot_codec_properties,
+    GstMppEncConfigurePropertiesFunc configure_codec_properties,
+    gpointer codec_snapshot, gboolean * applied);
 gboolean gst_mpp_enc_set_src_caps (GstVideoEncoder * encoder, GstCaps * caps);
 
 gboolean gst_mpp_enc_supported (MppCodingType mpp_type);

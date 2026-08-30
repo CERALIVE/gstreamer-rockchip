@@ -585,6 +585,56 @@ is `BLOCKED-MPP-VERSION` against pinned MPP 1.5.0-1.
    oracle confirmed both production hunks and the timeout-withheld-dequeue test;
    no correction was requested.
 
+### e72392d parent — encoder runtime-property snapshot synchronization
+
+1. **Provenance SHA** — `e72392daa32404793417685a0e14d09b32179e29`, the
+   `integration/verified-fix-ledger` parent on which the race was reproduced. The
+   fix is self-authored on `fix/encoder-property-runtime-sync`; the row-bearing
+   commit cannot embed its own content-derived SHA.
+2. **Red/green outputs** — native aarch64 bookworm test `rockchipmpp GstHarness
+   factories and caps`, case
+   `test_runtime_property_snapshot_is_coherent_and_eventually_applied`. The mock
+   pauses after writing `rc:bps_target`, changes the public `bitrate` property from
+   another thread, and records the three bitrate fields at every
+   `MPP_ENC_SET_CFG` boundary. RED at the untouched parent:
+
+   ```
+   minimum (3000000) is not equal to target * 15 / 16 (1500000)
+   85%: Checks: 7, Failures: 1, Errors: 0
+   ```
+
+   GREEN with the dedicated property lock and coherent base/codec snapshots:
+
+   ```
+   1/3 rockchipmpp GstHarness factories and caps               OK
+   2/3 rockchipmpp decoder dmabuf caps and pending-frame bound OK
+   3/3 rockchipmpp plugin registration and properties          OK
+   Ok: 3  Fail: 0
+   ```
+
+   A delayed-clear mutant moved `prop_dirty = FALSE` after
+   `MPP_ENC_SET_CFG`; the same test rejected it with `the final quiescent bitrate
+   was never applied`. The correct locked handoff was then restored. An optional
+   TSAN build compiled, but qemu could not start its aarch64 runtime
+   (`unsupported VMA range`, found 47 bits); this produced no sanitizer finding.
+   `PARITY_SOURCE_ONLY=1 bash tests/parity-check.sh` passed both source-derived
+   contracts. A full mock-host invocation then passed `mpph264enc` and
+   `mpph265enc` runtime parity (including every frozen property line) before the
+   established, parent-identical Radxa decoder-caps mismatch stopped the script.
+3. **Hardware gate** — `hardware-independent`. The defect is GObject/threading
+   state handoff, and both the torn snapshot and lost-final-dirty mutant are
+   deterministically sequenced at the mock MPP boundary. No board behavior is
+   needed to prove the fix.
+4. **MPP ABI closure** — before (`e72392d`): 67 symbols referenced and present,
+   empty diff. After: 67 symbols referenced and present, empty diff. The property
+   mutex, snapshots, and mock recorder add no MPP entry point. `nm -D
+   --defined-only` also confirms the internal snapshot helper is hidden from the
+   plugin's dynamic ABI.
+5. **Reviewer verdict** — `needs-human-review`. The author performed the required
+   red/green and mutation checks, but no orchestrator-dispatched independent
+   reviewer has evaluated this row or the lock ordering; self-directed review is
+   not counted as F27 independence.
+
 ### Follow-up list
 
 - No later JeffyCN commit was inspected or added; work after frozen `a0d45af` is a
@@ -614,6 +664,9 @@ plugin. It covers:
   packet ids as one-byte payloads for old/new-session association checks;
 - JPEG task-port behavior with a scripted input-poll timeout and a withheld
   dequeue task, so timeout classification and retry are tested together.
+- an encoder-config snapshot recorder plus one-shot barriers at
+  `rc:bps_target` and `MPP_ENC_SET_CFG`, so concurrent property reads and dirty
+  handoff ordering are asserted without relying on scheduler luck.
 
 `tests/mpp_gstharness.c` loads the real built factories and proves both `mpph264enc`
 and `mpph265enc` negotiate and submit a 320x240 NV12 frame. For each codec it asserts

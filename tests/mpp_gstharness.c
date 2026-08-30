@@ -5,6 +5,15 @@
 #include <rockchip/rk_mpi_cmd.h>
 #include <stdatomic.h>
 extern int mpp_mock_last_cfg_s32(const char *name);
+extern unsigned mpp_mock_enc_cfg_record_count(void);
+extern unsigned mpp_mock_enc_cfg_record_dropped(void);
+extern int mpp_mock_enc_cfg_record_s32(unsigned index, const char *name);
+extern void mpp_mock_enc_pause_next_bps_target(void);
+extern unsigned mpp_mock_enc_bps_target_paused(void);
+extern void mpp_mock_enc_resume_bps_target(void);
+extern void mpp_mock_enc_pause_next_set_cfg(void);
+extern unsigned mpp_mock_enc_set_cfg_paused(void);
+extern void mpp_mock_enc_resume_set_cfg(void);
 extern unsigned mpp_mock_control_count(int cmd);
 extern unsigned mpp_mock_frame_set_buffer_count(void);
 extern void mpp_mock_enc_arm_reset_drain(void);
@@ -24,6 +33,18 @@ static atomic_uint reset_output_count;
 static guint8 reset_output_ids[8];
 static GstClockTime reset_output_pts[8];
 static atomic_int fail_first_reset_output;
+
+typedef struct {
+  GstElement *element;
+  guint bitrate;
+  atomic_int failed;
+} PausedPropertySet;
+
+typedef struct {
+  GstElement *element;
+  guint final_bitrate;
+  atomic_int failed;
+} PropertyHammer;
 
 /* gst_mpp_enc_handle_frame() only queues the frame and broadcasts; the
  * mpp_frame_set_buffer() call happens later on the encoder's srcpad task
@@ -47,6 +68,79 @@ static gboolean wait_for_uint(unsigned (*read_value)(void), unsigned want) {
     g_usleep(1000);
   }
   return TRUE;
+}
+
+static gpointer set_bitrate_at_bps_pause(gpointer data) {
+  PausedPropertySet *set = data;
+  if (!wait_for_uint(mpp_mock_enc_bps_target_paused, 1)) {
+    atomic_store(&set->failed, 1);
+    mpp_mock_enc_resume_bps_target();
+    return NULL;
+  }
+
+  g_object_set(set->element, "bitrate", set->bitrate, NULL);
+  mpp_mock_enc_resume_bps_target();
+  return NULL;
+}
+
+static gpointer hammer_bitrate_until_set_cfg_pause(gpointer data) {
+  PropertyHammer *hammer = data;
+
+  for (guint i = 0; i < 4096; i++) {
+    guint bitrate = 800000 + (i % 128) * 16000;
+    guint observed = 0;
+    g_object_set(hammer->element, "bitrate", bitrate, NULL);
+    g_object_get(hammer->element, "bitrate", &observed, NULL);
+    if (observed != bitrate) {
+      atomic_store(&hammer->failed, 1);
+      break;
+    }
+    if (!(i % 64))
+      g_thread_yield();
+  }
+
+  if (!wait_for_uint(mpp_mock_enc_set_cfg_paused, 1)) {
+    atomic_store(&hammer->failed, 1);
+    mpp_mock_enc_resume_set_cfg();
+    return NULL;
+  }
+
+  g_object_set(hammer->element, "bitrate", hammer->final_bitrate, NULL);
+  mpp_mock_enc_resume_set_cfg();
+  return NULL;
+}
+
+static void push_runtime_property_frame(GstHarness *h, guint index) {
+  GstBuffer *frame = gst_buffer_new_allocate(NULL, 115200, NULL);
+  fail_unless(frame != NULL);
+  GST_BUFFER_PTS(frame) = index * (GST_SECOND / 30);
+  GST_BUFFER_DURATION(frame) = GST_SECOND / 30;
+  fail_unless_equals_int(gst_harness_push(h, frame), GST_FLOW_OK);
+}
+
+static gboolean recorded_bitrate(guint bitrate) {
+  unsigned count = mpp_mock_enc_cfg_record_count();
+  for (unsigned i = 0; i < count; i++)
+    if (mpp_mock_enc_cfg_record_s32(i, "rc:bps_target") == (int)bitrate)
+      return TRUE;
+  return FALSE;
+}
+
+static void assert_coherent_bitrate_records(unsigned first) {
+  unsigned count = mpp_mock_enc_cfg_record_count();
+  fail_unless(count > first, "no encoder config was recorded");
+  fail_unless_equals_int(mpp_mock_enc_cfg_record_dropped(), 0);
+
+  for (unsigned i = first; i < count; i++) {
+    int target = mpp_mock_enc_cfg_record_s32(i, "rc:bps_target");
+    int minimum = mpp_mock_enc_cfg_record_s32(i, "rc:bps_min");
+    int maximum = mpp_mock_enc_cfg_record_s32(i, "rc:bps_max");
+    fail_unless(target != INT32_MIN && minimum != INT32_MIN &&
+                    maximum != INT32_MIN,
+                "config %u omitted a bitrate field", i);
+    fail_unless_equals_int(minimum, (int)((gint64)target * 15 / 16));
+    fail_unless_equals_int(maximum, (int)((gint64)target * 17 / 16));
+  }
 }
 
 static unsigned read_reset_output_count(void) {
@@ -98,6 +192,58 @@ GST_START_TEST(test_factories_properties) {
   check_factory("mpph265enc", "bitrate");
   check_factory("mppvideodec", "fbc");
   check_factory("mppjpegdec", "format");
+}
+GST_END_TEST
+GST_START_TEST(test_runtime_property_snapshot_is_coherent_and_eventually_applied) {
+  const guint before_pause_bitrate = 1600000;
+  const guint during_pause_bitrate = 3200000;
+  const guint final_bitrate = 6400000;
+  mpp_mock_reset();
+
+  GstHarness *h = gst_harness_new("mpph264enc");
+  fail_unless(h != NULL);
+  g_object_set(h->element, "bitrate", 1000000, "rc-mode", 1,
+               "zero-copy-pkt", FALSE, NULL);
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=320,height=240,framerate=30/1");
+  gst_harness_set_drop_buffers(h, TRUE);
+  gst_harness_play(h);
+
+  unsigned first_record = mpp_mock_enc_cfg_record_count();
+  g_object_set(h->element, "bitrate", before_pause_bitrate, NULL);
+  mpp_mock_enc_pause_next_bps_target();
+  PausedPropertySet paused_set = {
+      .element = h->element,
+      .bitrate = during_pause_bitrate,
+  };
+  atomic_init(&paused_set.failed, 0);
+  GThread *setter =
+      g_thread_new("mpp-bitrate-setter", set_bitrate_at_bps_pause, &paused_set);
+  push_runtime_property_frame(h, 0);
+  g_thread_join(setter);
+  fail_unless_equals_int(atomic_load(&paused_set.failed), 0);
+  assert_coherent_bitrate_records(first_record);
+
+  g_object_set(h->element, "bitrate", 960000, NULL);
+  mpp_mock_enc_pause_next_set_cfg();
+  PropertyHammer hammer = {
+      .element = h->element,
+      .final_bitrate = final_bitrate,
+  };
+  atomic_init(&hammer.failed, 0);
+  setter = g_thread_new("mpp-bitrate-hammer",
+                        hammer_bitrate_until_set_cfg_pause, &hammer);
+  push_runtime_property_frame(h, 1);
+  g_thread_join(setter);
+  fail_unless_equals_int(atomic_load(&hammer.failed), 0);
+
+  for (guint i = 2; i < 128 && !recorded_bitrate(final_bitrate); i++)
+    push_runtime_property_frame(h, i);
+  fail_unless(recorded_bitrate(final_bitrate),
+              "the final quiescent bitrate was never applied");
+  assert_coherent_bitrate_records(first_record);
+
+  gst_harness_teardown(h);
 }
 GST_END_TEST
 GST_START_TEST(test_encoder_reset_drains_old_packets_before_new_session) {
@@ -313,6 +459,8 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_video_decoder_caps_truth);
   tcase_add_test(tc, test_h264_encoder_lifecycle);
   tcase_add_test(tc, test_h265_encoder_lifecycle);
+  tcase_add_test(
+      tc, test_runtime_property_snapshot_is_coherent_and_eventually_applied);
   tcase_add_test(tc, test_encoder_reset_drains_old_packets_before_new_session);
   suite_add_tcase(s, tc);
   return s;

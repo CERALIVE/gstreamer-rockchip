@@ -53,6 +53,21 @@ struct _GstMppH265Enc
   gboolean sao;            /* Sample Adaptive Offset filter */
 };
 
+typedef struct
+{
+  guint qp_init;
+  guint qp_min;
+  guint qp_max;
+  guint qp_min_i;
+  guint qp_max_i;
+  gint qp_ip;
+  gint profile;
+  gint tier;
+  gint level;
+  gboolean sao;
+  MppEncRcMode rc_mode;
+} GstMppH265EncPropertiesSnapshot;
+
 #define parent_class gst_mpp_h265_enc_parent_class
 G_DEFINE_TYPE (GstMppH265Enc, gst_mpp_h265_enc, GST_TYPE_MPP_ENC);
 
@@ -172,12 +187,14 @@ gst_mpp_h265_enc_set_property (GObject * object,
   GstVideoEncoder *encoder = GST_VIDEO_ENCODER (object);
   GstMppH265Enc *self = GST_MPP_H265_ENC (encoder);
   GstMppEnc *mppenc = GST_MPP_ENC (encoder);
+  gboolean invalid = FALSE;
 
+  GST_MPP_ENC_PROP_LOCK (encoder);
   switch (prop_id) {
     case PROP_QP_INIT:{
       guint qp_init = g_value_get_uint (value);
       if (self->qp_init == qp_init)
-        return;
+        goto out;
 
       self->qp_init = qp_init;
       break;
@@ -185,7 +202,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_QP_MIN:{
       guint qp_min = g_value_get_uint (value);
       if (self->qp_min == qp_min)
-        return;
+        goto out;
 
       self->qp_min = qp_min;
       break;
@@ -193,7 +210,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_QP_MAX:{
       guint qp_max = g_value_get_uint (value);
       if (self->qp_max == qp_max)
-        return;
+        goto out;
 
       self->qp_max = qp_max;
       break;
@@ -201,7 +218,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_QP_MIN_I:{
       guint qp_min_i = g_value_get_uint (value);
       if (self->qp_min_i == qp_min_i)
-        return;
+        goto out;
 
       self->qp_min_i = qp_min_i;
       break;
@@ -209,7 +226,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_QP_MAX_I:{
       guint qp_max_i = g_value_get_uint (value);
       if (self->qp_max_i == qp_max_i)
-        return;
+        goto out;
 
       self->qp_max_i = qp_max_i;
       break;
@@ -217,7 +234,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_QP_IP:{
       gint qp_ip = g_value_get_int (value);
       if (self->qp_ip == qp_ip)
-        return;
+        goto out;
 
       self->qp_ip = qp_ip;
       break;
@@ -225,7 +242,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_PROFILE:{
       gint profile = g_value_get_enum (value);
       if (self->profile == profile)
-        return;
+        goto out;
 
       self->profile = profile;
       break;
@@ -233,7 +250,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_TIER:{
       gint tier = g_value_get_enum (value);
       if (self->tier == tier)
-        return;
+        goto out;
 
       self->tier = tier;
       break;
@@ -241,7 +258,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_LEVEL:{
       gint level = g_value_get_enum (value);
       if (self->level == level)
-        return;
+        goto out;
 
       self->level = level;
       break;
@@ -249,17 +266,22 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_SAO:{
       gboolean sao = g_value_get_boolean (value);
       if (self->sao == sao)
-        return;
+        goto out;
 
       self->sao = sao;
       break;
     }
     default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
-      return;
+      invalid = TRUE;
+      goto out;
   }
 
   mppenc->prop_dirty = TRUE;
+
+out:
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+  if (invalid)
+    G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
 }
 
 static void
@@ -268,7 +290,9 @@ gst_mpp_h265_enc_get_property (GObject * object,
 {
   GstVideoEncoder *encoder = GST_VIDEO_ENCODER (object);
   GstMppH265Enc *self = GST_MPP_H265_ENC (encoder);
+  gboolean invalid = FALSE;
 
+  GST_MPP_ENC_PROP_LOCK (encoder);
   switch (prop_id) {
     case PROP_QP_INIT:
       g_value_set_uint (value, self->qp_init);
@@ -301,9 +325,13 @@ gst_mpp_h265_enc_get_property (GObject * object,
       g_value_set_boolean (value, self->sao);
       break;
     default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      invalid = TRUE;
       break;
   }
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+
+  if (invalid)
+    G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
 }
 
 static gboolean
@@ -322,47 +350,77 @@ gst_mpp_h265_enc_set_src_caps (GstVideoEncoder * encoder)
   return gst_mpp_enc_set_src_caps (encoder, caps);
 }
 
-static gboolean
-gst_mpp_h265_enc_apply_properties (GstVideoEncoder * encoder)
+static void
+gst_mpp_h265_enc_snapshot_properties (GstVideoEncoder * encoder,
+    gpointer snapshot)
 {
   GstMppH265Enc *self = GST_MPP_H265_ENC (encoder);
   GstMppEnc *mppenc = GST_MPP_ENC (encoder);
+  GstMppH265EncPropertiesSnapshot *properties = snapshot;
 
-  if (G_LIKELY (!mppenc->prop_dirty))
-    return TRUE;
+  properties->qp_init = self->qp_init;
+  properties->qp_min = self->qp_min;
+  properties->qp_max = self->qp_max;
+  properties->qp_min_i = self->qp_min_i;
+  properties->qp_max_i = self->qp_max_i;
+  properties->qp_ip = self->qp_ip;
+  properties->profile = self->profile;
+  properties->tier = self->tier;
+  properties->level = self->level;
+  properties->sao = self->sao;
+  properties->rc_mode = mppenc->rc_mode;
+}
 
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_init", self->qp_init);
+static void
+gst_mpp_h265_enc_configure_properties (GstVideoEncoder * encoder,
+    gconstpointer snapshot)
+{
+  GstMppEnc *mppenc = GST_MPP_ENC (encoder);
+  const GstMppH265EncPropertiesSnapshot *properties = snapshot;
 
-  if (mppenc->rc_mode == MPP_ENC_RC_MODE_FIXQP) {
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min", self->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max", self->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min_i", self->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max_i", self->qp_init);
+  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_init", properties->qp_init);
+
+  if (properties->rc_mode == MPP_ENC_RC_MODE_FIXQP) {
+    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min", properties->qp_init);
+    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max", properties->qp_init);
+    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min_i", properties->qp_init);
+    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max_i", properties->qp_init);
     mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_ip", 0);
   } else {
     /* MPP_ENC_RC_MODE_CBR/MPP_ENC_RC_MODE_VBR/MPP_ENC_RC_MODE_AVBR */
     mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min",
-        self->qp_min ? self->qp_min : 10);
+        properties->qp_min ? properties->qp_min : 10);
     mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max",
-        self->qp_max ? self->qp_max : 51);
+        properties->qp_max ? properties->qp_max : 51);
     mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min_i",
-        self->qp_min_i ? self->qp_min_i : 10);
+        properties->qp_min_i ? properties->qp_min_i : 10);
     mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max_i",
-        self->qp_max_i ? self->qp_max_i : 51);
+        properties->qp_max_i ? properties->qp_max_i : 51);
     mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_ip",
-        self->qp_ip >= 0 ? self->qp_ip : 2);
+        properties->qp_ip >= 0 ? properties->qp_ip : 2);
   }
 
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:profile", self->profile);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:tier", self->tier);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:level", self->level);
+  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:profile", properties->profile);
+  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:tier", properties->tier);
+  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:level", properties->level);
   mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:sao_luma_disable",
-      self->sao ? 0 : 1);
+      properties->sao ? 0 : 1);
   mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:sao_chroma_disable",
-      self->sao ? 0 : 1);
+      properties->sao ? 0 : 1);
+}
 
-  if (!gst_mpp_enc_apply_properties (encoder))
+static gboolean
+gst_mpp_h265_enc_apply_properties (GstVideoEncoder * encoder)
+{
+  GstMppH265EncPropertiesSnapshot properties;
+  gboolean applied;
+
+  if (!gst_mpp_enc_apply_properties_full (encoder,
+          gst_mpp_h265_enc_snapshot_properties,
+          gst_mpp_h265_enc_configure_properties, &properties, &applied))
     return FALSE;
+  if (!applied)
+    return TRUE;
 
   return gst_mpp_h265_enc_set_src_caps (encoder);
 }

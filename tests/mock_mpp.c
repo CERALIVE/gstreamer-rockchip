@@ -21,8 +21,24 @@ typedef struct {
   CfgEntry entries[128];
   unsigned count;
 } MockCfg;
+typedef struct {
+  int bps_target;
+  int bps_min;
+  int bps_max;
+} MockEncCfgRecord;
+#define ENC_CFG_RECORD_CAPACITY 4096
 static int control_counts[512];
 static MppEncCfg last_cfg;
+static MockEncCfgRecord enc_cfg_records[ENC_CFG_RECORD_CAPACITY];
+static unsigned enc_cfg_record_count;
+static unsigned enc_cfg_record_dropped;
+static atomic_flag enc_cfg_record_lock = ATOMIC_FLAG_INIT;
+static atomic_int enc_bps_pause_armed;
+static atomic_int enc_bps_pause_entered;
+static atomic_int enc_bps_pause_release;
+static atomic_int enc_control_pause_armed;
+static atomic_int enc_control_pause_entered;
+static atomic_int enc_control_pause_release;
 typedef struct MockPacket {
   MppFrame input_frame;
   MppBuffer buffer;
@@ -113,23 +129,38 @@ static atomic_int dec_frame_format;
  * matches the oldest frame instead of missing. */
 static RK_S64 dec_stale_pts = 1;
 static MockCfg *cfg_of(MppEncCfg c) { return (MockCfg *)c; }
+static void pause_if_armed(atomic_int *armed, atomic_int *entered,
+                           atomic_int *release) {
+  if (!atomic_exchange(armed, 0))
+    return;
+
+  atomic_store(entered, 1);
+  while (!atomic_load(release))
+    usleep(100);
+}
 static MPP_RET cfg_set(MppEncCfg c, const char *name, int64_t v, void *ptr,
                        int kind) {
   MockCfg *m = cfg_of(c);
-  for (unsigned i = 0; i < m->count; i++)
+  CfgEntry *entry = NULL;
+  for (unsigned i = 0; i < m->count; i++) {
     if (!strcmp(m->entries[i].key, name)) {
-      m->entries[i].value = v;
-      m->entries[i].ptr = ptr;
-      m->entries[i].kind = kind;
-      return MPP_OK;
+      entry = &m->entries[i];
+      break;
     }
-  if (m->count >= 128)
-    return MPP_NOK;
-  CfgEntry *e = &m->entries[m->count++];
-  snprintf(e->key, sizeof(e->key), "%s", name);
-  e->value = v;
-  e->ptr = ptr;
-  e->kind = kind;
+  }
+  if (!entry) {
+    if (m->count >= 128)
+      return MPP_NOK;
+    entry = &m->entries[m->count++];
+    snprintf(entry->key, sizeof(entry->key), "%s", name);
+  }
+  entry->value = v;
+  entry->ptr = ptr;
+  entry->kind = kind;
+
+  if (!strcmp(name, "rc:bps_target"))
+    pause_if_armed(&enc_bps_pause_armed, &enc_bps_pause_entered,
+                   &enc_bps_pause_release);
   return MPP_OK;
 }
 static CfgEntry *cfg_find(MppEncCfg c, const char *n) {
@@ -138,6 +169,30 @@ static CfgEntry *cfg_find(MppEncCfg c, const char *n) {
     if (!strcmp(m->entries[i].key, n))
       return &m->entries[i];
   return NULL;
+}
+static void enc_cfg_record_acquire(void) {
+  while (atomic_flag_test_and_set_explicit(&enc_cfg_record_lock,
+                                            memory_order_acquire))
+    ;
+}
+static void enc_cfg_record_release(void) {
+  atomic_flag_clear_explicit(&enc_cfg_record_lock, memory_order_release);
+}
+static int cfg_read_s32(MppEncCfg cfg, const char *name) {
+  CfgEntry *entry = cfg_find(cfg, name);
+  return entry ? (int)entry->value : INT32_MIN;
+}
+static void record_enc_cfg(MppEncCfg cfg) {
+  enc_cfg_record_acquire();
+  if (enc_cfg_record_count < ENC_CFG_RECORD_CAPACITY) {
+    MockEncCfgRecord *record = &enc_cfg_records[enc_cfg_record_count++];
+    record->bps_target = cfg_read_s32(cfg, "rc:bps_target");
+    record->bps_min = cfg_read_s32(cfg, "rc:bps_min");
+    record->bps_max = cfg_read_s32(cfg, "rc:bps_max");
+  } else {
+    enc_cfg_record_dropped++;
+  }
+  enc_cfg_record_release();
 }
 static MPP_RET port_ok(MppCtx c, MppPortType t, MppPollType p) {
   (void)c;
@@ -253,10 +308,12 @@ static MPP_RET put_packet_ok(MppCtx c, MppPacket p) {
 }
 static MPP_RET control(MppCtx c, MpiCmd cmd, MppParam p) {
   (void)c;
-  (void)p;
-  if (cmd == MPP_ENC_SET_CFG)
+  if (cmd == MPP_ENC_SET_CFG) {
     control_counts[0]++;
-  else if (cmd == MPP_ENC_SET_SEI_CFG)
+    record_enc_cfg((MppEncCfg)p);
+    pause_if_armed(&enc_control_pause_armed, &enc_control_pause_entered,
+                   &enc_control_pause_release);
+  } else if (cmd == MPP_ENC_SET_SEI_CFG)
     control_counts[1]++;
   else if (cmd == MPP_ENC_SET_HEADER_MODE)
     control_counts[2]++;
@@ -747,6 +804,55 @@ int mpp_mock_cfg_get_s32(MppEncCfg c, const char *n) {
 int mpp_mock_last_cfg_s32(const char *n) {
   return last_cfg ? mpp_mock_cfg_get_s32(last_cfg, n) : INT32_MIN;
 }
+unsigned mpp_mock_enc_cfg_record_count(void) {
+  enc_cfg_record_acquire();
+  unsigned count = enc_cfg_record_count;
+  enc_cfg_record_release();
+  return count;
+}
+unsigned mpp_mock_enc_cfg_record_dropped(void) {
+  enc_cfg_record_acquire();
+  unsigned dropped = enc_cfg_record_dropped;
+  enc_cfg_record_release();
+  return dropped;
+}
+int mpp_mock_enc_cfg_record_s32(unsigned index, const char *name) {
+  int value = INT32_MIN;
+  enc_cfg_record_acquire();
+  if (index < enc_cfg_record_count) {
+    MockEncCfgRecord *record = &enc_cfg_records[index];
+    if (!strcmp(name, "rc:bps_target"))
+      value = record->bps_target;
+    else if (!strcmp(name, "rc:bps_min"))
+      value = record->bps_min;
+    else if (!strcmp(name, "rc:bps_max"))
+      value = record->bps_max;
+  }
+  enc_cfg_record_release();
+  return value;
+}
+void mpp_mock_enc_pause_next_bps_target(void) {
+  atomic_store(&enc_bps_pause_entered, 0);
+  atomic_store(&enc_bps_pause_release, 0);
+  atomic_store(&enc_bps_pause_armed, 1);
+}
+unsigned mpp_mock_enc_bps_target_paused(void) {
+  return (unsigned)atomic_load(&enc_bps_pause_entered);
+}
+void mpp_mock_enc_resume_bps_target(void) {
+  atomic_store(&enc_bps_pause_release, 1);
+}
+void mpp_mock_enc_pause_next_set_cfg(void) {
+  atomic_store(&enc_control_pause_entered, 0);
+  atomic_store(&enc_control_pause_release, 0);
+  atomic_store(&enc_control_pause_armed, 1);
+}
+unsigned mpp_mock_enc_set_cfg_paused(void) {
+  return (unsigned)atomic_load(&enc_control_pause_entered);
+}
+void mpp_mock_enc_resume_set_cfg(void) {
+  atomic_store(&enc_control_pause_release, 1);
+}
 unsigned mpp_mock_control_count(int cmd) {
   return cmd == MPP_ENC_SET_CFG           ? (unsigned)control_counts[0]
          : cmd == MPP_ENC_SET_SEI_CFG     ? (unsigned)control_counts[1]
@@ -871,6 +977,17 @@ unsigned mpp_mock_jpeg_input_poll_calls(void) {
 void mpp_mock_reset(void) {
   memset(control_counts, 0, sizeof(control_counts));
   last_cfg = NULL;
+  enc_cfg_record_acquire();
+  memset(enc_cfg_records, 0, sizeof(enc_cfg_records));
+  enc_cfg_record_count = 0;
+  enc_cfg_record_dropped = 0;
+  enc_cfg_record_release();
+  atomic_store(&enc_bps_pause_armed, 0);
+  atomic_store(&enc_bps_pause_entered, 0);
+  atomic_store(&enc_bps_pause_release, 1);
+  atomic_store(&enc_control_pause_armed, 0);
+  atomic_store(&enc_control_pause_entered, 0);
+  atomic_store(&enc_control_pause_release, 1);
   atomic_store(&enc_head, 0);
   atomic_store(&enc_tail, 0);
   atomic_store(&frame_set_buffer_count, 0);
