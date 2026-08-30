@@ -307,7 +307,7 @@ the same feature flags CI and `debian/rules` use
    | Upstream hunk | Decision | Resolution |
    | --- | --- | --- |
    | Include `gst/video/video-info-dma.h` | include, adapted | Guarded with `GST_CHECK_VERSION(1, 24, 0)` because the bookworm/GStreamer 1.22 build does not ship this header. |
-   | Replace the `dma_feature` caps block with peer-selected legacy DMABuf + DMA_DRM offers | include, selective | Ported inside the existing function without replacing the function. On GStreamer 1.24+, only `output_state->caps` can be replaced; `output_state->info` remains the fork's existing NV12 state. Empty/ANY/unready peers retain sysmem caps for a later RECONFIGURE. GStreamer 1.22 keeps the exact legacy DMABuf feature path. |
+   | Replace the `dma_feature` caps block with peer-selected legacy DMABuf + DMA_DRM offers | include, corrected selective port | On GStreamer 1.24+, modern DMA_DRM construction is now restricted to `!afbc && !rfbc`; compressed output keeps legacy `memory:DMABuf` caps so `arm-afbc=1` / `rfbc=1` survives. Only `output_state->caps` can be replaced for linear output; `output_state->info` remains the fork's existing state. Empty/ANY/unready peers retain sysmem caps for a later RECONFIGURE. GStreamer 1.22 keeps the exact legacy DMABuf feature path. |
    | Any output-state/FBC/stride behavior outside the two source hunks | exclude | Not present in the upstream diff and intentionally untouched; this is the auditor's selective-port boundary. |
 
 2. **Red/green outputs** — `meson test -C build --verbose
@@ -333,6 +333,28 @@ the same feature flags CI and `debian/rules` use
    1/1 rockchipmpp decoder dmabuf caps and pending-frame bound OK
    ```
 
+   Independent review then found that the first submission also applied modifier
+   zero to AFBC/RFBC `output_state->info`. `gst_video_info_dma_drm_to_caps()` did
+   not serialize the fork's private compression field, producing this second RED
+   on the first-submission commit `05f191c`:
+
+   ```
+   AFBC frame with DMA_DRM query peer -> negotiated caps
+     video/x-raw(memory:DMABuf), format=(string)DMA_DRM, ...,
+     drm-format=(string)NV12
+   assertion failed (format != "DMA_DRM"): ("DMA_DRM" != "DMA_DRM")
+   expected_afbc_red_exit=1
+   ```
+
+   GREEN after restricting modern DMA_DRM construction to linear output:
+
+   ```
+   AFBC frame with DMA_DRM query peer -> negotiated caps
+     video/x-raw(memory:DMABuf), format=(string)NV12, ...,
+     arm-afbc=(int)1
+   AFBC output rejects linear DMA_DRM caps: OK
+   ```
+
    The aarch64 bookworm/GStreamer 1.22 leg prints the explicit version skip for
    DMA_DRM and keeps both existing controls green: `dma-feature=true` negotiates
    legacy `video/x-raw(memory:DMABuf), format=NV12`, while
@@ -346,13 +368,13 @@ the same feature flags CI and `debian/rules` use
 4. **MPP ABI closure** — before (`de535020`): 67 MPP symbols referenced and
    present, empty diff. After: 67, empty diff against pinned MPP 1.5.0-1. The
    adaptation calls GStreamer video/caps APIs only and adds no MPP entry point.
-5. **Reviewer verdict** — `needs-human-review`. Reviewer == author
-   (self-review); no independent-agent verdict is claimed. Self-review verified
-   that the source delta is confined to the guarded include and the existing
-   `dma_feature` block, the legacy 1.22 behavior stays byte-for-byte in its
-   compile-time branch, and no output-state/FBC/stride code moved. This
-   highest-risk allocation-contract port is intentionally left on an open branch
-   for independent oracle review and is not self-merged.
+5. **Reviewer verdict** — `needs-human-review`. The first independent oracle
+   review returned `needs-fix`: it found the silent AFBC/RFBC-as-linear
+   misadvertisement that the original linear-only test missed. The corrected
+   submission gates zero-modifier DMA_DRM caps to linear output and adds the
+   AFBC regression above. Reviewer != correction author for the finding, but a
+   second independent review of the correction has not run yet. The PR remains
+   open and is not self-merged.
 
 ### b93ecb6 — RGA DMA32 and used-path hunk adjudication
 
@@ -403,14 +425,11 @@ the same feature flags CI and `debian/rules` use
 4. **MPP ABI closure** — before and after: 67 MPP symbols referenced and
    present, empty diff against pinned MPP 1.5.0-1. No production hunk was needed;
    the mock-only recorder adds no undefined symbol to the plugin.
-5. **Reviewer verdict** — `needs-human-review`. Reviewer == author
-   (self-review); no independent-agent verdict is claimed. Self-review compared
-   every upstream hunk with current blame/history, verified the pinned header in
-   the authoritative bookworm container, and kept unused format-table work out
-   of this adaptation. Because this condition resolves to
-   `SKIP-ALREADY-PRESENT` for production code on the highest-risk contract
-   surface, the branch remains open for independent oracle confirmation and is
-   not self-merged.
+5. **Reviewer verdict** — `confirmed`. Independent oracle review checked the
+   full upstream `b93ecb63b0e50f4b2220cf5219d88d93ad855a21` diff against the
+   inherited source SHAs, confirmed `MPP_BUFFER_FLAGS_DMA32` in pinned MPP
+   1.5.0-1, and confirmed the mock assertion is substantive. No correction was
+   requested for this row.
 
 ## Mock-MPP verdict: WORKING
 
