@@ -26,6 +26,8 @@ unsigned mpp_mock_dec_wrong_owner_deinits (void);
 unsigned mpp_mock_dec_double_deinits (void);
 unsigned mpp_mock_dec_frame_deinits (void);
 unsigned mpp_mock_internal_group_types (void);
+void mpp_mock_jpeg_set_input_timeouts (unsigned count);
+unsigned mpp_mock_jpeg_input_poll_calls (void);
 
 #define DEC_WIDTH 320
 #define DEC_HEIGHT 240
@@ -360,6 +362,31 @@ test_put_packet_result_drives_fullness (void)
 }
 
 static void
+test_jpeg_input_timeout_is_retried (void)
+{
+  GstHarness *h;
+  GstBuffer *buffer;
+
+  g_print ("== jpeg input timeout retry ==\n");
+  mpp_mock_dec_arm (DEC_WIDTH, DEC_HEIGHT);
+  mpp_mock_jpeg_set_input_timeouts (1);
+
+  h = gst_harness_new ("mppjpegdec");
+  g_assert_nonnull (h);
+  gst_harness_set_src_caps_str (h,
+      "image/jpeg,parsed=(boolean)true,width=(int)320,height=(int)240,"
+      "framerate=(fraction)30/1");
+
+  buffer = make_input_buffer (0);
+  g_assert_cmpint (gst_harness_push (h, buffer), ==, GST_FLOW_OK);
+  g_assert_cmpuint (mpp_mock_jpeg_input_poll_calls (), ==, 2);
+
+  mpp_mock_dec_disarm ();
+  gst_harness_teardown (h);
+  g_print ("one MPP_ERR_TIMEOUT retried; accepted on poll 2\n");
+}
+
+static void
 test_dma_feature_reaches_negotiated_caps (void)
 {
   g_print ("== dmabuf caps negotiation ==\n");
@@ -416,6 +443,7 @@ main (int argc, char **argv)
   test_reset_releases_cached_mpp_frame ();
   test_packet_ownership_is_decided_before_send ();
   test_put_packet_result_drives_fullness ();
+  test_jpeg_input_timeout_is_retried ();
   test_dma_feature_reaches_negotiated_caps ();
 #if GST_CHECK_VERSION(1, 24, 0)
   test_dma_drm_peer_selects_dma_drm_caps ();

@@ -37,6 +37,7 @@ typedef struct MockPacket {
 typedef struct {
   int fd;
   size_t size;
+  void *data;
   int index;
   unsigned refs;
 } MockBuffer;
@@ -49,7 +50,12 @@ typedef struct {
   MppBuffer buffer;
   RK_S64 pts;
   RK_U32 info_change;
+  MppPacket packet;
 } MockFrame;
+typedef struct {
+  MppPacket packet;
+  MppFrame frame;
+} MockTask;
 static _Atomic(MppFrame) queued_frame;
 static atomic_uint frame_set_buffer_count;
 static atomic_int enc_reset_seen;
@@ -74,6 +80,10 @@ static atomic_uint dec_wrong_owner_deinits;
 static atomic_uint dec_double_deinits;
 static atomic_uint dec_frame_deinits;
 static atomic_uint internal_group_types;
+static atomic_uint jpeg_input_timeouts_remaining;
+static atomic_uint jpeg_input_poll_calls;
+static atomic_int jpeg_last_input_poll_timed_out;
+static MockTask jpeg_task;
 static MockPacket *packet_allocs;
 static RK_U32 dec_width = 320;
 static RK_U32 dec_height = 240;
@@ -110,21 +120,35 @@ static CfgEntry *cfg_find(MppEncCfg c, const char *n) {
       return &m->entries[i];
   return NULL;
 }
-static MPP_RET ok(void *c) {
-  (void)c;
-  return MPP_OK;
-}
 static MPP_RET port_ok(MppCtx c, MppPortType t, MppPollType p) {
   (void)c;
-  (void)t;
   (void)p;
+  if (atomic_load(&dec_enabled) && t == MPP_PORT_INPUT) {
+    atomic_fetch_add(&jpeg_input_poll_calls, 1);
+    unsigned remaining = atomic_load(&jpeg_input_timeouts_remaining);
+    while (remaining && !atomic_compare_exchange_weak(
+                            &jpeg_input_timeouts_remaining, &remaining,
+                            remaining - 1))
+      ;
+    if (remaining) {
+      atomic_store(&jpeg_last_input_poll_timed_out, 1);
+      return MPP_ERR_TIMEOUT;
+    }
+    atomic_store(&jpeg_last_input_poll_timed_out, 0);
+  }
   return MPP_OK;
 }
 static MPP_RET deq_ok(MppCtx c, MppPortType t, MppTask *p) {
   (void)c;
-  (void)t;
-  if (p)
-    *p = NULL;
+  if (!p)
+    return MPP_NOK;
+  *p = NULL;
+  if (atomic_load(&dec_enabled) && t == MPP_PORT_INPUT) {
+    if (atomic_exchange(&jpeg_last_input_poll_timed_out, 0))
+      return MPP_OK;
+    memset(&jpeg_task, 0, sizeof(jpeg_task));
+    *p = (MppTask)&jpeg_task;
+  }
   return MPP_OK;
 }
 static MPP_RET enq_ok(MppCtx c, MppPortType t, MppTask p) {
@@ -287,6 +311,12 @@ MPP_RET mpp_buffer_get_with_tag(MppBufferGroup group, MppBuffer *buffer,
     return MPP_NOK;
   }
   b->size = size;
+  b->data = calloc(1, size ? size : 1);
+  if (!b->data) {
+    close(b->fd);
+    free(b);
+    return MPP_NOK;
+  }
   b->index = -1;
   b->refs = 1;
   *buffer = (MppBuffer)b;
@@ -299,6 +329,7 @@ MPP_RET mpp_buffer_put_with_caller(MppBuffer buffer, const char *caller) {
     return MPP_NOK;
   if (--b->refs == 0) {
     close(b->fd);
+    free(b->data);
     free(b);
   }
   return MPP_OK;
@@ -318,6 +349,10 @@ int mpp_buffer_get_fd_with_caller(MppBuffer buffer, const char *caller) {
 size_t mpp_buffer_get_size_with_caller(MppBuffer buffer, const char *caller) {
   (void)caller;
   return buffer ? ((MockBuffer *)buffer)->size : 0;
+}
+void *mpp_buffer_get_ptr_with_caller(MppBuffer buffer, const char *caller) {
+  (void)caller;
+  return buffer ? ((MockBuffer *)buffer)->data : NULL;
 }
 int mpp_buffer_get_index_with_caller(MppBuffer buffer, const char *caller) {
   (void)caller;
@@ -449,6 +484,12 @@ MPP_RET mpp_packet_init(MppPacket *packet, void *data, size_t size) {
   *packet = (MppPacket)p;
   return MPP_OK;
 }
+MPP_RET mpp_packet_init_with_buffer(MppPacket *packet, MppBuffer buffer) {
+  MPP_RET ret = mpp_packet_init(packet, NULL, 0);
+  if (!ret && *packet)
+    ((MockPacket *)*packet)->has_buffer = (buffer != NULL);
+  return ret;
+}
 void mpp_packet_set_pts(MppPacket packet, RK_S64 pts) {
   (void)packet;
   (void)pts;
@@ -494,6 +535,36 @@ MPP_RET mpp_meta_get_frame(MppMeta meta, MppMetaKey key, MppFrame *frame) {
   if (!meta || !frame)
     return MPP_NOK;
   *frame = ((MockPacket *)meta)->input_frame;
+  return MPP_OK;
+}
+MppMeta mpp_frame_get_meta(const MppFrame frame) { return (MppMeta)frame; }
+MPP_RET mpp_meta_set_packet(MppMeta meta, MppMetaKey key, MppPacket packet) {
+  (void)key;
+  if (!meta)
+    return MPP_NOK;
+  ((MockFrame *)meta)->packet = packet;
+  return MPP_OK;
+}
+MPP_RET mpp_task_meta_set_packet(MppTask task, MppMetaKey key,
+                                 MppPacket packet) {
+  (void)key;
+  if (!task)
+    return MPP_NOK;
+  ((MockTask *)task)->packet = packet;
+  return MPP_OK;
+}
+MPP_RET mpp_task_meta_set_frame(MppTask task, MppMetaKey key, MppFrame frame) {
+  (void)key;
+  if (!task)
+    return MPP_NOK;
+  ((MockTask *)task)->frame = frame;
+  return MPP_OK;
+}
+MPP_RET mpp_task_meta_get_frame(MppTask task, MppMetaKey key, MppFrame *frame) {
+  (void)key;
+  if (!task || !frame)
+    return MPP_NOK;
+  *frame = ((MockTask *)task)->frame;
   return MPP_OK;
 }
 
@@ -631,6 +702,9 @@ void mpp_mock_dec_arm(unsigned width, unsigned height) {
   atomic_store(&dec_double_deinits, 0);
   atomic_store(&dec_frame_deinits, 0);
   atomic_store(&internal_group_types, 0);
+  atomic_store(&jpeg_input_timeouts_remaining, 0);
+  atomic_store(&jpeg_input_poll_calls, 0);
+  atomic_store(&jpeg_last_input_poll_timed_out, 0);
   atomic_store(&dec_enabled, 1);
 }
 void mpp_mock_dec_disarm(void) {
@@ -675,6 +749,14 @@ unsigned mpp_mock_dec_frame_deinits(void) {
 }
 unsigned mpp_mock_internal_group_types(void) {
   return atomic_load(&internal_group_types);
+}
+void mpp_mock_jpeg_set_input_timeouts(unsigned count) {
+  atomic_store(&jpeg_input_timeouts_remaining, count);
+  atomic_store(&jpeg_input_poll_calls, 0);
+  atomic_store(&jpeg_last_input_poll_timed_out, 0);
+}
+unsigned mpp_mock_jpeg_input_poll_calls(void) {
+  return atomic_load(&jpeg_input_poll_calls);
 }
 void mpp_mock_reset(void) {
   memset(control_counts, 0, sizeof(control_counts));
