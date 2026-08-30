@@ -439,6 +439,110 @@ the same feature flags CI and `debian/rules` use
    1.5.0-1, and confirmed the mock assertion is substantive. No correction was
    requested for this row.
 
+## Frozen JeffyCN extras audit (`a0d45af`)
+
+The audit was limited to the 15 named commits below. The transient
+`jeffycn-mirror` remote resolved `gstreamer-rockchip` to
+`a0d45af504099b4b82f3d3377019a63d357e7cef`, and every full SHA below is an
+ancestor of that frozen tip. All 15 touch a used decoder/encoder or shared core;
+none qualifies for `SKIP-OUT-OF-SCOPE`. None adds an MPP entry point, so no row
+is `BLOCKED-MPP-VERSION` against pinned MPP 1.5.0-1.
+
+| Candidate | Baseline defect and current-code evidence | Used/shared scope | Pick trial | MPP ABI | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| `27ba1c798f320ebe40c4f58cbb2fd8940baa97c9` — clear pending frames after reset | Already fixed: the commit is an ancestor, and `gstmppdec.c:267-272` quotes `frames = gst_video_decoder_get_frames (decoder);` followed by `gst_video_decoder_release_frame (decoder, f);`. | `mppvideodec`/`mppjpegdec` shared decoder core | conflict in `gstmppdec.c` | no new call; 67-symbol closure unchanged | `SKIP-ALREADY-PRESENT` |
+| `65098a9b3ae9180be5f1b361f576c9ee1434da2a` — EOS without buffer | Already fixed: ancestor; `gstmppdec.c:1126-1135` rejects `!mpp_frame_get_buffer (mframe)` before ordinary frame-info-change processing, while the dedicated info-change frame remains handled at `:1113-1116`. | shared decoder core | conflict in `gstmppdec.c` | no new call | `SKIP-ALREADY-PRESENT` |
+| `0489caabc314cc167a87545a14109b2bd2dda36a` — seek after finish | Already fixed: ancestor; allocator attachment is deferred to `gst_mpp_dec_handle_frame()` (`gstmppdec.c:1287-1296`), getters reject a missing allocator, and clear detaches `MPP_DEC_SET_EXT_BUF_GROUP` at `:320`. | shared decoder core | clean, but the only staged delta duplicated the existing `if (!self->allocator) return NULL;` guard | no new call | `SKIP-ALREADY-PRESENT` |
+| `6c90d19b502e36f6228b2d3d31230363bb690b2d` — stop-time frame leak | Already fixed: ancestor; stop calls `mpp_frame_deinit (&self->mpp_frame)` at `gstmppdec.c:345`. | shared decoder core | clean empty/no-op | no new call | `SKIP-ALREADY-PRESENT` |
+| `c5601186c8c07c24845e805094a35b1045911bf7` — leftover encoder packets after reset | Present at baseline: reset called `mpi->reset` and immediately zeroed accounting without polling output. The adapted post-state at `gstmppenc.c:797-804` now drains `gst_mpp_enc_poll_packet_locked()` before clearing `pending_frames`. | H.264/H.265 shared encoder core | conflict in `gstmppenc.c`; manually adapted | no new external call; static helper only | `PORT-WITH-ADAPTATION` (`5b450adc`) |
+| `973fd0e6815dbcc37e134724f05eebdc44fc4c7e` — return MppBuffer before group clear | Present at baseline: parent allocator `free()` followed both `mpp_buffer_group_clear()` calls. The ported post-state at `gstmppallocator.c:270-281` invokes parent free first, then clears groups. | allocator shared by all used elements | clean | no new call; 67 symbols before/after | `PORT` (`ad1930e7`) |
+| `dcbcd6454ef892e385b3a782600369eb6c0719db` — input packet leak | Already fixed by the stricter `5f45bd4` adaptation: `gstmppdec.c:1317-1336` snapshots `packet_has_buffer` before send, transfers buffered packets to MPP, and deinitializes copy packets exactly once. | shared decoder core | conflict in `gstmppdec.c` | no new call | `SKIP-ALREADY-PRESENT` |
+| `ed10c9135ff5bbc80c4fb2d714687192ae0ac7e1` — encoder DMA-fd leak typo | Already fixed: ancestor; both failure and packet-return paths pass addresses to `mpp_frame_deinit (&mframe)` (`gstmppenc.c:1403,1432`). | H.264/H.265 shared encoder core | conflict in `gstmppenc.c` | no new call | `SKIP-ALREADY-PRESENT` |
+| `ed9f828600994b174a65130f27a5f48ad1d81228` — inverted frame-init result | Already fixed: ancestor; `gstmppenc.c:1375` returns on nonzero `mpp_frame_init (&mframe)`, preserving MPP's zero-is-success convention. | H.264/H.265 shared encoder core | conflict in `gstmppenc.c` | no new call | `SKIP-ALREADY-PRESENT` |
+| `bbd1fdaf804ce3b4b15e8f429c2c17ff4e84876a` — RGA hstride units | Superseded, not absent: current `gstmpp.c:210-221` uses byte stride then divides by `format->pixel_stride0`, the later `31ee8bd` post-state already adjudicated above. Reapplying `bbd1fda` would restore the removed MPP accessor. No stride code changed. | shared RGA conversion core | clean mechanical reversion of the later fix | no new call | `SKIP-ALREADY-PRESENT`; frozen H4-B3 remains drill `d3-hevc10bit-stride` |
+| `e811521f3cf76550d61d842a0fc62a6f3e587f0b` — unaligned encoder input | Already fixed: ancestor; `gstmpp.c:410-415` rejects undersized alignment, and `gstmppenc.c:1268-1306` imports only matching aligned layouts before falling back to conversion. | H.264/H.265 shared encoder/core | conflict in `gstmppenc.c` | no new call | `SKIP-ALREADY-PRESENT` |
+| `cce848d65143ad817f4b4f6cd54e4ed6ac622809` — apply strides from new buffers | Already fixed: ancestor; `gst_mpp_enc_apply_strides()` is called from set-format, runtime-resolution, and imported-buffer paths (`gstmppenc.c:1063,1144,1287`). The incidental JPEG-encoder hunk is irrelevant to the already-present shared-core fix. | shared encoder/core (plus one unused `mppjpegenc` hint-only hunk) | conflict in `gstmppenc.c` | no new call | `SKIP-ALREADY-PRESENT` |
+| `f9c7186c5f7eb04667978384258c112d17bfa4be` — clear cached buffers when unused | Already fixed: ancestor; allocator `cacheable` state and group clears remain at `gstmppallocator.c:85-92,276-281`, decoder clear disables caching, and encoder start does likewise. | allocator + used encoder/decoder core | conflicts in decoder and encoder | no new call | `SKIP-ALREADY-PRESENT` |
+| `bbe50f15ba4ee41a48114bf87e455dfe625261eb` — MPP warning on stop | Already fixed: ancestor; `gstmppdec.c:342-349` clears the allocator before `mpp_destroy (self->mpp_ctx)`. | shared decoder core | conflict in `gstmppdec.c` | no new call | `SKIP-ALREADY-PRESENT` |
+| `a910efebc5f438eacbe8eda66a0ed1c01a43f787` — JPEG packet-send timeout | Present at baseline: JPEG ignored `poll()` and base decoder treated timeout as an unknown fatal error. Ported code checks poll at `gstmppjpegdec.c:366-371`; base retry accepts `MPP_ERR_TIMEOUT` at `gstmppdec.c:1256-1264`. | `mppjpegdec` + shared decoder core | clean | no new call; 67 symbols before/after | `PORT` (`a1de3d17`) |
+
+### c560118 — encoder reset output-queue drain
+
+1. **Provenance SHA** — `c5601186c8c07c24845e805094a35b1045911bf7`,
+   JeffyCN/mirrors, author Jeffy Chen. The conflict was only surrounding fork
+   evolution; the adapted production delta preserves the literal reset-time poll
+   loop and adds a mock call-sequence assertion.
+2. **Red/green outputs** — native aarch64 bookworm mock-MPP test
+   `rockchipmpp GstHarness factories and caps`. With `gstmppenc.c` restored to
+   parent `ad1930e7`, RED:
+
+   ```
+   test_encoder_reset_polls_leftover_packet:
+     encoder reset did not inspect MPP's leftover output queue
+   FAIL
+   ```
+
+   At `5b450adc`, GREEN: `1/1 ... GstHarness factories and caps OK`. The full
+   three-test suite is green after the port.
+3. **Hardware gate** — `hardware-independent`. The mock resets MPP and records
+   output polling after reset; the assertion does not require a codec device.
+4. **MPP ABI closure** — before and after: 67 symbols referenced and present,
+   empty diff against pinned MPP 1.5.0-1. The port calls an existing static helper.
+5. **Reviewer verdict** — `confirmed`. An independent explore-agent review
+   checked the upstream diff, adapted reset ordering, regression assertion, and
+   MPP-entry-point delta; it found no required correction.
+
+### 973fd0e — allocator release ordering
+
+1. **Provenance SHA** — `973fd0e6815dbcc37e134724f05eebdc44fc4c7e`,
+   JeffyCN/mirrors, author Jeffy Chen. Applied with `git cherry-pick -x`; author
+   and message preserved.
+2. **Red/green outputs** — no fake host red is claimed. The observable defect is
+   inside real MPP buffer-group recycling/discard bookkeeping, which the mock does
+   not model. After the clean port, `meson test` is 3/3 green and source-contract
+   parity is green.
+3. **Hardware gate** — `hardware-gated`, drill id
+   `d6-allocator-release-order`. The board drill must repeatedly allocate/free
+   encoder and decoder DMA buffers across reset and assert no MPP discarded-buffer
+   or buffer-group warnings. Host CI proves only build/lifecycle non-regression.
+4. **MPP ABI closure** — before and after: 67 symbols referenced and present,
+   empty diff. The commit only reorders existing calls.
+5. **Reviewer verdict** — `confirmed`. An independent explore-agent review
+   matched the exact pick to upstream and confirmed the resulting ordering.
+   Hardware evidence remains pending drill `d6-allocator-release-order`.
+
+### a910efe — JPEG input timeout retry
+
+1. **Provenance SHA** — `a910efebc5f438eacbe8eda66a0ed1c01a43f787`,
+   JeffyCN/mirrors, author Jeffy Chen. Applied with `git cherry-pick -x`; author
+   and message preserved. Regression seam: `27e46bea`.
+2. **Red/green outputs** — native aarch64 bookworm test
+   `rockchipmpp decoder dmabuf caps and pending-frame bound`. RED before the pick:
+
+   ```
+   == jpeg input timeout retry ==
+   assertion failed (gst_harness_push (h, buffer) == GST_FLOW_OK): (-5 == 0)
+   FAIL
+   ```
+
+   GREEN after the pick: `one MPP_ERR_TIMEOUT retried; accepted on poll 2` and
+   `1/1 ... decoder dmabuf caps and pending-frame bound OK`.
+3. **Hardware gate** — `hardware-independent`. The mock returns one input-port
+   timeout, withholds a dequeue task for that timed-out poll, then succeeds; both
+   the JPEG subclass classification and shared base retry are exercised.
+4. **MPP ABI closure** — before and after: 67 symbols referenced and present,
+   empty diff. Only existing `MppApi` function pointers and an existing enum value
+   are used.
+5. **Reviewer verdict** — `confirmed`. An independent explore-agent review
+   verified both production hunks and the mock's timeout-withheld-dequeue control;
+   it found no required correction.
+
+### Follow-up list
+
+- Run `d6-allocator-release-order` with the other allocation-contract drills.
+- No later JeffyCN commit was inspected or added; work after frozen `a0d45af` is a
+  separate follow-up audit.
+
 ## Mock-MPP verdict: WORKING
 
 The host-only seam builds `tests/mock_mpp.c` as `libmppmock.so` against the same
@@ -457,6 +561,10 @@ plugin. It covers:
   `GstVideoCodecFrame`, which is what makes decoder frame accounting measurable off
   hardware. It stays disarmed unless a test arms it, so the encoder harness keeps the
   MPP behavior it was written against.
+- encoder-reset call sequencing, including proof that the plugin inspects MPP's
+  output queue after reset;
+- JPEG task-port behavior with a scripted input-poll timeout and a withheld
+  dequeue task, so timeout classification and retry are tested together.
 
 `tests/mpp_gstharness.c` loads the real built factories and proves both `mpph264enc`
 and `mpph265enc` negotiate and submit a 320x240 NV12 frame. For each codec it asserts
