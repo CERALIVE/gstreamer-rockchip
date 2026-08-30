@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Compare normalized gst-inspect output with the Radxa 1.14-4 runtime baseline.
-# New properties are allowed; every baseline property line, rank, and pad caps line
-# must remain byte-identical after whitespace normalization.
+# Encoders use the fork baseline; decoders retain the Radxa 1.14-4 baseline.
+# The fork inherited cf155b3's bps* -> bitrate* rename before the fork point.
+# Cerastream migrates separately, and the image pin must not move before it does.
+# New properties are allowed; existing property/rank/caps lines remain frozen.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly ROOT
-readonly GOLDEN_DIR="$ROOT/tests/golden/radxa-1.14-4"
-readonly SOURCE_CONTRACT="$GOLDEN_DIR/source-contract.tsv"
+readonly RADXA_GOLDEN_DIR="$ROOT/tests/golden/radxa-1.14-4"
+readonly FORK_GOLDEN_DIR="$ROOT/tests/golden/fork-baseline"
 readonly ELEMENTS=(mpph264enc mpph265enc mppvideodec mppjpegdec)
 
 normalize() {
@@ -149,11 +150,20 @@ emit_inspect() {
   fi
 }
 
+golden_for() {
+  local element=$1
+  case "$element" in
+    mpph264enc | mpph265enc) printf '%s\n' "$FORK_GOLDEN_DIR/$element.golden" ;;
+    *) printf '%s\n' "$RADXA_GOLDEN_DIR/$element.golden" ;;
+  esac
+}
+
 check_source_contract() {
+  local contract=$1 golden_dir=$2 label=$3
   local element expected golden key needle
   while IFS=$'\t' read -r element expected; do
     [[ -z "$element" || "$element" == \#* ]] && continue
-    golden="$GOLDEN_DIR/$element.golden"
+    golden="$golden_dir/$element.golden"
     if [[ "$expected" == *.contains=* ]]; then
       key=${expected%%.contains=*}
       needle=${expected#*.contains=}
@@ -167,12 +177,12 @@ check_source_contract() {
       echo "parity: source-derived contract missing from $element golden: $expected" >&2
       return 1
     fi
-  done < "$SOURCE_CONTRACT"
-  echo "PASS source-derived contract (radxa-pkg/gstreamer-rockchip@a89cf9c)"
+  done < "$contract"
+  echo "PASS source-derived contract ($label)"
 }
 
 compare_element() {
-  local element=$1 raw actual expected line rank
+  local element=$1 raw actual expected golden line rank
   raw=$(mktemp)
   actual=$(mktemp)
   expected=$(mktemp)
@@ -180,7 +190,8 @@ compare_element() {
 
   emit_inspect "$element" > "$raw"
   normalize "$element" < "$raw" > "$actual"
-  grep -v '^#' "$GOLDEN_DIR/$element.golden" | grep -v '^$' > "$expected"
+  golden=$(golden_for "$element")
+  grep -v '^#' "$golden" | grep -v '^$' > "$expected"
 
   rank=$(grep '^rank=' "$actual" | cut -d= -f2)
   if (( rank < 64 )); then
@@ -212,7 +223,14 @@ if [[ "${1:-}" == "--normalize" ]]; then
   exit 0
 fi
 
-check_source_contract
+check_source_contract \
+  "$RADXA_GOLDEN_DIR/source-contract.tsv" \
+  "$RADXA_GOLDEN_DIR" \
+  "historical radxa-pkg/gstreamer-rockchip@a89cf9c"
+check_source_contract \
+  "$FORK_GOLDEN_DIR/source-contract.tsv" \
+  "$FORK_GOLDEN_DIR" \
+  "active fork encoder baseline"
 
 if [[ "${PARITY_SOURCE_ONLY:-0}" == 1 ]]; then
   exit 0
@@ -235,4 +253,4 @@ for element in "${ELEMENTS[@]}"; do
   compare_element "$element"
 done
 
-echo "PASS Radxa 1.14-4 runtime parity"
+echo "PASS fork encoder and Radxa 1.14-4 decoder runtime parity"
