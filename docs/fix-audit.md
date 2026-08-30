@@ -1012,3 +1012,208 @@ bash tests/parity-check.sh
 source-derived contract checks passing, on both the parent and the branch; the two
 outputs are byte-identical, which is the differential form this repo's parity
 evidence uses.
+
+### FIX-8 — zero-length RC-drop packets are dropped, not pushed
+
+1. **Provenance SHA** — `0af5b4ed90fc5beab42d8c46458b5106bbb0b0f7`. First-party fix
+   (no upstream pick). Ledger origin O1-B3. Its test seam depends on
+   `53ea3879240958fc6c8691a047ab4dbefc91e612`, a prerequisite use-after-free fix in
+   the mock described below.
+2. **Red/green outputs** — `meson test -C build --print-errorlogs`, cases
+   `test_zero_length_rc_drop_is_not_pushed_downstream` (zero-copy-pkt=true, the
+   property default) and `test_zero_length_rc_drop_is_not_pushed_when_copying`
+   (zero-copy-pkt=false) in `tests/mpp_gstharness.c`.
+
+   RED at the parent (`9689dd79`, `gst/rockchipmpp/gstmppenc.c` restored to its
+   pre-fix content):
+
+   ```
+   89%: Checks: 19, Failures: 2, Errors: 0
+   test_zero_length_rc_drop_is_not_pushed_downstream:0:
+     output 1 reached the peer as a 0-byte buffer
+   test_zero_length_rc_drop_is_not_pushed_when_copying:0: Unexpected critical/warning:
+     gst_video_encoder_allocate_output_buffer: assertion 'size > 0' failed
+   ```
+
+   The two messages are the two distinct failure modes, and only the first is the
+   defect as O1-B3 states it: on the shipped default path the muxer really does
+   receive a zero-byte access unit. The copy path never reaches that point because
+   GLib refuses the zero-sized allocation first, so on that path the parent defect
+   is a critical raised on every rate-controller drop.
+
+   GREEN at the fix: `Ok: 3, Fail: 0` across all three meson tests, with
+
+   ```
+   rc drop (zero-copy-pkt=true): outputs=2 payloads=1,3 processed=1 dropped=1
+     deinits=3 live-packets=0
+   ```
+
+   Three packets in, two buffers out, carrying packet payloads 1 and 3 — packet 2
+   produced no output at all. `dropped=1`/`processed=1` are read from the QoS message
+   `GstVideoEncoder` posts from inside `gst_video_encoder_drop_frame()`, so the frame
+   is positively accounted as dropped rather than merely absent, and
+   `gst_video_encoder_get_frames()` is empty afterwards, so it is not left pending.
+
+   Assertions are snapshotted where delivery happens — the peer chain function and
+   the QoS message — not read back from element state afterwards, per the weakness
+   found in this repo's earlier `mpp_mock_last_cfg_s32` assertions.
+
+   Mutation check (three mutants, all rejected):
+
+   | mutant | result |
+   |---|---|
+   | `pkt_size < 0` instead of `<= 0` | RED, both cases, identical to parent |
+   | drop the packet but never finish the frame | RED: `output_capture[1].pts` is 33333333, not 66666666 — the unaccounted frame makes packet 3 finish frame 2 |
+   | keep pushing, only empty the buffer | this is the parent; RED as above |
+
+   A fourth mutant — `gst_video_encoder_release_frame()` instead of `finish_frame()` —
+   is **not expressible**: `GstVideoEncoder` exports no such call (it is a decoder-only
+   API), so finishing with a NULL `output_buffer` is the only drop route available.
+   Recorded rather than silently dropped from the ledger.
+3. **Hardware gate** — `hardware-independent`. The mock represents the exact RC-drop
+   packet shape the plan flagged as possibly infeasible (a valid `MppBuffer` with zero
+   length), so the pre-written `hardware-gated` + drill-id substitution offered by
+   todo 5 was **not** needed and is not claimed. To make the shipped zero-copy branch
+   reachable at all, the mock's encoder packet buffers became real memfd-backed
+   allocations with MPP's own release semantics; whether MPP's rate controller emits
+   this shape on RK3588 in the field is an MPP property, evidenced from its source
+   (`mpp/codec/rc/rc_model_v2.c`), not asserted here.
+4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so`.
+   Before and after: `MPP symbols referenced and present: 67`, empty diff against the
+   pinned `librockchip-mpp1_1.5.0-1_arm64.deb`. The fix adds a comparison on a value
+   the encoder already read via `mpp_packet_get_length`, so no entry point changed.
+5. **Reviewer verdict** — `needs-human-review`. Reviewer == author; the mandated
+   different-agent adversarial review has NOT run. Self-review included the mutation
+   table above, both CI suites, and a parity differential.
+
+### FIX-11 — IDR output marked as a sync point from KEY_OUTPUT_INTRA
+
+1. **Provenance SHA** — `c49f69d195226dd6bab0683d1a6fbcdb784082bd`. First-party fix
+   (no upstream pick). Ledger origin O1-B6.
+2. **Red/green outputs** — `meson test -C build --print-errorlogs`, case
+   `test_intra_output_is_marked_as_a_sync_point` in `tests/mpp_gstharness.c`. Three
+   packets: ordinal 0 carries `KEY_OUTPUT_INTRA=1`, ordinal 1 carries no such meta at
+   all (what MPP does for most outputs), ordinal 2 carries the meta with value 0. The
+   absent case is the negative control — it must not read the same as a present zero.
+
+   RED at the parent (FIX-8 applied, FIX-11 absent):
+
+   ```
+   95%: Checks: 20, Failures: 1, Errors: 0
+   test_intra_output_is_marked_as_a_sync_point:0:
+     frame 0 reached the push path with sync-point=0, expected 1
+   ```
+
+   Confirming O1-B6 exactly: no frame is ever a sync point, so `GstVideoEncoder`
+   stamps `GST_BUFFER_FLAG_DELTA_UNIT` on every buffer including the IDR.
+
+   GREEN at the fix: `Ok: 3, Fail: 0`, with
+
+   ```
+   intra sync points: sync=1,0,0 delta-unit=0,1,1
+   ```
+
+   The sync-point column is read inside a `pre_push` vfunc installed by the test.
+   That runs within `gst_video_encoder_finish_frame()` holding the frame that is about
+   to be pushed, so the flag is observed on the actual delivery path rather than from
+   element state afterwards. The delta-unit column is read in the peer chain function
+   from the buffer as delivered.
+
+   Mutation check:
+
+   | mutant | result |
+   |---|---|
+   | set the flag *after* `finish_frame()` | RED: `frame 0 reached the push path with sync-point=0, expected 1` |
+   | set the flag unconditionally | RED: `frame 1 reached the push path with sync-point=1, expected 0` |
+   | omit the explicit `UNSET` branch | **SURVIVES** |
+
+   The surviving mutant is reported rather than papered over. `gst_video_encoder_new_frame()`
+   zeroes the frame flags, so a fresh frame is never a sync point and the explicit
+   `UNSET` cannot be distinguished by any reachable input. It is kept as defensive
+   symmetry against a future path that reuses or pre-flags a frame, and it is
+   deliberately not claimed as tested.
+3. **Hardware gate** — `hardware-independent`. What is asserted is the plugin's
+   translation of the meta into the sync-point flag and the resulting buffer flag,
+   which is entirely GStreamer-side. That MPP sets `KEY_OUTPUT_INTRA` on real IDR
+   output is an MPP property; the existing encoder soak drill covers the on-board
+   consequence and nothing about hardware behaviour is claimed here.
+4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so`.
+   Before: `MPP symbols referenced and present: 67`. After: **68**, empty diff. The
+   delta is exactly one new entry point, `mpp_meta_get_s32`, which is present in the
+   pinned `librockchip-mpp1_1.5.0-1_arm64.deb`
+   (`nm -D --defined-only librockchip_mpp.so.0` → `000000000005f450 T mpp_meta_get_s32`).
+   This is the only row in this ledger so far that moves the symbol count, so the
+   closure gate — not the count — is what proves it safe.
+5. **Reviewer verdict** — `needs-human-review`. Reviewer == author; the mandated
+   different-agent adversarial review has NOT run.
+
+### Prerequisite — mock MPP packet-arena use-after-free
+
+Not a ledger FIX and not an encoder change, but FIX-8's test seam cannot be trusted
+without it, so it is recorded with the same five fields.
+
+1. **Provenance SHA** — `53ea3879240958fc6c8691a047ab4dbefc91e612`. First-party,
+   test-only (`tests/mock_mpp.c`).
+2. **Red/green outputs** — `mpp_mock_dec_disarm()` both stopped the mock producing and
+   freed every `MockPacket` handed out. The seam tests must call it before
+   `gst_harness_teardown()`, because a still-producing mock never lets the element
+   drain; the element then deinitialized already-freed packets.
+
+   AddressSanitizer at the parent, `tests/mpp_decoder_seam.c` case
+   `test_jpeg_input_timeout_is_retried`:
+
+   ```
+   ERROR: AddressSanitizer: heap-use-after-free ... READ of size 4
+     #0 mpp_packet_deinit ../tests/mock_mpp.c:704
+     #1 gst_mpp_jpeg_dec_stop ../gst/rockchipmpp/gstmppjpegdec.c:217
+   freed by thread T0 here:
+     #0 __interceptor_free
+     #1 mpp_mock_dec_disarm ../tests/mock_mpp.c:1033
+   ```
+
+   It was latent, not harmless: reading one field out of freed memory happened to be
+   survivable, so the suite stayed green. FIX-8's mock work — giving encoder packets
+   real buffers released at `mpp_packet_deinit()` — turned the same read into a free
+   of a garbage pointer. Measured over 100 standalone runs with randomised
+   `MALLOC_PERTURB_`: pristine 0/100 failures, FIX-8's mock without this fix 80/100
+   (`corrupted double-linked list`, SIGABRT). After the fix: **0/100**, and the full
+   `meson test` suite 0/40.
+
+   Reversing only the teardown order in the seam tests was tried first and is wrong —
+   it hangs, because production must stop before the element can drain. The fix splits
+   the two jobs instead: disarming stops production, and the arena is reclaimed when a
+   test arms the next decoder, the one point where no element can still own a packet.
+3. **Hardware gate** — `hardware-independent` (host test harness only).
+4. **MPP ABI closure** — unchanged; `tests/mock_mpp.c` is not part of the plugin.
+5. **Reviewer verdict** — `needs-human-review`. Reviewer == author.
+
+### Verification of the three rows above
+
+Both CI suite legs, native aarch64 containers, pinned MPP 1.5.0-1 / RGA 2.2.0-1,
+built with `-Drkximage=enabled -Drockchipmpp=enabled -Dkmssrc=enabled -Drga=enabled`:
+
+| gate | bookworm / GStreamer 1.22 | trixie / GStreamer 1.26.2 |
+|---|---|---|
+| `meson test -C build` | `Ok: 3, Fail: 0` | `Ok: 3, Fail: 0` |
+| `ci/check-mpp-abi.sh` | 68 symbols, empty diff | 68 symbols, empty diff |
+| `ci/check-glibc-floor.sh` | `highest GLIBC import GLIBC_2.17; device floor GLIBC_2.36` | not gated (forward-compat leg) |
+| `ci/check-glibc-floor.test.sh` | all assertions passed | — |
+| `tests/parity-check.sh`, no mock preloaded | exit 77, contract checks PASS | — |
+| `tests/parity-check.sh`, mock preloaded | encoder rows PASS | encoder rows PASS |
+
+`tests/parity-check.sh` behaves differently depending on whether the mock MPP is
+preloaded, and both behaviours appear in this ledger, so they are stated together
+rather than left to look contradictory:
+
+- **Without** `LD_PRELOAD`/`GST_PLUGIN_PATH` the MPP encoders do not register, so the
+  script passes both source-derived contract checks and then exits **77**, the honest
+  off-board skip of the runtime leg.
+- **With** the mock preloaded the encoders do register, so the runtime leg actually
+  runs: both source-derived contract checks pass, `mpph264enc` and `mpph265enc` pass,
+  and the run then stops on the `mppvideodec` line against the immutable
+  board-captured Radxa decoder golden. That is the documented mocked-host limitation.
+
+The second form is the one that can detect drift here, and it was used differentially:
+the pristine parent and this branch produce **byte-identical** output (`diff` clean),
+so this change introduces no parity drift. No property, rank or caps surface was
+touched.
