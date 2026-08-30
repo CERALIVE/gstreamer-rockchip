@@ -3,11 +3,23 @@
 #include <gst/video/video.h>
 #include <limits.h>
 #include <rockchip/rk_mpi_cmd.h>
+#include <stdatomic.h>
 extern int mpp_mock_last_cfg_s32(const char *name);
 extern unsigned mpp_mock_control_count(int cmd);
 extern unsigned mpp_mock_frame_set_buffer_count(void);
-extern unsigned mpp_mock_enc_poll_calls_after_reset(void);
+extern void mpp_mock_enc_arm_reset_drain(void);
+extern void mpp_mock_enc_release_packets(unsigned count);
+extern unsigned mpp_mock_enc_queued_packets(void);
+extern unsigned mpp_mock_enc_dequeued_packets(void);
+extern unsigned mpp_mock_enc_queue_depth(void);
+extern unsigned mpp_mock_enc_duplicate_dequeues(void);
+extern unsigned mpp_mock_enc_post_reset_empty_polls(void);
 extern void mpp_mock_reset(void);
+
+static atomic_uint reset_output_count;
+static guint8 reset_output_ids[8];
+static GstClockTime reset_output_pts[8];
+static atomic_int fail_first_reset_output;
 
 /* gst_mpp_enc_handle_frame() only queues the frame and broadcasts; the
  * mpp_frame_set_buffer() call happens later on the encoder's srcpad task
@@ -21,6 +33,45 @@ static gboolean wait_for_encoder_frame(void) {
     g_usleep(1000);
   }
   return TRUE;
+}
+
+static gboolean wait_for_uint(unsigned (*read_value)(void), unsigned want) {
+  gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+  while (read_value() < want) {
+    if (g_get_monotonic_time() > deadline)
+      return FALSE;
+    g_usleep(1000);
+  }
+  return TRUE;
+}
+
+static unsigned read_reset_output_count(void) {
+  return atomic_load(&reset_output_count);
+}
+
+static GstFlowReturn capture_reset_output(GstPad *pad, GstObject *parent,
+                                          GstBuffer *buffer) {
+  (void)pad;
+  (void)parent;
+  unsigned index = atomic_load(&reset_output_count);
+  guint8 id = 0;
+  fail_unless(index < G_N_ELEMENTS(reset_output_ids));
+  fail_unless_equals_int(gst_buffer_extract(buffer, 0, &id, 1), 1);
+  reset_output_ids[index] = id;
+  reset_output_pts[index] = GST_BUFFER_PTS(buffer);
+  atomic_store(&reset_output_count, index + 1);
+  gst_buffer_unref(buffer);
+  if (atomic_exchange(&fail_first_reset_output, 0))
+    return GST_FLOW_ERROR;
+  return GST_FLOW_OK;
+}
+
+static void push_reset_frame(GstHarness *h, guint pts_index) {
+  GstBuffer *frame = gst_buffer_new_allocate(NULL, 115200, NULL);
+  fail_unless(frame != NULL);
+  GST_BUFFER_PTS(frame) = pts_index * (GST_SECOND / 30);
+  GST_BUFFER_DURATION(frame) = GST_SECOND / 30;
+  fail_unless_equals_int(gst_harness_push(h, frame), GST_FLOW_OK);
 }
 
 static void check_factory(const char *name, const char *property) {
@@ -45,17 +96,65 @@ GST_START_TEST(test_factories_properties) {
   check_factory("mppjpegdec", "format");
 }
 GST_END_TEST
-GST_START_TEST(test_encoder_reset_polls_leftover_packet) {
+GST_START_TEST(test_encoder_reset_drains_old_packets_before_new_session) {
   mpp_mock_reset();
+  mpp_mock_enc_arm_reset_drain();
+  atomic_store(&reset_output_count, 0);
+  atomic_store(&fail_first_reset_output, 1);
+  memset(reset_output_ids, 0, sizeof(reset_output_ids));
+  memset(reset_output_pts, 0, sizeof(reset_output_pts));
 
   GstHarness *h = gst_harness_new("mpph264enc");
   fail_unless(h != NULL);
+  g_object_set(h->element, "bitrate", 500, "rc-mode", 1, "zero-copy-pkt", FALSE,
+               NULL);
+  gst_pad_set_chain_function(h->sinkpad,
+                             GST_DEBUG_FUNCPTR(capture_reset_output));
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=320,height=240,framerate=30/1");
   gst_harness_play(h);
+
+  push_reset_frame(h, 0);
+  push_reset_frame(h, 1);
+  push_reset_frame(h, 2);
+  fail_unless(wait_for_uint(mpp_mock_enc_queued_packets, 3),
+              "encoder did not queue all three old-session packets");
+
+  mpp_mock_enc_release_packets(1);
+  fail_unless(wait_for_uint(read_reset_output_count, 1),
+              "first packet did not pause the encoder task");
+  fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 1);
+  fail_unless_equals_int(mpp_mock_enc_queue_depth(), 2);
 
   fail_unless(gst_element_set_state(h->element, GST_STATE_READY) !=
               GST_STATE_CHANGE_FAILURE);
-  fail_unless(mpp_mock_enc_poll_calls_after_reset() > 0,
-              "encoder reset did not inspect MPP's leftover output queue");
+  fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 3);
+  fail_unless_equals_int(mpp_mock_enc_queue_depth(), 0);
+  fail_unless(mpp_mock_enc_post_reset_empty_polls() > 0,
+              "drain loop stopped before observing the queue empty");
+  fail_unless_equals_int(mpp_mock_enc_duplicate_dequeues(), 0);
+  g_print("reset drained old packets: dequeued=%u depth=%u empty-polls=%u "
+          "duplicates=%u\n",
+          mpp_mock_enc_dequeued_packets(), mpp_mock_enc_queue_depth(),
+          mpp_mock_enc_post_reset_empty_polls(),
+          mpp_mock_enc_duplicate_dequeues());
+
+  fail_unless_equals_int(reset_output_ids[0], 1);
+  fail_unless_equals_uint64(reset_output_pts[0], 0);
+
+  gst_harness_play(h);
+  push_reset_frame(h, 100);
+  fail_unless(wait_for_uint(read_reset_output_count, 2),
+              "new-session packet was not produced");
+  fail_unless_equals_int(reset_output_ids[1], 4);
+  fail_unless_equals_uint64(reset_output_pts[1], 100 * (GST_SECOND / 30));
+  fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 4);
+  fail_unless_equals_int(mpp_mock_enc_queue_depth(), 0);
+  fail_unless_equals_int(mpp_mock_enc_duplicate_dequeues(), 0);
+  g_print("new session output: packet=%u pts=%" G_GUINT64_FORMAT
+          " dequeued=%u depth=%u\n",
+          reset_output_ids[1], reset_output_pts[1],
+          mpp_mock_enc_dequeued_packets(), mpp_mock_enc_queue_depth());
 
   gst_harness_teardown(h);
 }
@@ -164,7 +263,7 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_video_decoder_caps_truth);
   tcase_add_test(tc, test_h264_encoder_lifecycle);
   tcase_add_test(tc, test_h265_encoder_lifecycle);
-  tcase_add_test(tc, test_encoder_reset_polls_leftover_packet);
+  tcase_add_test(tc, test_encoder_reset_drains_old_packets_before_new_session);
   suite_add_tcase(s, tc);
   return s;
 }

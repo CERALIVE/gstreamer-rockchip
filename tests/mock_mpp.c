@@ -25,7 +25,11 @@ static int control_counts[512];
 static MppEncCfg last_cfg;
 typedef struct MockPacket {
   MppFrame input_frame;
+  MppBuffer buffer;
+  size_t length;
+  unsigned id;
   int heap;
+  int encoder_packet;
   int eos;
   int extra_data;
   int alive;
@@ -56,11 +60,21 @@ typedef struct {
   MppPacket packet;
   MppFrame frame;
 } MockTask;
-static _Atomic(MppFrame) queued_frame;
+#define ENC_PACKET_CAPACITY 16
+static MockPacket enc_packets[ENC_PACKET_CAPACITY];
+static MockBuffer enc_buffers[ENC_PACKET_CAPACITY];
+static unsigned char enc_payloads[ENC_PACKET_CAPACITY];
+static atomic_uint enc_head;
+static atomic_uint enc_tail;
 static atomic_uint frame_set_buffer_count;
+static atomic_int enc_test_armed;
 static atomic_int enc_reset_seen;
-static atomic_uint enc_poll_calls_after_reset;
-static MockPacket output_packet;
+static atomic_uint enc_release_limit;
+static atomic_uint enc_queued_packets;
+static atomic_uint enc_dequeued_packets;
+static atomic_uint enc_duplicate_dequeues;
+static atomic_uint enc_post_reset_empty_polls;
+static atomic_ullong enc_dequeue_mask;
 
 /* Off unless a test arms it, so the encoder harness keeps the MPP behavior it
  * was written against. */
@@ -251,27 +265,69 @@ static MPP_RET control(MppCtx c, MpiCmd cmd, MppParam p) {
 }
 static MPP_RET encode_put(MppCtx c, MppFrame f) {
   (void)c;
-  atomic_store(&queued_frame, f);
+  unsigned head = atomic_load(&enc_head);
+  unsigned tail = atomic_load(&enc_tail);
+  if (tail - head >= ENC_PACKET_CAPACITY)
+    return MPP_NOK;
+
+  unsigned slot = tail % ENC_PACKET_CAPACITY;
+  MockPacket *packet = &enc_packets[slot];
+  MockBuffer *buffer = &enc_buffers[slot];
+  memset(packet, 0, sizeof(*packet));
+  memset(buffer, 0, sizeof(*buffer));
+
+  packet->input_frame = f;
+  packet->buffer = (MppBuffer)buffer;
+  packet->length = 1;
+  packet->id = tail + 1;
+  packet->encoder_packet = 1;
+  packet->alive = 1;
+
+  enc_payloads[slot] = (unsigned char)packet->id;
+  buffer->size = 1;
+  buffer->data = &enc_payloads[slot];
+  buffer->index = -1;
+  buffer->refs = 1;
+
+  atomic_store(&enc_tail, tail + 1);
+  atomic_fetch_add(&enc_queued_packets, 1);
   return MPP_OK;
 }
 static MPP_RET encode_get(MppCtx c, MppPacket *p) {
   (void)c;
   if (!p)
     return MPP_NOK;
-  if (atomic_load(&enc_reset_seen))
-    atomic_fetch_add(&enc_poll_calls_after_reset, 1);
-  MppFrame f = atomic_exchange(&queued_frame, NULL);
-  if (!f) {
+
+  if (atomic_load(&enc_test_armed) && !atomic_load(&enc_reset_seen) &&
+      atomic_load(&enc_dequeued_packets) >= atomic_load(&enc_release_limit)) {
     *p = NULL;
     return MPP_OK;
   }
-  output_packet.input_frame = f;
-  *p = (MppPacket)&output_packet;
+
+  unsigned head = atomic_load(&enc_head);
+  unsigned tail = atomic_load(&enc_tail);
+  if (head == tail) {
+    if (atomic_load(&enc_reset_seen))
+      atomic_fetch_add(&enc_post_reset_empty_polls, 1);
+    *p = NULL;
+    return MPP_OK;
+  }
+
+  MockPacket *packet = &enc_packets[head % ENC_PACKET_CAPACITY];
+  unsigned long long bit = 1ULL << (packet->id - 1);
+  unsigned long long prior = atomic_fetch_or(&enc_dequeue_mask, bit);
+  if (prior & bit)
+    atomic_fetch_add(&enc_duplicate_dequeues, 1);
+
+  atomic_store(&enc_head, head + 1);
+  atomic_fetch_add(&enc_dequeued_packets, 1);
+  *p = (MppPacket)packet;
   return MPP_OK;
 }
 static MPP_RET mock_reset(MppCtx c) {
   (void)c;
   atomic_store(&enc_reset_seen, 1);
+  atomic_store(&enc_release_limit, UINT32_MAX);
   return MPP_OK;
 }
 MPP_RET mpp_buffer_group_get(MppBufferGroup *group, MppBufferType type,
@@ -455,13 +511,14 @@ RK_U32 mpp_frame_get_offset_y(const MppFrame frame) {
 
 MppMeta mpp_packet_get_meta(const MppPacket packet) { return (MppMeta)packet; }
 size_t mpp_packet_get_length(const MppPacket packet) {
-  (void)packet;
-  return 0;
+  return packet ? ((MockPacket *)packet)->length : 0;
 }
 MppBuffer mpp_packet_get_buffer(const MppPacket packet) {
   MockPacket *p = (MockPacket *)packet;
   if (!p)
     return NULL;
+  if (p->encoder_packet)
+    return p->buffer;
   atomic_fetch_add(&dec_packet_buffer_queries, 1);
   if (p->sent)
     atomic_fetch_add(&dec_packet_post_send_accesses, 1);
@@ -518,6 +575,13 @@ MPP_RET mpp_packet_deinit(MppPacket *packet) {
   if (!packet)
     return MPP_NOK;
   MockPacket *p = (MockPacket *)*packet;
+  if (p && p->encoder_packet) {
+    if (!p->alive)
+      atomic_fetch_add(&enc_duplicate_dequeues, 1);
+    p->alive = 0;
+    *packet = NULL;
+    return MPP_OK;
+  }
   if (p && p->heap) {
     if (!p->alive)
       atomic_fetch_add(&dec_double_deinits, 1);
@@ -680,8 +744,28 @@ unsigned mpp_mock_control_count(int cmd) {
 unsigned mpp_mock_frame_set_buffer_count(void) {
   return atomic_load(&frame_set_buffer_count);
 }
-unsigned mpp_mock_enc_poll_calls_after_reset(void) {
-  return atomic_load(&enc_poll_calls_after_reset);
+void mpp_mock_enc_arm_reset_drain(void) {
+  atomic_store(&enc_test_armed, 1);
+  atomic_store(&enc_reset_seen, 0);
+  atomic_store(&enc_release_limit, 0);
+}
+void mpp_mock_enc_release_packets(unsigned count) {
+  atomic_store(&enc_release_limit, count);
+}
+unsigned mpp_mock_enc_queued_packets(void) {
+  return atomic_load(&enc_queued_packets);
+}
+unsigned mpp_mock_enc_dequeued_packets(void) {
+  return atomic_load(&enc_dequeued_packets);
+}
+unsigned mpp_mock_enc_queue_depth(void) {
+  return atomic_load(&enc_tail) - atomic_load(&enc_head);
+}
+unsigned mpp_mock_enc_duplicate_dequeues(void) {
+  return atomic_load(&enc_duplicate_dequeues);
+}
+unsigned mpp_mock_enc_post_reset_empty_polls(void) {
+  return atomic_load(&enc_post_reset_empty_polls);
 }
 void mpp_mock_dec_arm(unsigned width, unsigned height) {
   dec_width = (RK_U32)width;
@@ -761,10 +845,19 @@ unsigned mpp_mock_jpeg_input_poll_calls(void) {
 void mpp_mock_reset(void) {
   memset(control_counts, 0, sizeof(control_counts));
   last_cfg = NULL;
-  atomic_store(&queued_frame, NULL);
+  atomic_store(&enc_head, 0);
+  atomic_store(&enc_tail, 0);
   atomic_store(&frame_set_buffer_count, 0);
+  atomic_store(&enc_test_armed, 0);
   atomic_store(&enc_reset_seen, 0);
-  atomic_store(&enc_poll_calls_after_reset, 0);
-  memset(&output_packet, 0, sizeof(output_packet));
+  atomic_store(&enc_release_limit, UINT32_MAX);
+  atomic_store(&enc_queued_packets, 0);
+  atomic_store(&enc_dequeued_packets, 0);
+  atomic_store(&enc_duplicate_dequeues, 0);
+  atomic_store(&enc_post_reset_empty_polls, 0);
+  atomic_store(&enc_dequeue_mask, 0);
+  memset(enc_packets, 0, sizeof(enc_packets));
+  memset(enc_buffers, 0, sizeof(enc_buffers));
+  memset(enc_payloads, 0, sizeof(enc_payloads));
   mpp_mock_dec_disarm();
 }
