@@ -1,0 +1,28 @@
+name: Dispatch preflight
+
+# Bootstrapping probe: proves this repository's CERALIVE_DISPATCH_TOKEN can fire a
+# cross-repo repository_dispatch at CERALIVE/apt-worker BEFORE any release workflow
+# is authored against it. apt-worker's reindex.yml listens only for the `apt-reindex`
+# event type, so `apt-reindex-preflight` deliberately starts no run there — the whole
+# proof is the dispatch API answering 204 (token authorized); 403/404 means it is not.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dispatch-preflight
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Probe cross-repo dispatch to apt-worker
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fire no-op dispatch at CERALIVE/apt-worker
+        env:
+          GH_TOKEN: ${{ secrets.CERALIVE_DISPATCH_TOKEN }}
+        run: |
+          gh api --include --method POST repos/CERALIVE/apt-worker/dispatches \
+            -f event_type=apt-reindex-preflight
