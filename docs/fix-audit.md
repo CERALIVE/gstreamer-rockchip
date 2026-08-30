@@ -180,6 +180,60 @@ the same feature flags CI and `debian/rules` use
 5. **Reviewer verdict** — `self-authored adjudication`. I am the sole author
    of this hunk-by-hunk comparison; no separate-agent review is claimed here.
 
+### 7ffd7f4 — put_packet-result fullness detection (already present; regression locked)
+
+1. **Provenance SHA and resolution diff** —
+   `7ffd7f40576bbfb861bc7a7d3492c710d149aff8`, JeffyCN/mirrors, author
+   `Jeffy Chen <jeffy.chen@rock-chips.com>`. The planning audit classified this
+   as a conflicting adapted port, but the current fork descends from this exact
+   commit (`git merge-base --is-ancestor 7ffd7f4 HEAD` exits 0), and `git blame`
+   attributes `MPP_INPUT_TIMEOUT_MS 10`,
+   `gst_mpp_dec_send_mpp_packet_unlocked()`, and the handle-frame result checks
+   directly to `7ffd7f40`. The literal upstream production diff therefore
+   resolves to **no production-code delta** rather than a duplicate port.
+
+   Resolution against the literal upstream diff: upstream replaced the quote
+   `"Avoid holding too many frames"` plus the `g_list_length (frames) >= 4`
+   send-side cap with a loop that quotes
+   `case MPP_ERR_BUFFER_FULL: /* Timed out */ break;` and returns
+   `GST_FLOW_ERROR` for any other MPP error. The current tree already has that
+   post-state at `gstmppdec.c:1192-1213` and no four-frame send-side cap. This
+   commit adds only the mock result script and regression assertions. The
+   separate 64-frame orphan-accounting safety bound from `d27ae92` is untouched;
+   no cap was added or reintroduced by this resolution.
+2. **Red/green outputs** — `meson test -C build --print-errorlogs
+   "rockchipmpp decoder dmabuf caps and pending-frame bound"`, native aarch64
+   bookworm container. RED with the four source files restored to `7ffd7f4^`
+   (RGA disabled solely because that historical snapshot predates the current
+   RGA function signature):
+
+   ```
+   three MPP_ERR_BUFFER_FULL results retried; accepted on call 4
+   assertion failed (mpp_mock_dec_put_calls () == 1): (972 == 1)
+   FAIL, SIGABRT
+   ```
+
+   The 972 calls are the old nested deadline retries misclassifying a persistent
+   MPP error as retryable. GREEN with the inherited `7ffd7f4` production code:
+
+   ```
+   three MPP_ERR_BUFFER_FULL results retried; accepted on call 4
+   persistent MPP error rejected after 1 call
+   put_packet fullness detection: OK
+   1/1 ... OK
+   ```
+3. **Hardware gate** — `hardware-independent`. The mock controls each
+   `decode_put_packet()` result and counts calls; no allocator or board behavior
+   is involved.
+4. **MPP ABI closure** — no plugin source changed, so the before/after closure is
+   identical by construction: 67 MPP symbols referenced and present, empty diff.
+   The final branch gate reruns `ci/check-mpp-abi.sh` against the built plugin.
+5. **Reviewer verdict** — `needs-human-review`. Reviewer == author
+   (self-review); no independent-agent verdict is claimed. Self-review confirms
+   the test has both controls (three buffer-full responses followed by success,
+   and a persistent non-full error), and the source diff contains no frame-cap,
+   encoder, property, or production-code change.
+
 ## Mock-MPP verdict: WORKING
 
 The host-only seam builds `tests/mock_mpp.c` as `libmppmock.so` against the same

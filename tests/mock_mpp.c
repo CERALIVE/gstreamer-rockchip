@@ -56,6 +56,9 @@ static atomic_int dec_info_change_sent;
 static atomic_uint dec_queued;
 static atomic_uint dec_outputs;
 static atomic_uint dec_eos_seen;
+static atomic_uint dec_put_calls;
+static atomic_uint dec_buffer_full_remaining;
+static atomic_int dec_put_terminal;
 static RK_U32 dec_width = 320;
 static RK_U32 dec_height = 240;
 /* Kept far BELOW every input PTS so the decoder's display-order matcher filters
@@ -164,6 +167,21 @@ static MPP_RET put_packet_ok(MppCtx c, MppPacket p) {
   MockPacket *packet = (MockPacket *)p;
   if (!atomic_load(&dec_enabled) || !packet)
     return MPP_OK;
+
+  atomic_fetch_add(&dec_put_calls, 1);
+
+  unsigned remaining = atomic_load(&dec_buffer_full_remaining);
+  while (remaining && !atomic_compare_exchange_weak(
+                           &dec_buffer_full_remaining, &remaining,
+                           remaining - 1))
+    ;
+  if (remaining)
+    return MPP_ERR_BUFFER_FULL;
+
+  MPP_RET terminal = (MPP_RET)atomic_load(&dec_put_terminal);
+  if (terminal != MPP_OK)
+    return terminal;
+
   if (packet->eos)
     atomic_store(&dec_eos_seen, 1);
   else if (!packet->extra_data)
@@ -553,11 +571,20 @@ void mpp_mock_dec_arm(unsigned width, unsigned height) {
   atomic_store(&dec_queued, 0);
   atomic_store(&dec_outputs, 0);
   atomic_store(&dec_eos_seen, 0);
+  atomic_store(&dec_put_calls, 0);
+  atomic_store(&dec_buffer_full_remaining, 0);
+  atomic_store(&dec_put_terminal, MPP_OK);
   atomic_store(&dec_enabled, 1);
 }
 void mpp_mock_dec_disarm(void) { atomic_store(&dec_enabled, 0); }
 unsigned mpp_mock_dec_queued(void) { return atomic_load(&dec_queued); }
 unsigned mpp_mock_dec_outputs(void) { return atomic_load(&dec_outputs); }
+void mpp_mock_dec_set_put_result(unsigned buffer_full_count,
+                                 MPP_RET terminal) {
+  atomic_store(&dec_buffer_full_remaining, buffer_full_count);
+  atomic_store(&dec_put_terminal, terminal);
+}
+unsigned mpp_mock_dec_put_calls(void) { return atomic_load(&dec_put_calls); }
 void mpp_mock_reset(void) {
   memset(control_counts, 0, sizeof(control_counts));
   last_cfg = NULL;
