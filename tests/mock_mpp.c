@@ -69,6 +69,8 @@ typedef struct {
   void *data;
   int index;
   unsigned refs;
+  size_t map_size;
+  int enc_owned;
 } MockBuffer;
 typedef struct {
   MppFrameFormat format;
@@ -87,9 +89,19 @@ typedef struct {
 } MockTask;
 #define ENC_PACKET_CAPACITY 16
 #define ENC_RESET_GENERATIONS 16
+/* Per-packet shape, indexed by the 0-based order in which MPP hands packets
+ * back. Tests arm the whole plan before pushing a single frame, so the encoder
+ * task never races an arming call. Unarmed ordinals keep the default shape. */
+#define ENC_PLAN_CAPACITY 32
+#define ENC_PLAN_DEFAULT_LENGTH 1
+static size_t enc_plan_length[ENC_PLAN_CAPACITY];
+static int enc_plan_length_armed[ENC_PLAN_CAPACITY];
+/* Page-sized and mmap-backed so the plugin's zero-copy branch can import the
+ * dmafd and read the payload back, which the shipped default configuration
+ * does. A malloc'd pointer has no fd and silently retires that whole path. */
+#define ENC_BUFFER_MAP_SIZE 4096
 static MockPacket enc_packets[ENC_PACKET_CAPACITY];
-static MockBuffer enc_buffers[ENC_PACKET_CAPACITY];
-static unsigned char enc_payloads[ENC_PACKET_CAPACITY];
+static atomic_uint enc_live_buffers;
 static atomic_uint enc_head;
 static atomic_uint enc_tail;
 static atomic_uint frame_set_buffer_count;
@@ -344,6 +356,34 @@ static MPP_RET control(MppCtx c, MpiCmd cmd, MppParam p) {
   }
   return MPP_OK;
 }
+static MockBuffer *enc_buffer_new(unsigned char payload) {
+  MockBuffer *b = calloc(1, sizeof(*b));
+  if (!b)
+    return NULL;
+  b->fd = memfd_create("mppmock-enc", MFD_CLOEXEC);
+  if (b->fd < 0 || ftruncate(b->fd, ENC_BUFFER_MAP_SIZE)) {
+    if (b->fd >= 0)
+      close(b->fd);
+    free(b);
+    return NULL;
+  }
+  b->data = mmap(NULL, ENC_BUFFER_MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED,
+                 b->fd, 0);
+  if (b->data == MAP_FAILED) {
+    b->data = NULL;
+    close(b->fd);
+    free(b);
+    return NULL;
+  }
+  ((unsigned char *)b->data)[0] = payload;
+  b->map_size = ENC_BUFFER_MAP_SIZE;
+  b->enc_owned = 1;
+  b->size = 1;
+  b->index = -1;
+  b->refs = 1;
+  atomic_fetch_add(&enc_live_buffers, 1);
+  return b;
+}
 static MPP_RET encode_put(MppCtx c, MppFrame f) {
   (void)c;
   unsigned head = atomic_load(&enc_head);
@@ -353,22 +393,19 @@ static MPP_RET encode_put(MppCtx c, MppFrame f) {
 
   unsigned slot = tail % ENC_PACKET_CAPACITY;
   MockPacket *packet = &enc_packets[slot];
-  MockBuffer *buffer = &enc_buffers[slot];
+  MockBuffer *buffer = enc_buffer_new((unsigned char)(tail + 1));
+  if (!buffer)
+    return MPP_NOK;
   memset(packet, 0, sizeof(*packet));
-  memset(buffer, 0, sizeof(*buffer));
 
   packet->input_frame = f;
   packet->buffer = (MppBuffer)buffer;
-  packet->length = 1;
+  packet->length = (tail < ENC_PLAN_CAPACITY && enc_plan_length_armed[tail])
+                       ? enc_plan_length[tail]
+                       : ENC_PLAN_DEFAULT_LENGTH;
   packet->id = tail + 1;
   packet->encoder_packet = 1;
   packet->alive = 1;
-
-  enc_payloads[slot] = (unsigned char)packet->id;
-  buffer->size = 1;
-  buffer->data = &enc_payloads[slot];
-  buffer->index = -1;
-  buffer->refs = 1;
 
   atomic_store(&enc_tail, tail + 1);
   atomic_fetch_add(&enc_queued_packets, 1);
@@ -469,7 +506,12 @@ MPP_RET mpp_buffer_put_with_caller(MppBuffer buffer, const char *caller) {
     return MPP_NOK;
   if (--b->refs == 0) {
     close(b->fd);
-    free(b->data);
+    if (b->map_size)
+      munmap(b->data, b->map_size);
+    else
+      free(b->data);
+    if (b->enc_owned)
+      atomic_fetch_sub(&enc_live_buffers, 1);
     free(b);
   }
   return MPP_OK;
@@ -666,6 +708,12 @@ MPP_RET mpp_packet_deinit(MppPacket *packet) {
       p->alive = 0;
       atomic_fetch_add(&enc_packet_deinits, 1);
       atomic_fetch_sub(&enc_live_packets, 1);
+      /* Real MPP returns the packet's buffer to its group here; any reference
+       * the plugin took for a zero-copy push has to outlive that. */
+      if (p->buffer) {
+        mpp_buffer_put_with_caller(p->buffer, "mpp_packet_deinit");
+        p->buffer = NULL;
+      }
     }
     *packet = NULL;
     return MPP_OK;
@@ -913,6 +961,14 @@ void mpp_mock_enc_arm_reset_drain(void) {
 void mpp_mock_enc_release_packets(unsigned count) {
   atomic_store(&enc_release_limit, count);
 }
+/* An MPP rate-controller drop is a zero-length packet that still carries its
+ * MppBuffer, so the backing buffer is deliberately left intact here. */
+void mpp_mock_enc_set_packet_length(unsigned ordinal, size_t length) {
+  if (ordinal >= ENC_PLAN_CAPACITY)
+    return;
+  enc_plan_length[ordinal] = length;
+  enc_plan_length_armed[ordinal] = 1;
+}
 unsigned mpp_mock_enc_queued_packets(void) {
   return atomic_load(&enc_queued_packets);
 }
@@ -941,6 +997,9 @@ unsigned mpp_mock_enc_packet_double_deinits(void) {
 }
 unsigned mpp_mock_enc_live_packets(void) {
   return atomic_load(&enc_live_packets);
+}
+unsigned mpp_mock_enc_live_buffers(void) {
+  return atomic_load(&enc_live_buffers);
 }
 static void dec_release_packets(void) {
   while (packet_allocs) {
@@ -1056,8 +1115,9 @@ void mpp_mock_reset(void) {
   atomic_store(&enc_packet_double_deinits, 0);
   atomic_store(&enc_live_packets, 0);
   memset(enc_packets, 0, sizeof(enc_packets));
-  memset(enc_buffers, 0, sizeof(enc_buffers));
-  memset(enc_payloads, 0, sizeof(enc_payloads));
+  atomic_store(&enc_live_buffers, 0);
+  memset(enc_plan_length, 0, sizeof(enc_plan_length));
+  memset(enc_plan_length_armed, 0, sizeof(enc_plan_length_armed));
   mpp_mock_dec_disarm();
   dec_release_packets();
 }

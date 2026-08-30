@@ -20,6 +20,7 @@ extern unsigned mpp_mock_control_count(int cmd);
 extern unsigned mpp_mock_frame_set_buffer_count(void);
 extern void mpp_mock_enc_arm_reset_drain(void);
 extern void mpp_mock_enc_release_packets(unsigned count);
+extern void mpp_mock_enc_set_packet_length(unsigned ordinal, size_t length);
 extern unsigned mpp_mock_enc_queued_packets(void);
 extern unsigned mpp_mock_enc_dequeued_packets(void);
 extern unsigned mpp_mock_enc_queue_depth(void);
@@ -29,6 +30,7 @@ extern unsigned mpp_mock_enc_empty_polls_for_generation(unsigned generation);
 extern unsigned mpp_mock_enc_packet_deinits(void);
 extern unsigned mpp_mock_enc_packet_double_deinits(void);
 extern unsigned mpp_mock_enc_live_packets(void);
+extern unsigned mpp_mock_enc_live_buffers(void);
 extern void mpp_mock_reset(void);
 
 static atomic_uint reset_output_count;
@@ -173,6 +175,154 @@ static void push_reset_frame(GstHarness *h, guint pts_index) {
   GST_BUFFER_DURATION(frame) = GST_SECOND / 30;
   fail_unless_equals_int(gst_harness_push(h, frame), GST_FLOW_OK);
 }
+
+/*
+ * Everything below is sampled where the encoder actually delivers -- inside the
+ * peer chain function, and from the QoS message GstVideoEncoder posts while it
+ * drops a frame. Reading element state after the fact would let a mutant that
+ * merely reorders the delivery path keep passing.
+ */
+#define OUTPUT_CAPTURE_CAPACITY 8
+typedef struct {
+  gsize size;
+  GstClockTime pts;
+  gboolean delta_unit;
+  guint8 payload;
+} CapturedOutput;
+static atomic_uint output_capture_count;
+static CapturedOutput output_capture[OUTPUT_CAPTURE_CAPACITY];
+
+static unsigned read_output_capture_count(void) {
+  return atomic_load(&output_capture_count);
+}
+
+static GstFlowReturn capture_output_buffer(GstPad *pad, GstObject *parent,
+                                           GstBuffer *buffer) {
+  (void)pad;
+  (void)parent;
+  unsigned index = atomic_load(&output_capture_count);
+  fail_unless(index < G_N_ELEMENTS(output_capture));
+  CapturedOutput *out = &output_capture[index];
+  out->size = gst_buffer_get_size(buffer);
+  out->pts = GST_BUFFER_PTS(buffer);
+  out->delta_unit = GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
+  out->payload = 0;
+  if (out->size)
+    gst_buffer_extract(buffer, 0, &out->payload, 1);
+  atomic_store(&output_capture_count, index + 1);
+  gst_buffer_unref(buffer);
+  return GST_FLOW_OK;
+}
+
+static void reset_output_capture(void) {
+  atomic_store(&output_capture_count, 0);
+  memset(output_capture, 0, sizeof(output_capture));
+}
+
+static void read_qos_frame_counts(GstBus *bus, guint64 *processed,
+                                  guint64 *dropped) {
+  GstMessage *message;
+  *processed = 0;
+  *dropped = 0;
+  while ((message = gst_bus_pop_filtered(bus, GST_MESSAGE_QOS))) {
+    GstFormat format = GST_FORMAT_UNDEFINED;
+    guint64 seen_processed = 0;
+    guint64 seen_dropped = 0;
+    gst_message_parse_qos_stats(message, &format, &seen_processed,
+                                &seen_dropped);
+    if (format == GST_FORMAT_BUFFERS) {
+      *processed = MAX(*processed, seen_processed);
+      *dropped = MAX(*dropped, seen_dropped);
+    }
+    gst_message_unref(message);
+  }
+}
+
+static void assert_no_frames_left_pending(GstElement *element) {
+  GList *frames = gst_video_encoder_get_frames(GST_VIDEO_ENCODER(element));
+  guint pending = g_list_length(frames);
+  g_list_free_full(frames, (GDestroyNotify)gst_video_codec_frame_unref);
+  fail_unless_equals_int(pending, 0);
+}
+
+/*
+ * MPP signals a rate-controller drop with a packet that still carries its
+ * MppBuffer but reports zero length. The frame produced no access unit, so
+ * nothing may reach the muxer and the encoder must account it as dropped.
+ *
+ * Both packet-delivery modes are exercised because they fail differently: the
+ * zero-copy branch (the property default) wraps the drop as a genuine zero-byte
+ * GstBuffer, while the copy branch asks for a zero-sized output buffer, which
+ * is a GLib precondition violation.
+ */
+static void check_rc_drop_is_not_pushed(gboolean zero_copy_pkt) {
+  const GstClockTime frame_duration = GST_SECOND / 30;
+  mpp_mock_reset();
+  reset_output_capture();
+  mpp_mock_enc_set_packet_length(1, 0);
+
+  GstHarness *h = gst_harness_new("mpph264enc");
+  fail_unless(h != NULL);
+  g_object_set(h->element, "bitrate", 500, "rc-mode", 1, "zero-copy-pkt",
+               zero_copy_pkt, NULL);
+  GstBus *bus = gst_bus_new();
+  gst_element_set_bus(h->element, bus);
+  gst_pad_set_chain_function(h->sinkpad,
+                             GST_DEBUG_FUNCPTR(capture_output_buffer));
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=320,height=240,framerate=30/1");
+  gst_harness_play(h);
+
+  for (guint i = 0; i < 3; i++)
+    push_reset_frame(h, i);
+
+  /* Deinit happens after finish_frame, so three deinits means all three
+   * packets are fully processed and no further output can appear. */
+  fail_unless(wait_for_uint(mpp_mock_enc_packet_deinits, 3),
+              "encoder did not finish processing every packet");
+
+  for (unsigned i = 0; i < read_output_capture_count(); i++)
+    fail_unless(output_capture[i].size > 0,
+                "output %u reached the peer as a %" G_GSIZE_FORMAT
+                "-byte buffer",
+                i, output_capture[i].size);
+  fail_unless_equals_int(read_output_capture_count(), 2);
+  fail_unless_equals_uint64(output_capture[0].pts, 0);
+  fail_unless_equals_uint64(output_capture[1].pts, 2 * frame_duration);
+  fail_unless_equals_int(output_capture[0].payload, 1);
+  fail_unless_equals_int(output_capture[1].payload, 3);
+
+  guint64 processed = 0;
+  guint64 dropped = 0;
+  read_qos_frame_counts(bus, &processed, &dropped);
+  /* The QoS message carries the encoder's totals as of the drop itself, so
+   * exactly one frame had been processed when the second one was dropped. */
+  fail_unless_equals_uint64(dropped, 1);
+  fail_unless_equals_uint64(processed, 1);
+  assert_no_frames_left_pending(h->element);
+  g_print("rc drop (zero-copy-pkt=%s): outputs=%u payloads=%u,%u "
+          "processed=%" G_GUINT64_FORMAT " dropped=%" G_GUINT64_FORMAT
+          " deinits=%u live-packets=%u\n",
+          zero_copy_pkt ? "true" : "false", read_output_capture_count(),
+          output_capture[0].payload, output_capture[1].payload, processed,
+          dropped, mpp_mock_enc_packet_deinits(),
+          mpp_mock_enc_live_packets());
+
+  gst_element_set_bus(h->element, NULL);
+  gst_harness_teardown(h);
+  gst_object_unref(bus);
+  fail_unless_equals_int(mpp_mock_enc_live_buffers(), 0);
+}
+
+GST_START_TEST(test_zero_length_rc_drop_is_not_pushed_downstream) {
+  check_rc_drop_is_not_pushed(TRUE);
+}
+GST_END_TEST
+
+GST_START_TEST(test_zero_length_rc_drop_is_not_pushed_when_copying) {
+  check_rc_drop_is_not_pushed(FALSE);
+}
+GST_END_TEST
 
 static void check_factory(const char *name, const char *property) {
   GstElementFactory *f = gst_element_factory_find(name);
@@ -759,6 +909,8 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_gop_and_auto_bitrate_follow_fps_out);
   tcase_add_test(tc, test_h264_encoder_lifecycle);
   tcase_add_test(tc, test_h265_encoder_lifecycle);
+  tcase_add_test(tc, test_zero_length_rc_drop_is_not_pushed_downstream);
+  tcase_add_test(tc, test_zero_length_rc_drop_is_not_pushed_when_copying);
   tcase_add_test(
       tc, test_runtime_property_snapshot_is_coherent_and_eventually_applied);
   tcase_add_test(tc, test_encoder_reset_drains_old_packets_before_new_session);

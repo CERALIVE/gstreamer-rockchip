@@ -1723,6 +1723,12 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
   if (!mbuf)
     goto error;
 
+  /* An MPP rate-controller drop still returns a packet, with its buffer
+   * attached and zero length. Wrapping that in a GstBuffer feeds an empty
+   * access unit to the muxer instead of reporting the frame as dropped. */
+  if (pkt_size <= 0)
+    goto rc_drop;
+
   if (zero_copy_pkt) {
     buffer = gst_buffer_new ();
     if (!buffer)
@@ -1760,6 +1766,9 @@ out:
   return TRUE;
 error:
   GST_WARNING_OBJECT (self, "can't process this frame");
+  goto drop;
+rc_drop:
+  GST_DEBUG_OBJECT (self, "rate controller dropped this frame");
 drop:
   GST_DEBUG_OBJECT (self, "drop frame");
   gst_buffer_replace (&frame->output_buffer, NULL);
