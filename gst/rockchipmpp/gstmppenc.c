@@ -528,6 +528,8 @@ typedef struct
   gint fps_out;
   gint fps_n;
   gint fps_d;
+  gint width;
+  gint height;
   gint drop_mode;
   guint drop_threshold;
   guint intra_refresh;
@@ -541,6 +543,55 @@ typedef struct
   guint num_temporal_layers;
   gboolean ref_dirty;
 } GstMppEncPropertiesSnapshot;
+
+/*
+ * The framerate the encoder actually emits, which is what both the automatic
+ * bitrate and the default GOP must be sized against. fps-out decimates output
+ * independently of the input caps, so a 60-in/30-out pipeline that sizes either
+ * one off the input rate gets twice the bitrate and a two-second GOP.
+ */
+static gint
+gst_mpp_enc_effective_fps_out (const GstMppEncPropertiesSnapshot * properties)
+{
+  gint fps;
+
+  if (properties->fps_out > 0)
+    return properties->fps_out;
+
+  if (properties->fps_n <= 0 || properties->fps_d <= 0)
+    return DEFAULT_FPS;
+
+  fps = properties->fps_n / properties->fps_d;
+  return fps > 0 ? fps : DEFAULT_FPS;
+}
+
+/*
+ * The bitrate=0 "auto" target: an eighth of a raw 8-bit luma plane per output
+ * frame. Evaluated in 64-bit and clamped, because the product overflows a
+ * signed 32-bit int somewhere above 8K-class geometry and MPP's rc:bps_* fields
+ * are RK_S32 regardless.
+ */
+static guint
+gst_mpp_enc_auto_bitrate (gint width, gint height, gint fps)
+{
+  guint64 bps;
+
+  if (width <= 0 || height <= 0 || fps <= 0)
+    return 0;
+
+  bps = width;
+  bps = bps * height / 8 * fps;
+
+  return bps > (guint64) G_MAXINT ? (guint) G_MAXINT : (guint) bps;
+}
+
+static gint
+gst_mpp_enc_scale_bitrate (guint bps, guint numerator, guint denominator)
+{
+  guint64 scaled = (guint64) bps * numerator / denominator;
+
+  return scaled > (guint64) G_MAXINT ? G_MAXINT : (gint) scaled;
+}
 
 /*
  * Build and apply the temporal-SVC reference structure for
@@ -682,7 +733,7 @@ gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
 {
   GstMppEnc *self = GST_MPP_ENC (encoder);
   GstMppEncPropertiesSnapshot properties;
-  gint fps;
+  gint fps_out;
 
   if (applied)
     *applied = FALSE;
@@ -701,12 +752,6 @@ gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
     return TRUE;
   }
 
-  fps = GST_VIDEO_INFO_FPS_N (&self->info) /
-      GST_VIDEO_INFO_FPS_D (&self->info);
-  if (!self->bps)
-    self->bps = GST_VIDEO_INFO_WIDTH (&self->info) *
-        GST_VIDEO_INFO_HEIGHT (&self->info) / 8 * fps;
-
   properties.header_mode = self->header_mode;
   properties.rc_mode = self->rc_mode;
   properties.sei_mode = self->sei_mode;
@@ -718,6 +763,8 @@ gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
   properties.fps_out = self->fps_out;
   properties.fps_n = GST_VIDEO_INFO_FPS_N (&self->info);
   properties.fps_d = GST_VIDEO_INFO_FPS_D (&self->info);
+  properties.width = GST_VIDEO_INFO_WIDTH (&self->info);
+  properties.height = GST_VIDEO_INFO_HEIGHT (&self->info);
   properties.drop_mode = self->drop_mode;
   properties.drop_threshold = self->drop_threshold;
   properties.intra_refresh = self->intra_refresh;
@@ -739,6 +786,13 @@ gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
   if (applied)
     *applied = TRUE;
 
+  /* Resolve the auto sentinel into the snapshot only. self->bps must keep its
+   * 0, or the first geometry the encoder sees becomes the permanent target. */
+  fps_out = gst_mpp_enc_effective_fps_out (&properties);
+  if (!properties.bps)
+    properties.bps = gst_mpp_enc_auto_bitrate (properties.width,
+        properties.height, fps_out);
+
   if (configure_codec_properties)
     configure_codec_properties (encoder, codec_snapshot);
 
@@ -756,7 +810,7 @@ gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
     GST_WARNING_OBJECT (self, "failed to set header mode");
 
   gst_mpp_enc_cfg_set_s32 (self, "rc:gop",
-      properties.gop < 0 ? fps : properties.gop);
+      properties.gop < 0 ? fps_out : properties.gop);
   gst_mpp_enc_cfg_set_u32 (self, "rc:max_reenc_times", properties.max_reenc);
   gst_mpp_enc_cfg_set_s32 (self, "rc:mode", properties.rc_mode);
 
@@ -765,18 +819,22 @@ gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
   } else if (properties.rc_mode == MPP_ENC_RC_MODE_CBR) {
     /* CBR mode has narrow bound */
     gst_mpp_enc_cfg_set_s32 (self, "rc:bps_target", properties.bps);
-    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_max",
-        properties.bps_max ? : properties.bps * 17 / 16);
-    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_min",
-        properties.bps_min ? : properties.bps * 15 / 16);
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_max", properties.bps_max ?
+        (gint) properties.bps_max :
+        gst_mpp_enc_scale_bitrate (properties.bps, 17, 16));
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_min", properties.bps_min ?
+        (gint) properties.bps_min :
+        gst_mpp_enc_scale_bitrate (properties.bps, 15, 16));
   } else {
     /* MPP_ENC_RC_MODE_VBR/MPP_ENC_RC_MODE_AVBR */
     /* VBR mode has wide bound */
     gst_mpp_enc_cfg_set_s32 (self, "rc:bps_target", properties.bps);
-    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_max",
-        properties.bps_max ? : properties.bps * 17 / 16);
-    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_min",
-        properties.bps_min ? : properties.bps * 1 / 16);
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_max", properties.bps_max ?
+        (gint) properties.bps_max :
+        gst_mpp_enc_scale_bitrate (properties.bps, 17, 16));
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_min", properties.bps_min ?
+        (gint) properties.bps_min :
+        gst_mpp_enc_scale_bitrate (properties.bps, 1, 16));
   }
 
   /* Output framerate (for runtime decimation) */
@@ -1248,6 +1306,8 @@ gst_mpp_enc_apply_pending_resolution (GstVideoEncoder * encoder)
   }
 
   self->res_dirty = FALSE;
+  /* New geometry invalidates the automatic bitrate derived from the old one. */
+  self->prop_dirty = TRUE;
   input_state = self->input_state;
   rotation = self->rotation;
   prop_width = self->width;

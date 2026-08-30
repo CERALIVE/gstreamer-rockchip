@@ -518,6 +518,94 @@ GST_START_TEST(test_zero_valued_tuning_resets_reach_mpp) {
 }
 GST_END_TEST
 
+static void push_sized_frame(GstHarness *h, guint index, gsize size,
+                             gint fps) {
+  GstBuffer *frame = gst_buffer_new_allocate(NULL, size, NULL);
+  fail_unless(frame != NULL);
+  GST_BUFFER_PTS(frame) = index * (GST_SECOND / fps);
+  GST_BUFFER_DURATION(frame) = GST_SECOND / fps;
+  fail_unless_equals_int(gst_harness_push(h, frame), GST_FLOW_OK);
+}
+
+GST_START_TEST(test_auto_bitrate_recomputes_for_new_output_geometry) {
+  mpp_mock_reset();
+  GstHarness *h =
+      start_encoder_harness("video/x-raw,format=NV12,width=320,height=240,"
+                            "framerate=30/1");
+  push_sized_frame(h, 0, 115200, 30);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("prep:width"), 320);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:bps_target"),
+                         320 * 240 / 8 * 30);
+
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=640,height=480,framerate=30/1");
+  push_sized_frame(h, 1, 460800, 30);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("prep:width"), 640);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:bps_target"),
+                         640 * 480 / 8 * 30);
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
+GST_START_TEST(test_auto_bitrate_keeps_the_zero_sentinel) {
+  mpp_mock_reset();
+  GstHarness *h =
+      start_encoder_harness("video/x-raw,format=NV12,width=320,height=240,"
+                            "framerate=30/1");
+  push_sized_frame(h, 0, 115200, 30);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:bps_target"),
+                         320 * 240 / 8 * 30);
+
+  guint reported = 1;
+  g_object_get(h->element, "bitrate", &reported, NULL);
+  fail_unless_equals_int(reported, 0);
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
+/* 8192x8192 at the 256 fps-out ceiling is the smallest geometry the property
+ * ranges allow that pushes width*height/8*fps to exactly 2^31, so 32-bit
+ * arithmetic here yields a negative rc:bps_target rather than a clamp. */
+GST_START_TEST(test_auto_bitrate_clamps_instead_of_overflowing) {
+  mpp_mock_reset();
+  GstHarness *h = gst_harness_new("mpph264enc");
+  fail_unless(h != NULL);
+  g_object_set(h->element, "rc-mode", 1, "zero-copy-pkt", FALSE, "fps-out", 256,
+               NULL);
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=8192,height=8192,framerate=30/1");
+  gst_harness_set_drop_buffers(h, TRUE);
+  gst_harness_play(h);
+  push_sized_frame(h, 0, (gsize)8192 * 8192 * 3 / 2, 30);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:bps_target"), G_MAXINT);
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
+GST_START_TEST(test_gop_and_auto_bitrate_follow_fps_out) {
+  mpp_mock_reset();
+  GstHarness *h = gst_harness_new("mpph264enc");
+  fail_unless(h != NULL);
+  g_object_set(h->element, "rc-mode", 1, "zero-copy-pkt", FALSE, "fps-out", 30,
+               NULL);
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=320,height=240,framerate=60/1");
+  gst_harness_set_drop_buffers(h, TRUE);
+  gst_harness_play(h);
+  push_sized_frame(h, 0, 115200, 60);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:fps_in_num"), 60);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:fps_out_num"), 30);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:gop"), 30);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("rc:bps_target"),
+                         320 * 240 / 8 * 30);
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
 GST_START_TEST(test_h264_encoder_lifecycle) {
   mpp_mock_reset();
   check_encoder_lifecycle("mpph264enc");
@@ -538,6 +626,10 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_drop_threshold_uses_the_key_mpp_actually_registers);
   tcase_add_test(tc, test_rejected_config_key_fails_the_apply);
   tcase_add_test(tc, test_zero_valued_tuning_resets_reach_mpp);
+  tcase_add_test(tc, test_auto_bitrate_recomputes_for_new_output_geometry);
+  tcase_add_test(tc, test_auto_bitrate_keeps_the_zero_sentinel);
+  tcase_add_test(tc, test_auto_bitrate_clamps_instead_of_overflowing);
+  tcase_add_test(tc, test_gop_and_auto_bitrate_follow_fps_out);
   tcase_add_test(tc, test_h264_encoder_lifecycle);
   tcase_add_test(tc, test_h265_encoder_lifecycle);
   tcase_add_test(
