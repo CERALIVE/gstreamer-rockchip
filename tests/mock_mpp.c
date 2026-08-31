@@ -326,7 +326,7 @@ static MPP_RET deq_ok(MppCtx c, MppPortType t, MppTask *p) {
                             remaining - 1))
       ;
     if (remaining)
-      return MPP_ERR_TIMEOUT;
+      return MPP_NOK;
     if (atomic_exchange(&jpeg_last_input_poll_timed_out, 0))
       return MPP_OK;
     memset(&jpeg_task, 0, sizeof(jpeg_task));
@@ -1447,7 +1447,7 @@ unsigned mpp_mock_internal_group_types(void) {
 }
 void mpp_mock_jpeg_set_input_timeouts(unsigned count) {
   atomic_store(&jpeg_input_timeouts_remaining, count);
-  atomic_store(&jpeg_input_timeout_result, MPP_ERR_TIMEOUT);
+  atomic_store(&jpeg_input_timeout_result, MPP_NOK);
   atomic_store(&jpeg_input_poll_calls, 0);
   atomic_store(&jpeg_last_input_poll_timed_out, 0);
 }

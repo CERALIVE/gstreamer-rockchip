@@ -15,23 +15,29 @@ Every fix row appended by later todos must contain exactly these five fields:
 ### Preserve JPEG input poll and dequeue statuses
 
 1. **Provenance SHA** — first-party correction against task baseline
-   `548944c857177e4983bc7a30e2055d776282c4b0`; the fix commit is the commit containing this row.
+   `548944c857177e4983bc7a30e2055d776282c4b0`; initial fix `7742571aabd22bad01a8f52dc1a3552809b6d40d`,
+   with the independent-review classification correction in the commit containing this row.
    This implements corrected H2-B7 only: successful input enqueue was already checked and that
    branch remains unchanged.
 2. **Red/green outputs** — arm64/bookworm `mpp-decoder-seam` injects one dequeue
-   `MPP_ERR_TIMEOUT`, then separately injects one permanent poll `MPP_NOK`. RED at the parent:
+   `MPP_NOK`, then separately injects permanent poll `MPP_ERR_INIT`. RED at the parent:
    the ignored dequeue status fell through to a NULL task and became fatal `GST_FLOW_ERROR`
-   (`-5 == 0`). GREEN at the fix: `dequeue timeout preserved and retried before successful
-   enqueue`; the call chain made two dequeue attempts and returned `GST_FLOW_OK`. The permanent
-   poll case prints `permanent poll error preserved as GST_FLOW_ERROR without dequeue`, with one
-   poll and zero dequeues. Mutations independently replacing the dequeue status with `MPP_NOK`
-   and replacing the poll status with `MPP_ERR_TIMEOUT` both fail at those exact assertions.
+   (`-5 == 0`). Independent source verification at pinned MPP commit
+   `194af181db3a02a095c01db84e176d972e19b216` then corrected the model: a finite poll timeout is
+   `MPP_NOK`, not `MPP_ERR_TIMEOUT`; `MPP_ERR_INIT` is a distinct reachable permanent result from
+   `Mpp::poll()` before initialization. GREEN translates timed poll/dequeue `MPP_NOK` to the base
+   class's retryable timeout class: `one pinned-MPP MPP_NOK timeout retried; accepted on poll 2`
+   and `dequeue timeout preserved and retried before successful enqueue`. The permanent case is
+   still fatal: `MPP_ERR_INIT preserved as GST_FLOW_ERROR without dequeue`, with one poll and zero
+   dequeues. Separate mutants returning raw `MPP_NOK` from poll and dequeue both fail `(-5 == 0)`.
 3. **Hardware gate** — `hardware-independent`. Return values are injected at the MPP API seam and
    asserted at the public GstVideoDecoder frame-handling result.
 4. **MPP ABI closure** — unchanged at 68 referenced-and-present MPP symbols and empty against
    pinned MPP 1.5.0-1; no new API is called.
-5. **Reviewer verdict** — `needs-human-review`. Reviewer == author; specifically, this row does
-   not claim the corrected mechanism's pre-existing enqueue check as new work.
+5. **Reviewer verdict** — `needs-human-review`. Independent review correctly returned
+   `needs-fix` because the initial test encoded the timeout/permanent classes backwards. The
+   corrected pinned-MPP classification requires fresh independent review; the successful enqueue
+   check remains pre-existing and is still not claimed as new work.
 
 ### Drain-aware, reset-cancellable JPEG shutdown
 

@@ -356,6 +356,12 @@ gst_mpp_jpeg_dec_get_mpp_packet (GstVideoDecoder * decoder,
   return mpkt;
 }
 
+static gboolean
+gst_mpp_jpeg_dec_is_poll_timeout (MPP_RET ret, gint timeout_ms)
+{
+  return timeout_ms > 0 && (ret == MPP_NOK || ret == MPP_ERR_TIMEOUT);
+}
+
 static MPP_RET
 gst_mpp_jpeg_dec_send_mpp_packet (GstVideoDecoder * decoder,
     MppPacket mpkt, gint timeout_ms)
@@ -370,11 +376,13 @@ gst_mpp_jpeg_dec_send_mpp_packet (GstVideoDecoder * decoder,
 
   ret = mppdec->mpi->poll (mppdec->mpp_ctx, MPP_PORT_INPUT, timeout_ms);
   if (ret)
-    return ret;
+    return gst_mpp_jpeg_dec_is_poll_timeout (ret, timeout_ms) ?
+        MPP_ERR_TIMEOUT : ret;
 
   ret = mppdec->mpi->dequeue (mppdec->mpp_ctx, MPP_PORT_INPUT, &mtask);
   if (ret)
-    return ret;
+    return gst_mpp_jpeg_dec_is_poll_timeout (ret, timeout_ms) ?
+        MPP_ERR_TIMEOUT : ret;
   if (G_UNLIKELY (!mtask))
     goto error;
 
@@ -409,12 +417,6 @@ error:
     mpp_frame_deinit (&mframe);
 
   return MPP_NOK;
-}
-
-static gboolean
-gst_mpp_jpeg_dec_is_poll_timeout (MPP_RET ret)
-{
-  return ret == MPP_NOK || ret == MPP_ERR_TIMEOUT;
 }
 
 static MppFrame
@@ -477,7 +479,8 @@ gst_mpp_jpeg_dec_shutdown (GstVideoDecoder * decoder, gboolean drain,
     }
     if (ret == MPP_OK)
       break;
-    if (!gst_mpp_jpeg_dec_is_poll_timeout (ret))
+    if (!gst_mpp_jpeg_dec_is_poll_timeout (ret,
+            MPP_JPEG_DEC_DRAIN_POLL_MS))
       goto error;
   } while (g_get_monotonic_time () < deadline);
 

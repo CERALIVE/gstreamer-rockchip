@@ -714,7 +714,7 @@ test_jpeg_input_timeout_is_retried (void)
   mpp_mock_dec_disarm ();
   gst_harness_teardown (h);
   reclaim_mock_packets ();
-  g_print ("one MPP_ERR_TIMEOUT retried; accepted on poll 2\n");
+  g_print ("one pinned-MPP MPP_NOK timeout retried; accepted on poll 2\n");
 }
 
 static void
@@ -736,7 +736,7 @@ test_jpeg_input_poll_and_dequeue_results_are_preserved (void)
   reclaim_mock_packets ();
 
   mpp_mock_dec_arm (DEC_WIDTH, DEC_HEIGHT);
-  mpp_mock_jpeg_set_input_poll_result (MPP_NOK);
+  mpp_mock_jpeg_set_input_poll_result (MPP_ERR_INIT);
   h = gst_harness_new ("mppjpegdec");
   g_assert_nonnull (h);
   gst_harness_set_src_caps_str (h, JPEG_CAPS);
@@ -744,7 +744,7 @@ test_jpeg_input_poll_and_dequeue_results_are_preserved (void)
       GST_FLOW_ERROR);
   g_assert_cmpuint (mpp_mock_jpeg_input_poll_calls (), ==, 1);
   g_assert_cmpuint (mpp_mock_jpeg_input_dequeue_calls (), ==, 0);
-  g_print ("permanent poll error preserved as GST_FLOW_ERROR without dequeue\n");
+  g_print ("MPP_ERR_INIT preserved as GST_FLOW_ERROR without dequeue\n");
   mpp_mock_dec_disarm ();
   gst_harness_teardown (h);
   reclaim_mock_packets ();
