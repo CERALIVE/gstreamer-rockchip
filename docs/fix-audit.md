@@ -1092,9 +1092,25 @@ evidence uses.
    (no upstream pick). Ledger origin O1-B6.
 2. **Red/green outputs** — `meson test -C build --print-errorlogs`, case
    `test_intra_output_is_marked_as_a_sync_point` in `tests/mpp_gstharness.c`. Three
-   packets: ordinal 0 carries `KEY_OUTPUT_INTRA=1`, ordinal 1 carries no such meta at
-   all (what MPP does for most outputs), ordinal 2 carries the meta with value 0. The
-   absent case is the negative control — it must not read the same as a present zero.
+   packets: ordinal 0 carries `KEY_OUTPUT_INTRA=1`, ordinal 1 omits the key entirely,
+   ordinal 2 carries it with value 0.
+
+   **Correction (review round 1).** An earlier revision of this row, of the two source
+   comments, and of the `c49f69d1` commit message described the absent-key case as
+   "what MPP does for most outputs". That is wrong. The pinned MPP writes
+   `KEY_OUTPUT_INTRA` on **every** output packet, from `frm->is_intra`, at
+   `mpp/codec/mpp_enc_impl.cpp:2481` — the call sits after the statistics block under
+   its own `/* frame type */` comment, not inside any conditional (a second
+   unconditional write covers the partitioned-output path at `:517`). So the two shapes
+   MPP actually produces are present-and-1 for an IDR and present-and-0 otherwise, which
+   are ordinals 0 and 2.
+
+   Ordinal 1 is therefore **defensive coverage, not the common path**: it proves an
+   absent key cannot read as a set one, which would matter for a malformed producer or
+   a future MPP that stops writing it unconditionally. It is retained on that basis. The
+   source comments are corrected in this branch; the `c49f69d1` commit message cannot be
+   corrected without a force-push over a reviewed branch, so the correction is recorded
+   here instead.
 
    RED at the parent (FIX-8 applied, FIX-11 absent):
 
@@ -1179,6 +1195,14 @@ without it, so it is recorded with the same five fields.
    (`corrupted double-linked list`, SIGABRT). After the fix: **0/100**, and the full
    `meson test` suite 0/40.
 
+   **Correction (review round 1) — the defect was hours old, not long-standing.** The
+   arena free was introduced by `ebea6d08` (`2026-08-30 07:19:03 -0500`), on the same day
+   as this fix (`53ea3879`, `2026-08-30 18:52:36 -0500`) — about eleven and a half hours,
+   not the "months" a notepad entry claimed. `eae0b5bd` (`06:34:03`) landed the seam test
+   that reaches it. "Latent" is accurate only in the narrow sense that the suite passed
+   in between; nothing here survived a release, and the wording should not be read as a
+   long-standing escape.
+
    Reversing only the teardown order in the seam tests was tried first and is wrong —
    it hangs, because production must stop before the element can drain. The fix splits
    the two jobs instead: disarming stops production, and the arena is reclaimed when a
@@ -1187,7 +1211,58 @@ without it, so it is recorded with the same five fields.
 4. **MPP ABI closure** — unchanged; `tests/mock_mpp.c` is not part of the plugin.
 5. **Reviewer verdict** — `needs-human-review`. Reviewer == author.
 
-### Verification of the three rows above
+### Prerequisite follow-up — the deferred reclaim leaked the last test's arena
+
+Found by review round 1. Deferring reclamation to "the next arm or reset" closed the
+use-after-free but opened a leak at the other end: `test_unmatched_pts_pending_list_is_bounded()`
+is the **last** test in `tests/mpp_decoder_seam.c`, and nothing arms after it, so its
+arena was never reclaimed. `mpp_packet_init()` appends to `packet_allocs`
+unconditionally, so that run stranded every packet it made.
+
+Measured, not inferred — the seam now prints the arena size on both sides of the final
+reclaim:
+
+```
+mock packet arena before final reclaim: 300
+mock packet arena at exit: 0
+```
+
+The 300 is the leak exactly as it stood before this follow-up.
+
+Fixed by making reclamation **explicit at every teardown point** rather than deferred:
+
+- `mpp_mock_dec_release_packets()` is now exported, and `reclaim_mock_packets()` in the
+  seam calls it and asserts `mpp_mock_dec_live_packets() == 0`.
+- `stop_decoder()` runs disarm → teardown → reclaim. Reclaiming *after* teardown is what
+  keeps the original use-after-free closed, because the element deinitializes its own
+  packets as it stops.
+- The JPEG direct-teardown path, which does not go through `stop_decoder()`, calls the
+  same helper.
+- `main()` calls it once more as a catch-all for any future test that does neither.
+- Arming still reclaims, now purely as a safety net for a test that forgets.
+
+A `g_assert_cmpuint(..., >, 0)` before the final reclaim keeps the emptiness assertion
+from passing vacuously: the suite proves it really did build an arena before proving it
+released one.
+
+**LeakSanitizer could not be used, and this is not a substitute claim.** LSan cannot
+start in this environment at all — under `qemu-user` it aborts before reporting, with
+`LeakSanitizer has encountered a fatal error` (its stop-the-world thread tracing is
+unsupported), including with `use_tls=0:use_registers=0`. ASan's *inline* checking works
+fine here and is what found the original use-after-free; only the leak-checking pass is
+unavailable. The deterministic counter above is therefore the evidence, and it is
+stronger for this particular claim than a one-off sanitizer run would have been: it runs
+on every build in both CI suites rather than in a sanitizer leg nobody can execute.
+
+Verified both ways:
+
+- Counter: `arena at exit: 0` for `mpp-decoder-seam` **and** for `mpp-gstharness`
+  (measured with a temporary `__attribute__((destructor))` probe, not committed).
+- Mutation: making `mpp_mock_dec_release_packets()` a no-op fails at the first reclaim —
+  `ERROR:../tests/mpp_decoder_seam.c:133:reclaim_mock_packets: assertion failed (mpp_mock_dec_live_packets () == 0): (1 == 0)` —
+  so the assertion is load-bearing rather than decorative.
+
+### Verification of the rows above
 
 Both CI suite legs, native aarch64 containers, pinned MPP 1.5.0-1 / RGA 2.2.0-1,
 built with `-Drkximage=enabled -Drockchipmpp=enabled -Dkmssrc=enabled -Drga=enabled`:

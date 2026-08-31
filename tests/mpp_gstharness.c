@@ -348,9 +348,13 @@ static GstFlowReturn capture_sync_point(GstVideoEncoder *encoder,
 
 /*
  * MPP flags an intra/IDR output with KEY_OUTPUT_INTRA. A sync point must reach
- * the peer without DELTA_UNIT, and a predicted frame must carry it. The middle
- * packet has no meta at all, which is what MPP does for most outputs and must
- * not be confused with a meta carrying zero.
+ * the peer without DELTA_UNIT, and a predicted frame must carry it.
+ *
+ * The pinned MPP writes the key on every output packet, IDR or not
+ * (mpp/codec/mpp_enc_impl.cpp:2481), so ordinals 0 and 2 -- present-and-set and
+ * present-and-zero -- are the two real shapes. Ordinal 1 omits the key entirely,
+ * which MPP does not currently do; it is defensive coverage proving an absent
+ * key cannot read as a set one.
  */
 GST_START_TEST(test_intra_output_is_marked_as_a_sync_point) {
   mpp_mock_reset();
