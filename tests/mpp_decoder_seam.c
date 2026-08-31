@@ -91,6 +91,7 @@ unsigned mpp_mock_jpeg_input_poll_calls (void);
 
 #define PENDING_INPUTS 300
 #define HEADER_INPUTS 300
+#define NORMAL_INPUTS 8
 #define DRAIN_TIMEOUT_US (20 * G_USEC_PER_SEC)
 #define ACCOUNTING_TIMEOUT_US (2 * G_USEC_PER_SEC)
 
@@ -922,6 +923,106 @@ test_untimestamped_vcl_survives_later_match (void)
 }
 
 static void
+test_ordered_stream_output_identity (void)
+{
+  GstHarness *h = start_decoder (FALSE);
+  static const guint8 expected_identity[NORMAL_INPUTS] = {
+    0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58,
+  };
+  GList *frames;
+  gboolean valid = TRUE;
+  guint i;
+
+  g_print ("== eight-frame ordered output identity ==\n");
+  mpp_mock_dec_set_output_buffers (TRUE);
+  mpp_mock_dec_set_output_paused (TRUE);
+
+  for (i = 0; i < NORMAL_INPUTS; i++) {
+    mpp_mock_dec_plan_output (i, i ? (RK_S64) input_pts (i) : -1,
+        expected_identity[i]);
+    g_assert_cmpint (gst_harness_push (h, make_fixture_input_buffer (
+                h264_p_slice, sizeof (h264_p_slice), input_pts (i))), ==,
+        GST_FLOW_OK);
+  }
+  g_assert_cmpuint (mpp_mock_dec_queued (), ==, NORMAL_INPUTS);
+
+  mpp_mock_dec_set_output_paused (FALSE);
+  g_assert_true (wait_for_accounted_outputs (NORMAL_INPUTS));
+  g_assert_true (wait_for_pending_count (h, 1, ACCOUNTING_TIMEOUT_US));
+
+  if (mpp_mock_dec_outputs () != NORMAL_INPUTS ||
+      mpp_mock_dec_accounted_outputs () != NORMAL_INPUTS ||
+      mpp_mock_dec_queued () != 0) {
+    g_printerr ("ERROR: ordered stream accounting outputs=%u accounted=%u "
+        "queued=%u; expected %u/8/0\n", mpp_mock_dec_outputs (),
+        mpp_mock_dec_accounted_outputs (), mpp_mock_dec_queued (),
+        NORMAL_INPUTS);
+    valid = FALSE;
+  }
+
+  for (i = 0; i < NORMAL_INPUTS - 1; i++) {
+    GstBuffer *output = wait_for_output_buffer (h);
+    GstClockTime pts;
+    guint8 identity;
+
+    g_assert_nonnull (output);
+    pts = GST_BUFFER_PTS (output);
+    identity = output_identity (output);
+    if (pts != input_pts (i) || identity != expected_identity[i]) {
+      g_printerr ("ERROR: ordered output %u got pts=%" G_GUINT64_FORMAT
+          " identity=0x%02x; expected pts=%" G_GUINT64_FORMAT
+          " identity=0x%02x\n", i, pts, identity, input_pts (i),
+          expected_identity[i]);
+      valid = FALSE;
+    }
+    gst_buffer_unref (output);
+  }
+
+  {
+    GstBuffer *unexpected = gst_harness_try_pull (h);
+
+    if (unexpected) {
+      g_printerr ("ERROR: ordered stream delivered an unexpected eighth "
+          "downstream buffer with identity=0x%02x\n",
+          output_identity (unexpected));
+      gst_buffer_unref (unexpected);
+      valid = FALSE;
+    }
+  }
+
+  frames = gst_video_decoder_get_frames (GST_VIDEO_DECODER (h->element));
+  if (g_list_length (frames) != 1) {
+    g_printerr ("ERROR: ordered retained-tail accounting has %u frames; "
+        "expected 1\n", g_list_length (frames));
+    valid = FALSE;
+  } else {
+    GstVideoCodecFrame *tail = frames->data;
+    guint8 identity = tail->output_buffer ?
+        output_identity (tail->output_buffer) : 0;
+
+    if (tail->system_frame_number != NORMAL_INPUTS - 1 ||
+        tail->pts != input_pts (NORMAL_INPUTS - 1) ||
+        identity != expected_identity[NORMAL_INPUTS - 1]) {
+      g_printerr ("ERROR: ordered retained tail frame=%d pts=%"
+          G_GUINT64_FORMAT " identity=0x%02x; expected frame=7 pts=%"
+          G_GUINT64_FORMAT " identity=0x58\n", tail->system_frame_number,
+          tail->pts, identity, input_pts (NORMAL_INPUTS - 1));
+      valid = FALSE;
+    }
+    g_print ("ordered retained tail: frame=%d pts=%" G_GUINT64_FORMAT
+        " identity=0x%02x (deferred by one-frame output queue)\n",
+        tail->system_frame_number, tail->pts, identity);
+  }
+  g_list_free_full (frames, (GDestroyNotify) gst_video_codec_frame_unref);
+
+  stop_decoder (h);
+  if (!valid)
+    accounting_failures++;
+  else
+    g_print ("eight-frame ordered output identity: OK\n");
+}
+
+static void
 test_reordered_mixed_pts_output_identity (void)
 {
   GstHarness *h = start_decoder (FALSE);
@@ -1027,6 +1128,7 @@ run_accounting_tests (void)
   test_parameter_set_only_inputs_are_released ();
   test_tiny_invalid_pts_vcl_is_never_header ();
   test_untimestamped_vcl_survives_later_match ();
+  test_ordered_stream_output_identity ();
   test_reordered_mixed_pts_output_identity ();
 }
 
