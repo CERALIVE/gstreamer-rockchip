@@ -87,6 +87,10 @@ typedef struct {
   MppPacket packet;
 } MockFrame;
 typedef struct {
+  RK_U32 width;
+  RK_U32 height;
+} MockEncGeometryRecord;
+typedef struct {
   MppPacket packet;
   MppFrame frame;
 } MockTask;
@@ -131,6 +135,8 @@ static atomic_uint enc_packet_double_deinits;
 static atomic_uint enc_live_packets;
 static atomic_int enc_reject_put;
 static atomic_uint enc_put_rejections;
+static atomic_uint enc_geometry_record_count;
+static MockEncGeometryRecord enc_geometry_records[ENC_PLAN_CAPACITY];
 static atomic_uint enc_gap_empty_polls;
 static atomic_uint enc_gap_empty_polls_remaining;
 static atomic_uint enc_gap_empty_polls_per_packet;
@@ -432,6 +438,14 @@ static MPP_RET encode_put(MppCtx c, MppFrame f) {
   packet->intra = packet->has_intra_meta ? enc_plan_intra[tail] : 0;
   packet->encoder_packet = 1;
   packet->alive = 1;
+
+  unsigned geometry_index = atomic_load(&enc_geometry_record_count);
+  if (geometry_index < ENC_PLAN_CAPACITY) {
+    MockFrame *frame = (MockFrame *)f;
+    enc_geometry_records[geometry_index].width = frame->width;
+    enc_geometry_records[geometry_index].height = frame->height;
+    atomic_store(&enc_geometry_record_count, geometry_index + 1);
+  }
 
   atomic_store(&enc_tail, tail + 1);
   atomic_fetch_add(&enc_queued_packets, 1);
@@ -1049,6 +1063,20 @@ void mpp_mock_enc_reject_input(void) { atomic_store(&enc_reject_put, 1); }
 unsigned mpp_mock_enc_put_rejections(void) {
   return atomic_load(&enc_put_rejections);
 }
+void mpp_mock_enc_accept_input(void) { atomic_store(&enc_reject_put, 0); }
+unsigned mpp_mock_enc_geometry_record_count(void) {
+  return atomic_load(&enc_geometry_record_count);
+}
+unsigned mpp_mock_enc_geometry_width(unsigned index) {
+  return index < atomic_load(&enc_geometry_record_count)
+             ? enc_geometry_records[index].width
+             : 0;
+}
+unsigned mpp_mock_enc_geometry_height(unsigned index) {
+  return index < atomic_load(&enc_geometry_record_count)
+             ? enc_geometry_records[index].height
+             : 0;
+}
 void mpp_mock_enc_set_empty_polls_between_packets(unsigned count) {
   atomic_store(&enc_gap_empty_polls_per_packet, count);
 }
@@ -1231,6 +1259,8 @@ void mpp_mock_reset(void) {
   atomic_store(&enc_live_packets, 0);
   atomic_store(&enc_reject_put, 0);
   atomic_store(&enc_put_rejections, 0);
+  atomic_store(&enc_geometry_record_count, 0);
+  memset(enc_geometry_records, 0, sizeof(enc_geometry_records));
   atomic_store(&enc_gap_empty_polls, 0);
   atomic_store(&enc_gap_empty_polls_remaining, 0);
   atomic_store(&enc_gap_empty_polls_per_packet, 0);
@@ -1244,4 +1274,17 @@ void mpp_mock_reset(void) {
   memset(enc_plan_intra_armed, 0, sizeof(enc_plan_intra_armed));
   mpp_mock_dec_disarm();
   mpp_mock_dec_release_packets();
+}
+
+static atomic_int mock_rga_enabled;
+
+int c_RkRgaInit(void) { return 0; }
+int c_RkRgaBlit(void *src, void *dst, void *src1) {
+  (void)src;
+  (void)dst;
+  (void)src1;
+  return atomic_load(&mock_rga_enabled) ? 0 : -1;
+}
+void mpp_mock_rga_set_enabled(int enabled) {
+  atomic_store(&mock_rga_enabled, !!enabled);
 }

@@ -969,6 +969,7 @@ gst_mpp_enc_set_src_caps (GstVideoEncoder * encoder, GstCaps * caps)
   return gst_video_encoder_negotiate (encoder);
 }
 
+static gboolean gst_mpp_enc_send_frame_locked (GstVideoEncoder * encoder);
 static gboolean gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder);
 
 #define MPP_ENC_DRAIN_NO_PROGRESS_US (100 * 1000)
@@ -1344,6 +1345,43 @@ gst_mpp_enc_set_format (GstVideoEncoder * encoder, GstVideoCodecState * state)
   return gst_mpp_enc_apply_strides (encoder, hstride, vstride);
 }
 
+static gboolean
+gst_mpp_enc_drain_resolution_boundary (GstVideoEncoder * encoder)
+{
+  GstMppEnc *self = GST_MPP_ENC (encoder);
+  gint64 no_progress_deadline =
+      g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
+
+  while (self->frames || GST_MPP_ENC_PENDING (encoder)) {
+    gboolean progress = FALSE;
+
+    while (gst_mpp_enc_send_frame_locked (encoder))
+      progress = TRUE;
+    while (gst_mpp_enc_poll_packet_locked (encoder))
+      progress = TRUE;
+
+    if (self->task_ret != GST_FLOW_OK)
+      return FALSE;
+
+    if (progress) {
+      no_progress_deadline =
+          g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
+      continue;
+    }
+
+    if (g_get_monotonic_time () >= no_progress_deadline) {
+      GST_ERROR_OBJECT (self,
+          "resolution drain timed out with %d pending and %u unsubmitted frames",
+          GST_MPP_ENC_PENDING (encoder), g_list_length (self->frames));
+      return FALSE;
+    }
+
+    g_usleep (1000);
+  }
+
+  return TRUE;
+}
+
 /*
  * Re-derive the scaler target and encoder config from the current input caps
  * plus the (possibly just-changed) width/height properties, without tearing the
@@ -1375,13 +1413,26 @@ gst_mpp_enc_apply_pending_resolution (GstVideoEncoder * encoder)
   }
 
   self->res_dirty = FALSE;
-  /* New geometry invalidates the automatic bitrate derived from the old one. */
-  self->prop_dirty = TRUE;
   input_state = self->input_state;
   rotation = self->rotation;
   prop_width = self->width;
   prop_height = self->height;
   arm_afbc = self->arm_afbc;
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+
+  /* Every queued frame was converted against the current geometry, but the
+   * send path copies dimensions from the shared mpp_frame template. Finish all
+   * queued and MPP-owned work before changing that template or output caps. */
+  if (!gst_mpp_enc_drain_resolution_boundary (encoder)) {
+    GST_MPP_ENC_PROP_LOCK (encoder);
+    self->res_dirty = TRUE;
+    GST_MPP_ENC_PROP_UNLOCK (encoder);
+    return FALSE;
+  }
+
+  GST_MPP_ENC_PROP_LOCK (encoder);
+  /* New geometry invalidates the automatic bitrate derived from the old one. */
+  self->prop_dirty = TRUE;
   GST_MPP_ENC_PROP_UNLOCK (encoder);
 
   *info = input_state->info;

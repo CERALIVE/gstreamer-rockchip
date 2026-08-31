@@ -22,7 +22,11 @@ extern unsigned mpp_mock_frame_set_buffer_count(void);
 extern void mpp_mock_enc_arm_reset_drain(void);
 extern void mpp_mock_enc_release_packets(unsigned count);
 extern void mpp_mock_enc_reject_input(void);
+extern void mpp_mock_enc_accept_input(void);
 extern unsigned mpp_mock_enc_put_rejections(void);
+extern unsigned mpp_mock_enc_geometry_record_count(void);
+extern unsigned mpp_mock_enc_geometry_width(unsigned index);
+extern unsigned mpp_mock_enc_geometry_height(unsigned index);
 extern void mpp_mock_enc_set_empty_polls_between_packets(unsigned count);
 extern unsigned mpp_mock_enc_gap_empty_polls(void);
 extern void mpp_mock_enc_set_packet_length(unsigned ordinal, size_t length);
@@ -39,6 +43,7 @@ extern unsigned mpp_mock_enc_live_packets(void);
 extern unsigned mpp_mock_enc_live_buffers(void);
 extern void mpp_mock_arm_unmappable_buffer(void);
 extern unsigned mpp_mock_unmappable_buffers(void);
+extern void mpp_mock_rga_set_enabled(int enabled);
 extern void mpp_mock_reset(void);
 
 static atomic_uint reset_output_count;
@@ -183,6 +188,40 @@ static void push_runtime_property_frame(GstHarness *h, guint index) {
   GST_BUFFER_PTS(frame) = index * (GST_SECOND / 30);
   GST_BUFFER_DURATION(frame) = GST_SECOND / 30;
   fail_unless_equals_int(gst_harness_push(h, frame), GST_FLOW_OK);
+}
+
+#define RESOLUTION_CAPTURE_CAPACITY 8
+typedef struct {
+  guint width;
+  guint height;
+} ResolutionCaps;
+static atomic_uint resolution_output_count;
+static ResolutionCaps resolution_output_caps[RESOLUTION_CAPTURE_CAPACITY];
+
+static unsigned read_resolution_output_count(void) {
+  return atomic_load(&resolution_output_count);
+}
+
+static GstFlowReturn capture_resolution_output(GstPad *pad, GstObject *parent,
+                                               GstBuffer *buffer) {
+  (void)parent;
+  unsigned index = atomic_load(&resolution_output_count);
+  fail_unless(index < G_N_ELEMENTS(resolution_output_caps));
+
+  GstCaps *caps = gst_pad_get_current_caps(pad);
+  fail_unless(caps != NULL, "output %u arrived without negotiated caps", index);
+  const GstStructure *structure = gst_caps_get_structure(caps, 0);
+  gint width = 0;
+  gint height = 0;
+  fail_unless(gst_structure_get_int(structure, "width", &width));
+  fail_unless(gst_structure_get_int(structure, "height", &height));
+  resolution_output_caps[index].width = (guint)width;
+  resolution_output_caps[index].height = (guint)height;
+  gst_caps_unref(caps);
+
+  atomic_store(&resolution_output_count, index + 1);
+  gst_buffer_unref(buffer);
+  return GST_FLOW_OK;
 }
 
 static gboolean recorded_bitrate(guint bitrate) {
@@ -1416,6 +1455,73 @@ GST_START_TEST(test_auto_bitrate_recomputes_for_runtime_resolution_property) {
 }
 GST_END_TEST
 
+GST_START_TEST(test_runtime_resolution_drains_old_geometry_before_caps_switch) {
+  const guint old_width = 320;
+  const guint old_height = 240;
+  const guint new_width = 160;
+  const guint new_height = 120;
+  const guint old_frames = 4;
+  const guint one_gop_frames = 30;
+
+  mpp_mock_reset();
+  mpp_mock_rga_set_enabled(TRUE);
+  mpp_mock_enc_reject_input();
+  atomic_store(&resolution_output_count, 0);
+  memset(resolution_output_caps, 0, sizeof(resolution_output_caps));
+
+  GstHarness *h =
+      start_encoder_harness("video/x-raw,format=NV12,width=320,height=240,"
+                            "framerate=30/1");
+  gst_pad_set_chain_function(h->sinkpad,
+                             GST_DEBUG_FUNCPTR(capture_resolution_output));
+
+  for (guint i = 0; i < old_frames; i++)
+    push_runtime_property_frame(h, i);
+  fail_unless(wait_for_uint(mpp_mock_enc_put_rejections, 1),
+              "mock MPP never backpressured the old-geometry queue");
+  fail_unless_equals_int(encoder_frame_count(h->element), old_frames);
+
+  GstVideoEncoder *encoder = GST_VIDEO_ENCODER(h->element);
+  fail_unless(gst_pad_stop_task(GST_VIDEO_ENCODER_SRC_PAD(encoder)),
+              "failed to stop the output task at the resolution boundary");
+  mpp_mock_enc_accept_input();
+
+  gint64 requested_at = g_get_monotonic_time();
+  g_object_set(h->element, "width", new_width, "height", new_height, NULL);
+  push_runtime_property_frame(h, old_frames);
+
+  fail_unless(wait_for_uint(mpp_mock_enc_geometry_record_count, old_frames + 1),
+              "new-geometry frame never reached MPP");
+  fail_unless(wait_for_uint(read_resolution_output_count, old_frames + 1),
+              "not every frame crossed the caps boundary");
+  gint64 drain_elapsed_us = g_get_monotonic_time() - requested_at;
+
+  for (guint i = 0; i < old_frames; i++) {
+    fail_unless_equals_int(mpp_mock_enc_geometry_width(i), old_width);
+    fail_unless_equals_int(mpp_mock_enc_geometry_height(i), old_height);
+    fail_unless_equals_int(resolution_output_caps[i].width, old_width);
+    fail_unless_equals_int(resolution_output_caps[i].height, old_height);
+  }
+  fail_unless_equals_int(mpp_mock_enc_geometry_width(old_frames), new_width);
+  fail_unless_equals_int(mpp_mock_enc_geometry_height(old_frames), new_height);
+  fail_unless_equals_int(resolution_output_caps[old_frames].width, new_width);
+  fail_unless_equals_int(resolution_output_caps[old_frames].height, new_height);
+  fail_unless(old_frames <= one_gop_frames,
+              "resolution drain crossed more than one GOP (%u > %u frames)",
+              old_frames, one_gop_frames);
+  fail_unless(drain_elapsed_us < G_USEC_PER_SEC,
+              "resolution drain took an unbounded %.3f ms",
+              drain_elapsed_us / 1000.0);
+  g_print("runtime resolution drain: %u old frames, %.3f ms, caps %ux%u -> "
+          "%ux%u at a frame boundary\n",
+          old_frames, drain_elapsed_us / 1000.0, old_width, old_height,
+          new_width, new_height);
+
+  gst_harness_teardown(h);
+  mpp_mock_rga_set_enabled(FALSE);
+}
+GST_END_TEST
+
 GST_START_TEST(test_gop_and_auto_bitrate_follow_fps_out) {
   mpp_mock_reset();
   GstHarness *h = gst_harness_new("mpph264enc");
@@ -1462,6 +1568,8 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_auto_bitrate_recomputes_for_new_output_geometry);
   tcase_add_test(tc,
                  test_auto_bitrate_recomputes_for_runtime_resolution_property);
+  tcase_add_test(tc,
+                 test_runtime_resolution_drains_old_geometry_before_caps_switch);
   tcase_add_test(tc, test_auto_bitrate_keeps_the_zero_sentinel);
   tcase_add_test(tc, test_auto_bitrate_clamps_instead_of_overflowing);
   tcase_add_test(tc, test_auto_bitrate_saturates_at_a_large_nv12_geometry);
