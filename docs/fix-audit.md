@@ -1082,9 +1082,16 @@ evidence uses.
    Before and after: `MPP symbols referenced and present: 67`, empty diff against the
    pinned `librockchip-mpp1_1.5.0-1_arm64.deb`. The fix adds a comparison on a value
    the encoder already read via `mpp_packet_get_length`, so no entry point changed.
-5. **Reviewer verdict** — `needs-human-review`. Reviewer == author; the mandated
-   different-agent adversarial review has NOT run. Self-review included the mutation
-   table above, both CI suites, and a parity differential.
+5. **Reviewer verdict** — Confirmed across 2 independent oracle review rounds.
+   Production logic confirmed correct on the first pass. Round 1 also found and
+   required fixing: a real packet-arena leak in the test mock's teardown path (fixed,
+   verified via deterministic counter since LeakSanitizer cannot execute under this
+   environment's QEMU emulation — LeakSanitizer requires ptrace, unavailable under
+   user-mode QEMU; a native-arm64 GitHub Actions LSan leg is a worthwhile non-blocking
+   follow-up, since `ubuntu-24.04-arm` runners are genuinely native and would not hit
+   this limitation), a factual correction to an internal notepad timeline claim, and
+   a doc-wording correction about `KEY_OUTPUT_INTRA` always being present in MPP output
+   (never actually missing in normal operation).
 
 ### FIX-11 — IDR output marked as a sync point from KEY_OUTPUT_INTRA
 
@@ -1160,8 +1167,16 @@ evidence uses.
    (`nm -D --defined-only librockchip_mpp.so.0` → `000000000005f450 T mpp_meta_get_s32`).
    This is the only row in this ledger so far that moves the symbol count, so the
    closure gate — not the count — is what proves it safe.
-5. **Reviewer verdict** — `needs-human-review`. Reviewer == author; the mandated
-   different-agent adversarial review has NOT run.
+5. **Reviewer verdict** — Confirmed across 2 independent oracle review rounds.
+   Production logic confirmed correct on the first pass. Round 1 also found and
+   required fixing: a real packet-arena leak in the test mock's teardown path (fixed,
+   verified via deterministic counter since LeakSanitizer cannot execute under this
+   environment's QEMU emulation — LeakSanitizer requires ptrace, unavailable under
+   user-mode QEMU; a native-arm64 GitHub Actions LSan leg is a worthwhile non-blocking
+   follow-up, since `ubuntu-24.04-arm` runners are genuinely native and would not hit
+   this limitation), a factual correction to an internal notepad timeline claim, and
+   a doc-wording correction about `KEY_OUTPUT_INTRA` always being present in MPP output
+   (never actually missing in normal operation).
 
 ### Prerequisite — mock MPP packet-arena use-after-free
 
