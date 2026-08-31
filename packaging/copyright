@@ -1,0 +1,59 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: gstreamer-rockchip
+Upstream-Contact: CERALIVE <contact@ceralive.tv>
+Source: https://github.com/CERALIVE/gstreamer-rockchip
+Comment: CeraLive fork of the Rockchip GStreamer plugin set, by way of the
+ BELABOX and irlserver forks. The stanzas below cover every distinct copyright
+ holder present in the compiled sources under gst/ — packaging/package-contract.sh
+ re-derives that holder set from the tree on every run, so a new upstream
+ contributor cannot reach a release without a stanza here.
+
+Files: *
+Copyright: 2017-2024 Rockchip Electronics Co., Ltd
+License: LGPL-2.1
+
+Files: gst/rockchipmpp/gstmppalphadecodebin.c
+       gst/rockchipmpp/gstmppalphadecodebin.h
+       gst/rockchipmpp/gstmppvpxalphadecodebin.c
+       gst/rockchipmpp/gstmppvpxalphadecodebin.h
+Copyright: 2021 Collabora Ltd.
+License: LGPL-2.1
+
+Files: gst/rkximage/gstkmsallocator.c
+       gst/rkximage/gstkmsallocator.h
+       gst/rkximage/gstkmsbufferpool.c
+       gst/rkximage/gstkmsbufferpool.h
+       gst/rkximage/gstkmsutils.c
+       gst/rkximage/gstkmsutils.h
+Copyright: 2016 Igalia
+           2024 Rockchip Electronics Co., Ltd
+License: LGPL-2.1
+
+Files: gst/rkximage/ximagesink.c
+       gst/rkximage/ximagesink.h
+Copyright: 2005 Julien Moutte <julien@moutte.net>
+           2016 Igalia
+           2024 Rockchip Electronics Co., Ltd
+License: LGPL-2.1
+
+Files: packaging/*
+Copyright: 2026 CERALIVE <contact@ceralive.tv>
+License: LGPL-2.1
+
+License: LGPL-2.1
+ This library is free software; you can redistribute it and/or modify it under
+ the terms of the GNU Lesser General Public License as published by the Free
+ Software Foundation; either version 2.1 of the License, or (at your option)
+ any later version.
+ .
+ This library is distributed in the hope that it will be useful, but WITHOUT
+ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public License for more
+ details.
+ .
+ You should have received a copy of the GNU Lesser General Public License along
+ with this library; if not, write to the Free Software Foundation, Inc., 51
+ Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ .
+ The complete text ships beside this file as COPYING. On Debian systems it can
+ also be found in "/usr/share/common-licenses/LGPL-2.1".
