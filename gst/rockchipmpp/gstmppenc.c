@@ -658,15 +658,17 @@ gst_mpp_enc_apply_ref_cfg (GstVideoEncoder * encoder,
   if (num_temporal_layers < 2) {
     /* NULL ref cfg restores MPP's default (flat IPPP) references. */
     if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_REF_CFG, NULL)) {
-      GST_WARNING_OBJECT (self, "failed to reset reference cfg");
+      GST_ERROR_OBJECT (self, "failed to reset reference cfg");
       return FALSE;
     }
     GST_INFO_OBJECT (self, "temporal layers disabled (flat IPPP)");
     return TRUE;
   }
 
-  if (!self->ref_cfg && mpp_enc_ref_cfg_init (&self->ref_cfg))
+  if (!self->ref_cfg && mpp_enc_ref_cfg_init (&self->ref_cfg)) {
+    GST_ERROR_OBJECT (self, "failed to allocate a reference cfg");
     return FALSE;
+  }
   mpp_enc_ref_cfg_reset (self->ref_cfg);
 
   memset (lt_ref, 0, sizeof (lt_ref));
@@ -752,12 +754,12 @@ gst_mpp_enc_apply_ref_cfg (GstVideoEncoder * encoder,
     mpp_enc_ref_cfg_add_st_cfg (self->ref_cfg, st_cnt, st_ref);
 
   if (mpp_enc_ref_cfg_check (self->ref_cfg)) {
-    GST_WARNING_OBJECT (self, "temporal-layer ref cfg check failed");
+    GST_ERROR_OBJECT (self, "temporal-layer ref cfg check failed");
     return FALSE;
   }
 
   if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_REF_CFG, self->ref_cfg)) {
-    GST_WARNING_OBJECT (self, "failed to set temporal-layer ref cfg");
+    GST_ERROR_OBJECT (self, "failed to set temporal-layer ref cfg");
     return FALSE;
   }
 
@@ -838,9 +840,26 @@ gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
     configure_codec_properties (encoder, codec_snapshot);
 
   /* Apply a pending temporal-layer reference-structure change before the rest
-   * of the config; the ref cfg governs the GOP structure the RC then sizes to. */
-  if (properties.ref_dirty)
-    gst_mpp_enc_apply_ref_cfg (encoder, properties.num_temporal_layers);
+   * of the config; the ref cfg governs the GOP structure the RC then sizes to.
+   *
+   * A refusal fails the whole apply. Discarding it would leave MPP encoding
+   * with the PREVIOUS reference structure while the element reports the
+   * requested layer count, and the rate controller would then be sized against
+   * a GOP that does not exist. The request stays outstanding -- ref_dirty was
+   * cleared optimistically with the snapshot -- so the next apply retries it
+   * rather than abandoning the transition; prop_dirty has to come back with it,
+   * because the next apply short-circuits on prop_dirty alone. */
+  if (properties.ref_dirty
+      && !gst_mpp_enc_apply_ref_cfg (encoder, properties.num_temporal_layers)) {
+    GST_ERROR_OBJECT (self, "MPP refused the temporal-layer reference cfg for "
+        "%u layers; retrying on the next apply",
+        properties.num_temporal_layers);
+    GST_MPP_ENC_PROP_LOCK (encoder);
+    self->ref_dirty = TRUE;
+    self->prop_dirty = TRUE;
+    GST_MPP_ENC_PROP_UNLOCK (encoder);
+    return FALSE;
+  }
 
   if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_SEI_CFG,
           &properties.sei_mode))

@@ -18,6 +18,9 @@ extern void mpp_mock_enc_pause_next_set_cfg(void);
 extern unsigned mpp_mock_enc_set_cfg_paused(void);
 extern void mpp_mock_enc_resume_set_cfg(void);
 extern unsigned mpp_mock_control_count(int cmd);
+extern void mpp_mock_enc_reject_ref_cfg(int reject);
+extern unsigned mpp_mock_enc_ref_cfg_calls(void);
+extern unsigned mpp_mock_enc_ref_cfg_resets(void);
 extern unsigned mpp_mock_frame_set_buffer_count(void);
 extern void mpp_mock_enc_arm_reset_drain(void);
 extern void mpp_mock_enc_release_packets(unsigned count);
@@ -1237,6 +1240,68 @@ GST_START_TEST(test_rejected_config_key_fails_the_apply) {
 }
 GST_END_TEST
 
+static GstFlowReturn push_encoder_frame(GstHarness *h, guint index) {
+  GstBuffer *frame = gst_buffer_new_allocate(NULL, 115200, NULL);
+  fail_unless(frame != NULL);
+  GST_BUFFER_PTS(frame) = index * (GST_SECOND / 30);
+  GST_BUFFER_DURATION(frame) = GST_SECOND / 30;
+  return gst_harness_push(h, frame);
+}
+
+/* A refused reference structure must fail the apply and stay outstanding. The
+ * parent discarded the return and cleared the request, so MPP kept encoding
+ * flat IPPP while the element reported the requested layer count -- and because
+ * the setter short-circuits on an unchanged value, re-requesting the same count
+ * could never revive the transition. */
+GST_START_TEST(test_refused_temporal_ref_cfg_fails_the_apply_and_retries) {
+  mpp_mock_reset();
+  mpp_mock_enc_reject_ref_cfg(TRUE);
+
+  GstHarness *h =
+      start_encoder_harness("video/x-raw,format=NV12,width=320,height=240,"
+                            "framerate=30/1");
+  g_object_set(h->element, "bitrate", 500, NULL);
+  fail_unless_equals_int(push_encoder_frame(h, 0), GST_FLOW_OK);
+
+  unsigned set_cfg_before = mpp_mock_control_count(MPP_ENC_SET_CFG);
+  fail_unless_equals_int(mpp_mock_enc_ref_cfg_calls(), 0);
+
+  g_object_set(h->element, "num-temporal-layers", 2, NULL);
+  fail_unless_equals_int(push_encoder_frame(h, 1), GST_FLOW_NOT_NEGOTIATED);
+  fail_unless_equals_int(mpp_mock_enc_ref_cfg_calls(), 1);
+  fail_unless_equals_int(mpp_mock_control_count(MPP_ENC_SET_CFG),
+                         set_cfg_before);
+
+  guint layers = 0;
+  g_object_get(h->element, "num-temporal-layers", &layers, NULL);
+  fail_unless_equals_int(layers, 2);
+
+  /* The request survived the failure: the next pass retries it without the
+   * property being written again, which the parent's cleared flag could not. */
+  fail_unless_equals_int(push_encoder_frame(h, 2), GST_FLOW_NOT_NEGOTIATED);
+  fail_unless_equals_int(mpp_mock_enc_ref_cfg_calls(), 2);
+  fail_unless_equals_int(mpp_mock_control_count(MPP_ENC_SET_CFG),
+                         set_cfg_before);
+
+  mpp_mock_enc_reject_ref_cfg(FALSE);
+  fail_unless_equals_int(push_encoder_frame(h, 3), GST_FLOW_OK);
+  fail_unless_equals_int(mpp_mock_enc_ref_cfg_calls(), 3);
+  fail_unless(mpp_mock_control_count(MPP_ENC_SET_CFG) > set_cfg_before);
+
+  /* Returning to flat IPPP is the same contract on the NULL-cfg branch. */
+  mpp_mock_enc_reject_ref_cfg(TRUE);
+  g_object_set(h->element, "num-temporal-layers", 0, NULL);
+  fail_unless_equals_int(push_encoder_frame(h, 4), GST_FLOW_NOT_NEGOTIATED);
+  fail_unless_equals_int(mpp_mock_enc_ref_cfg_resets(), 1);
+
+  mpp_mock_enc_reject_ref_cfg(FALSE);
+  fail_unless_equals_int(push_encoder_frame(h, 5), GST_FLOW_OK);
+  fail_unless_equals_int(mpp_mock_enc_ref_cfg_resets(), 2);
+
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
 GST_START_TEST(test_zero_valued_tuning_resets_reach_mpp) {
   mpp_mock_reset();
   GstHarness *h =
@@ -1563,6 +1628,7 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_video_decoder_caps_truth);
   tcase_add_test(tc, test_drop_threshold_uses_the_key_mpp_actually_registers);
   tcase_add_test(tc, test_rejected_config_key_fails_the_apply);
+  tcase_add_test(tc, test_refused_temporal_ref_cfg_fails_the_apply_and_retries);
   tcase_add_test(tc, test_zero_valued_tuning_resets_reach_mpp);
   tcase_add_test(tc, test_super_frame_thresholds_reset_to_unreachable_not_zero);
   tcase_add_test(tc, test_auto_bitrate_recomputes_for_new_output_geometry);

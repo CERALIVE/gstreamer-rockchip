@@ -49,6 +49,11 @@ static atomic_int enc_bps_pause_release;
 static atomic_int enc_control_pause_armed;
 static atomic_int enc_control_pause_entered;
 static atomic_int enc_control_pause_release;
+/* MPP validates a reference structure inside MPP_ENC_SET_REF_CFG and answers
+ * MPP_NOK for one its encoder cannot honour. Tests arm that refusal here. */
+static atomic_int enc_reject_ref_cfg;
+static atomic_uint enc_ref_cfg_calls;
+static atomic_uint enc_ref_cfg_resets;
 typedef struct MockPacket {
   MppFrame input_frame;
   MppBuffer buffer;
@@ -363,6 +368,7 @@ static MPP_RET put_packet_ok(MppCtx c, MppPacket p) {
 }
 static MPP_RET control(MppCtx c, MpiCmd cmd, MppParam p) {
   (void)c;
+  MPP_RET ret = MPP_OK;
   if (cmd == MPP_ENC_SET_CFG) {
     control_counts[0]++;
     record_enc_cfg((MppEncCfg)p);
@@ -372,13 +378,21 @@ static MPP_RET control(MppCtx c, MpiCmd cmd, MppParam p) {
     control_counts[1]++;
   else if (cmd == MPP_ENC_SET_HEADER_MODE)
     control_counts[2]++;
+  else if (cmd == MPP_ENC_SET_REF_CFG) {
+    control_counts[3]++;
+    atomic_fetch_add(&enc_ref_cfg_calls, 1);
+    if (!p)
+      atomic_fetch_add(&enc_ref_cfg_resets, 1);
+    if (atomic_load(&enc_reject_ref_cfg))
+      ret = MPP_NOK;
+  }
   FILE *f = fopen(
       getenv("MPP_MOCK_LOG") ? getenv("MPP_MOCK_LOG") : "mpp-mock.log", "a");
   if (f) {
     fprintf(f, "control:%d\n", cmd);
     fclose(f);
   }
-  return MPP_OK;
+  return ret;
 }
 static MockBuffer *enc_buffer_new(unsigned char payload) {
   MockBuffer *b = calloc(1, sizeof(*b));
@@ -1046,7 +1060,17 @@ unsigned mpp_mock_control_count(int cmd) {
   return cmd == MPP_ENC_SET_CFG           ? (unsigned)control_counts[0]
          : cmd == MPP_ENC_SET_SEI_CFG     ? (unsigned)control_counts[1]
          : cmd == MPP_ENC_SET_HEADER_MODE ? (unsigned)control_counts[2]
+         : cmd == MPP_ENC_SET_REF_CFG     ? (unsigned)control_counts[3]
                                           : 0;
+}
+void mpp_mock_enc_reject_ref_cfg(int reject) {
+  atomic_store(&enc_reject_ref_cfg, !!reject);
+}
+unsigned mpp_mock_enc_ref_cfg_calls(void) {
+  return atomic_load(&enc_ref_cfg_calls);
+}
+unsigned mpp_mock_enc_ref_cfg_resets(void) {
+  return atomic_load(&enc_ref_cfg_resets);
 }
 unsigned mpp_mock_frame_set_buffer_count(void) {
   return atomic_load(&frame_set_buffer_count);
@@ -1241,6 +1265,9 @@ void mpp_mock_reset(void) {
   atomic_store(&enc_control_pause_armed, 0);
   atomic_store(&enc_control_pause_entered, 0);
   atomic_store(&enc_control_pause_release, 1);
+  atomic_store(&enc_reject_ref_cfg, 0);
+  atomic_store(&enc_ref_cfg_calls, 0);
+  atomic_store(&enc_ref_cfg_resets, 0);
   atomic_store(&enc_head, 0);
   atomic_store(&enc_tail, 0);
   atomic_store(&frame_set_buffer_count, 0);
