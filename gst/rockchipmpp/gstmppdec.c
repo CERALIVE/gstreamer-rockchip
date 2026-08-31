@@ -52,10 +52,7 @@ G_DEFINE_ABSTRACT_TYPE (GstMppDec, gst_mpp_dec, GST_TYPE_VIDEO_DECODER);
  * per-output gst_video_decoder_get_frames() walk cannot degrade to O(N^2). */
 #define GST_MPP_DEC_MAX_PENDING_FRAMES 64
 
-/* Split SPS/PPS NALs are tiny and untimestamped; coded pictures are larger or
- * carry a PTS. Requiring both properties avoids classifying skip frames as
- * header-only input. */
-#define GST_MPP_DEC_HEADER_ONLY_MAX_SIZE 128
+#define GST_MPP_DEC_NAL_LENGTH_DISABLED G_MAXUINT
 
 #define MPP_TO_GST_PTS(pts) ((pts) * GST_MSECOND)
 
@@ -306,6 +303,7 @@ gst_mpp_dec_start (GstVideoDecoder * decoder)
   /* Prefer using MPP PTS */
   self->use_mpp_pts = TRUE;
   self->mpp_delta_pts = 0;
+  self->nal_length_size = GST_MPP_DEC_NAL_LENGTH_DISABLED;
 
   g_mutex_init (&self->mutex);
 
@@ -391,6 +389,181 @@ gst_mpp_dec_finish (GstVideoDecoder * decoder)
   return GST_FLOW_OK;
 }
 
+static guint
+gst_mpp_dec_codec_data_nal_length_size (GstMppDec * self,
+    GstVideoCodecState * state)
+{
+  GstMapInfo map = GST_MAP_INFO_INIT;
+  guint offset;
+  guint length_size = GST_MPP_DEC_NAL_LENGTH_DISABLED;
+
+  if (!state->codec_data)
+    return length_size;
+
+  offset = self->mpp_type == MPP_VIDEO_CodingAVC ? 4 : 21;
+  if (!gst_buffer_map (state->codec_data, &map, GST_MAP_READ))
+    return length_size;
+
+  if (map.size > offset && map.data[0] == 1) {
+    length_size = (map.data[offset] & 0x03) + 1;
+    if (length_size == 3)
+      length_size = GST_MPP_DEC_NAL_LENGTH_DISABLED;
+  }
+
+  gst_buffer_unmap (state->codec_data, &map);
+  return length_size;
+}
+
+static void
+gst_mpp_dec_configure_nal_format (GstMppDec * self, GstVideoCodecState * state)
+{
+  const GstStructure *structure = gst_caps_get_structure (state->caps, 0);
+  const gchar *stream_format = gst_structure_get_string (structure,
+      "stream-format");
+
+  self->nal_length_size = GST_MPP_DEC_NAL_LENGTH_DISABLED;
+  if (self->mpp_type != MPP_VIDEO_CodingAVC &&
+      self->mpp_type != MPP_VIDEO_CodingHEVC)
+    return;
+
+  if (g_strcmp0 (stream_format, "byte-stream") == 0) {
+    self->nal_length_size = 0;
+  } else if ((self->mpp_type == MPP_VIDEO_CodingAVC &&
+          (g_strcmp0 (stream_format, "avc") == 0 ||
+              g_strcmp0 (stream_format, "avc3") == 0)) ||
+      (self->mpp_type == MPP_VIDEO_CodingHEVC &&
+          (g_strcmp0 (stream_format, "hvc1") == 0 ||
+              g_strcmp0 (stream_format, "hev1") == 0))) {
+    self->nal_length_size = gst_mpp_dec_codec_data_nal_length_size (self,
+        state);
+  }
+}
+
+static gboolean
+gst_mpp_dec_nal_is_parameter_set (GstMppDec * self, const guint8 * data,
+    gsize size)
+{
+  guint type;
+
+  if (self->mpp_type == MPP_VIDEO_CodingAVC) {
+    if (size < 2 || data[0] & 0x80)
+      return FALSE;
+    type = data[0] & 0x1f;
+    return type == 7 || type == 8;
+  }
+
+  if (self->mpp_type == MPP_VIDEO_CodingHEVC) {
+    if (size < 3 || data[0] & 0x80 || !(data[1] & 0x07))
+      return FALSE;
+    type = (data[0] >> 1) & 0x3f;
+    return type >= 32 && type <= 34;
+  }
+
+  return FALSE;
+}
+
+static gboolean
+gst_mpp_dec_find_start_code (const guint8 * data, gsize size, gsize from,
+    gsize * prefix, gsize * nal)
+{
+  gsize i;
+
+  for (i = from; i + 3 <= size; i++) {
+    if (data[i] || data[i + 1])
+      continue;
+    if (data[i + 2] == 1) {
+      *prefix = i;
+      *nal = i + 3;
+      return TRUE;
+    }
+    if (i + 4 <= size && !data[i + 2] && data[i + 3] == 1) {
+      *prefix = i;
+      *nal = i + 4;
+      return TRUE;
+    }
+  }
+
+  return FALSE;
+}
+
+static gboolean
+gst_mpp_dec_annex_b_is_parameter_set_au (GstMppDec * self,
+    const guint8 * data, gsize size)
+{
+  gsize prefix, nal_start, next_prefix, next_nal;
+  gsize i;
+  gboolean found = FALSE;
+
+  if (!gst_mpp_dec_find_start_code (data, size, 0, &prefix, &nal_start))
+    return FALSE;
+  for (i = 0; i < prefix; i++) {
+    if (data[i])
+      return FALSE;
+  }
+
+  while (nal_start < size) {
+    gboolean have_next = gst_mpp_dec_find_start_code (data, size, nal_start,
+        &next_prefix, &next_nal);
+    gsize nal_end = have_next ? next_prefix : size;
+
+    while (nal_end > nal_start && !data[nal_end - 1])
+      nal_end--;
+    if (nal_end <= nal_start ||
+        !gst_mpp_dec_nal_is_parameter_set (self, data + nal_start,
+            nal_end - nal_start))
+      return FALSE;
+
+    found = TRUE;
+    if (!have_next)
+      break;
+    if (next_nal >= size)
+      return FALSE;
+    nal_start = next_nal;
+  }
+
+  return found;
+}
+
+static gboolean
+gst_mpp_dec_length_prefixed_is_parameter_set_au (GstMppDec * self,
+    const guint8 * data, gsize size)
+{
+  guint length_size = self->nal_length_size;
+  gsize offset = 0;
+  gboolean found = FALSE;
+
+  while (offset < size) {
+    guint32 nal_size = 0;
+    guint i;
+
+    if (size - offset < length_size)
+      return FALSE;
+    for (i = 0; i < length_size; i++)
+      nal_size = (nal_size << 8) | data[offset + i];
+    offset += length_size;
+
+    if (!nal_size || nal_size > size - offset ||
+        !gst_mpp_dec_nal_is_parameter_set (self, data + offset, nal_size))
+      return FALSE;
+    found = TRUE;
+    offset += nal_size;
+  }
+
+  return found;
+}
+
+static gboolean
+gst_mpp_dec_is_parameter_set_au (GstMppDec * self, const guint8 * data,
+    gsize size)
+{
+  if (!data || !size ||
+      self->nal_length_size == GST_MPP_DEC_NAL_LENGTH_DISABLED)
+    return FALSE;
+  if (!self->nal_length_size)
+    return gst_mpp_dec_annex_b_is_parameter_set_au (self, data, size);
+  return gst_mpp_dec_length_prefixed_is_parameter_set_au (self, data, size);
+}
+
 static gboolean
 gst_mpp_dec_set_format (GstVideoDecoder * decoder, GstVideoCodecState * state)
 {
@@ -427,6 +600,7 @@ gst_mpp_dec_set_format (GstVideoDecoder * decoder, GstVideoCodecState * state)
   if (self->ignore_error)
     self->mpi->control (self->mpp_ctx, MPP_DEC_SET_DISABLE_ERROR, NULL);
 
+  gst_mpp_dec_configure_nal_format (self, state);
   self->input_state = gst_video_codec_state_ref (state);
   return TRUE;
 }
@@ -837,14 +1011,11 @@ gst_mpp_dec_get_frame (GstVideoDecoder * decoder, GstClockTime pts)
         GST_DEBUG_OBJECT (self, "using matched frame (#%d)",
             frame->system_frame_number);
 
-        /* Invalid-PTS inputs cannot be ordered by time. A later matched frame
-         * proves an older one did not produce output, so order it by input. */
+        /* Discard out-dated frames for some broken videos */
         for (l = frames; l != NULL; l = l->next) {
           GstVideoCodecFrame *f = l->data;
 
-          if ((GST_CLOCK_TIME_IS_VALID (f->pts) && f->pts < frame->pts) ||
-              (!GST_CLOCK_TIME_IS_VALID (f->pts) &&
-                  f->system_frame_number < frame->system_frame_number)) {
+          if (GST_CLOCK_TIME_IS_VALID (f->pts) && f->pts < frame->pts) {
             GST_WARNING_OBJECT (self, "discarding out-dated frame (#%d)",
                 f->system_frame_number);
 
@@ -1286,6 +1457,7 @@ gst_mpp_dec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
   GstFlowReturn ret;
   MppPacket mpkt = NULL;
   gboolean packet_has_buffer = FALSE;
+  gboolean parameter_set_only;
 
   GST_MPP_DEC_LOCK (decoder);
 
@@ -1317,6 +1489,8 @@ gst_mpp_dec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
 
   GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
   gst_buffer_map (frame->input_buffer, &mapinfo, GST_MAP_READ);
+  parameter_set_only = gst_mpp_dec_is_parameter_set_au (self, mapinfo.data,
+      mapinfo.size);
   mpkt = klass->get_mpp_packet (decoder, &mapinfo);
   GST_VIDEO_DECODER_STREAM_LOCK (decoder);
   if (!mpkt)
@@ -1345,11 +1519,9 @@ gst_mpp_dec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
   else
     mpp_packet_deinit (&mpkt);
 
-  if (!GST_CLOCK_TIME_IS_VALID (frame->pts) &&
-      mapinfo.size <= GST_MPP_DEC_HEADER_ONLY_MAX_SIZE) {
-    GST_DEBUG_OBJECT (self, "releasing header-only frame (#%d, %"
-        G_GSIZE_FORMAT " bytes, no pts)", frame->system_frame_number,
-        mapinfo.size);
+  if (parameter_set_only) {
+    GST_DEBUG_OBJECT (self, "releasing parameter-set-only frame (#%d)",
+        frame->system_frame_number);
 
     gst_buffer_unmap (frame->input_buffer, &mapinfo);
     gst_video_decoder_release_frame (decoder, frame);

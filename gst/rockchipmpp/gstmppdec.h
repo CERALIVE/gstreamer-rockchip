@@ -86,6 +86,8 @@ struct _GstMppDec
   gboolean use_mpp_pts;
   GstClockTime mpp_delta_pts;
 
+  guint nal_length_size;
+
   guint32 decoded_frames;
 
   GstVideoCodecFrame *last_frame;

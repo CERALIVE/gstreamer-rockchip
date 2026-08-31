@@ -1,10 +1,9 @@
 /*
  * Host-only decoder-seam regression tests for mppvideodec.
  *
- * Both cases run entirely on the mocked MPP (tests/mock_mpp.c) and touch no
- * Rockchip hardware: the mock feeds the decode loop MppFrames that carry no
- * MppBuffer, so every output takes the loop's drop path -- which is exactly the
- * path that consumes a pending GstVideoCodecFrame.
+ * The cases run entirely on the mocked MPP (tests/mock_mpp.c) and touch no
+ * Rockchip hardware. Accounting tests use bufferless output; delivery tests use
+ * unique fd-backed buffers so frame identity is observable downstream.
  */
 #include <gst/allocators/gstdmabuf.h>
 #include <gst/check/gstharness.h>
@@ -17,9 +16,15 @@ void mpp_mock_dec_disarm (void);
 void mpp_mock_dec_release_packets (void);
 unsigned mpp_mock_dec_live_packets (void);
 unsigned mpp_mock_dec_outputs (void);
+unsigned mpp_mock_dec_queued (void);
 void mpp_mock_dec_set_output_suppressed (int suppressed);
 void mpp_mock_dec_set_output_pts (RK_S64 pts);
 void mpp_mock_dec_set_output_buffers (int enabled);
+void mpp_mock_dec_set_output_paused (int paused);
+void mpp_mock_dec_plan_output (unsigned ordinal, RK_S64 pts,
+    unsigned identity);
+unsigned mpp_mock_dec_accounted_outputs (void);
+unsigned mpp_mock_dec_live_output_buffers (void);
 void mpp_mock_dec_set_frame_format (MppFrameFormat format);
 void mpp_mock_dec_set_put_result (unsigned buffer_full_count, MPP_RET terminal);
 unsigned mpp_mock_dec_put_calls (void);
@@ -36,18 +41,146 @@ unsigned mpp_mock_jpeg_input_poll_calls (void);
 
 #define DEC_WIDTH 320
 #define DEC_HEIGHT 240
-#define SINK_CAPS_STR                                                   \
+#define H264_BYTE_STREAM_CAPS                                          \
   "video/x-h264,parsed=(boolean)true,stream-format=(string)byte-stream," \
   "alignment=(string)au,width=(int)" G_STRINGIFY (DEC_WIDTH) ","        \
   "height=(int)" G_STRINGIFY (DEC_HEIGHT) ",framerate=(fraction)30/1"
+#define H264_AVC_CAPS                                                   \
+  "video/x-h264,parsed=(boolean)true,stream-format=(string)avc,"        \
+  "alignment=(string)au,codec_data=(buffer)"                           \
+  "014d4015ffe10017674d4015eca4bf2e0220000003002ee6b28001e2c5b2c001"  \
+  "000468ebecb2,width=(int)" G_STRINGIFY (DEC_WIDTH) ",height=(int)"   \
+  G_STRINGIFY (DEC_HEIGHT) ",framerate=(fraction)30/1"
+#define H265_BYTE_STREAM_CAPS                                          \
+  "video/x-h265,parsed=(boolean)true,stream-format=(string)byte-stream," \
+  "alignment=(string)au,width=(int)" G_STRINGIFY (DEC_WIDTH) ","        \
+  "height=(int)" G_STRINGIFY (DEC_HEIGHT) ",framerate=(fraction)30/1"
+#define H265_HVC1_CAPS                                                  \
+  "video/x-h265,parsed=(boolean)true,stream-format=(string)hvc1,"       \
+  "alignment=(string)au,codec_data=(buffer)"                           \
+  "0104080000009808000000003ff000fcfffcfc00000f,width=(int)"          \
+  G_STRINGIFY (DEC_WIDTH) ",height=(int)" G_STRINGIFY (DEC_HEIGHT) "," \
+  "framerate=(fraction)30/1"
+#define H264_UNKNOWN_FORMAT_CAPS                                       \
+  "video/x-h264,parsed=(boolean)true,alignment=(string)au,width=(int)" \
+  G_STRINGIFY (DEC_WIDTH) ",height=(int)" G_STRINGIFY (DEC_HEIGHT) "," \
+  "framerate=(fraction)30/1"
+#define VP8_CAPS                                                        \
+  "video/x-vp8,width=(int)" G_STRINGIFY (DEC_WIDTH) ",height=(int)"    \
+  G_STRINGIFY (DEC_HEIGHT) ",framerate=(fraction)30/1"
+#define VP9_CAPS                                                        \
+  "video/x-vp9,width=(int)" G_STRINGIFY (DEC_WIDTH) ",height=(int)"    \
+  G_STRINGIFY (DEC_HEIGHT) ",framerate=(fraction)30/1"
+#define H263_CAPS                                                       \
+  "video/x-h263,parsed=(boolean)true,width=(int)"                      \
+  G_STRINGIFY (DEC_WIDTH) ",height=(int)" G_STRINGIFY (DEC_HEIGHT) "," \
+  "framerate=(fraction)30/1"
+#define AV1_CAPS                                                        \
+  "video/x-av1,parsed=(boolean)true,width=(int)"                       \
+  G_STRINGIFY (DEC_WIDTH) ",height=(int)" G_STRINGIFY (DEC_HEIGHT) "," \
+  "framerate=(fraction)30/1"
+#define MPEG4_CAPS                                                      \
+  "video/mpeg,parsed=(boolean)true,mpegversion=(int)4,"                \
+  "systemstream=(boolean)false,width=(int)" G_STRINGIFY (DEC_WIDTH) "," \
+  "height=(int)" G_STRINGIFY (DEC_HEIGHT) ",framerate=(fraction)30/1"
+#define JPEG_CAPS                                                       \
+  "image/jpeg,parsed=(boolean)true,width=(int)"                        \
+  G_STRINGIFY (DEC_WIDTH) ",height=(int)" G_STRINGIFY (DEC_HEIGHT) "," \
+  "framerate=(fraction)30/1"
+#define SINK_CAPS_STR H264_BYTE_STREAM_CAPS
 
 #define PENDING_INPUTS 300
 #define HEADER_INPUTS 300
-#define NORMAL_INPUTS 8
 #define DRAIN_TIMEOUT_US (20 * G_USEC_PER_SEC)
 #define ACCOUNTING_TIMEOUT_US (2 * G_USEC_PER_SEC)
 
 static guint accounting_failures;
+
+/* Real parser fixtures copied from GStreamer's h264parse/h265parse tests. */
+static const guint8 h264_parameter_sets_bytestream[] = {
+  0x00, 0x00, 0x00, 0x01, 0x67, 0x4d, 0x40, 0x15,
+  0xec, 0xa4, 0xbf, 0x2e, 0x02, 0x20, 0x00, 0x00,
+  0x03, 0x00, 0x2e, 0xe6, 0xb2, 0x80, 0x01, 0xe2,
+  0xc5, 0xb2, 0xc0,
+  0x00, 0x00, 0x00, 0x01, 0x68, 0xeb, 0xec, 0xb2,
+};
+
+static const guint8 h264_parameter_sets_avc[] = {
+  0x00, 0x00, 0x00, 0x17,
+  0x67, 0x4d, 0x40, 0x15, 0xec, 0xa4, 0xbf, 0x2e,
+  0x02, 0x20, 0x00, 0x00, 0x03, 0x00, 0x2e, 0xe6,
+  0xb2, 0x80, 0x01, 0xe2, 0xc5, 0xb2, 0xc0,
+  0x00, 0x00, 0x00, 0x04, 0x68, 0xeb, 0xec, 0xb2,
+};
+
+static const guint8 h265_parameter_sets_bytestream[] = {
+  0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0c, 0x01,
+  0xff, 0xff, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00,
+  0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00,
+  0x3f, 0x95, 0x98, 0x09,
+  0x00, 0x00, 0x00, 0x01, 0x42, 0x01, 0x01, 0x01,
+  0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00,
+  0x03, 0x00, 0x00, 0x03, 0x00, 0x3f, 0xa0, 0x88,
+  0x45, 0x96, 0x56, 0x6a, 0xbc, 0xaf, 0xff, 0x00,
+  0x01, 0x00, 0x01, 0x6a, 0x0c, 0x02, 0x0c, 0x08,
+  0x00, 0x00, 0x03, 0x00, 0x08, 0x00, 0x00, 0x03,
+  0x00, 0xf0, 0x40,
+  0x00, 0x00, 0x00, 0x01, 0x44, 0x01, 0xc1, 0x73,
+  0xd0, 0x89,
+};
+
+static const guint8 h265_parameter_sets_hvc1[] = {
+  0x00, 0x00, 0x00, 0x18,
+  0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x01, 0x60,
+  0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03,
+  0x00, 0x00, 0x03, 0x00, 0x3f, 0x95, 0x98, 0x09,
+  0x00, 0x00, 0x00, 0x2f,
+  0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03,
+  0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03,
+  0x00, 0x3f, 0xa0, 0x88, 0x45, 0x96, 0x56, 0x6a,
+  0xbc, 0xaf, 0xff, 0x00, 0x01, 0x00, 0x01, 0x6a,
+  0x0c, 0x02, 0x0c, 0x08, 0x00, 0x00, 0x03, 0x00,
+  0x08, 0x00, 0x00, 0x03, 0x00, 0xf0, 0x40,
+  0x00, 0x00, 0x00, 0x06, 0x44, 0x01, 0xc1, 0x73,
+  0xd0, 0x89,
+};
+
+static const guint8 h264_idr_frame[] = {
+  0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00,
+  0x10, 0xff, 0xfe, 0xf6, 0xf0, 0xfe, 0x05, 0x36,
+  0x56, 0x04, 0x50, 0x96, 0x7b, 0x3f, 0x53, 0xe1,
+};
+
+static const guint8 h264_idr_frame_avc[] = {
+  0x00, 0x00, 0x00, 0x14, 0x65, 0x88, 0x84, 0x00,
+  0x10, 0xff, 0xfe, 0xf6, 0xf0, 0xfe, 0x05, 0x36,
+  0x56, 0x04, 0x50, 0x96, 0x7b, 0x3f, 0x53, 0xe1,
+};
+
+static const guint8 h264_idr_slice_1[] = {
+  0x00, 0x00, 0x00, 0x01, 0x65, 0xb8, 0x00, 0x04,
+  0x00, 0x00, 0x11, 0xff, 0xff, 0xf8, 0x22, 0x8a,
+  0x1f, 0x1c, 0x00, 0x04, 0x0a, 0x63, 0x80, 0x00,
+  0x81, 0xec, 0x9a, 0x93, 0x93, 0x93, 0x93, 0x93,
+  0x93, 0xad, 0x57, 0x5d, 0x75, 0xd7, 0x5d, 0x75,
+  0xd7, 0x5d, 0x75, 0xd7, 0x5d, 0x75, 0xd7, 0x5d,
+  0x75, 0xd7, 0x5d, 0x78,
+};
+
+static const guint8 h264_idr_slice_2[] = {
+  0x00, 0x00, 0x00, 0x01, 0x65, 0x04, 0x2e, 0x00,
+  0x01, 0x00, 0x00, 0x04, 0x7f, 0xff, 0xfe, 0x08,
+  0xa2, 0x87, 0xc7, 0x00, 0x01, 0x02, 0x98, 0xe0,
+  0x00, 0x20, 0x7b, 0x26, 0xa4, 0xe4, 0xe4, 0xe4,
+  0xe4, 0xe4, 0xeb, 0x55, 0xd7, 0x5d, 0x75, 0xd7,
+  0x5d, 0x75, 0xd7, 0x5d, 0x75, 0xd7, 0x5d, 0x75,
+  0xd7, 0x5d, 0x75, 0xd7, 0x5e,
+};
+
+static const guint8 h264_p_slice[] = {
+  0x00, 0x00, 0x00, 0x01, 0x61, 0xe0, 0x00,
+  0x40, 0x00, 0x9c, 0x82, 0x3c, 0x10, 0xc0,
+};
 
 static GstClockTime
 input_pts (guint index)
@@ -61,6 +194,35 @@ make_sized_input_buffer (gsize size, GstClockTime pts)
   GstBuffer *buf = gst_buffer_new_allocate (NULL, size, NULL);
 
   gst_buffer_memset (buf, 0, 0, size);
+  GST_BUFFER_PTS (buf) = pts;
+  GST_BUFFER_DTS (buf) = pts;
+  GST_BUFFER_DURATION (buf) = GST_SECOND / 30;
+  return buf;
+}
+
+static GstBuffer *
+make_fixture_input_buffer (const guint8 * data, gsize size, GstClockTime pts)
+{
+  GstBuffer *buf = gst_buffer_new_allocate (NULL, size, NULL);
+
+  gst_buffer_fill (buf, 0, data, size);
+  GST_BUFFER_PTS (buf) = pts;
+  GST_BUFFER_DTS (buf) = pts;
+  GST_BUFFER_DURATION (buf) = GST_SECOND / 30;
+  return buf;
+}
+
+static GstBuffer *
+make_composite_input_buffer (GstClockTime pts, const guint8 * const * parts,
+    const gsize * sizes, guint count)
+{
+  GstBuffer *buf = gst_buffer_new ();
+  guint i;
+
+  for (i = 0; i < count; i++)
+    buf = gst_buffer_append (buf,
+        make_fixture_input_buffer (parts[i], sizes[i], pts));
+
   GST_BUFFER_PTS (buf) = pts;
   GST_BUFFER_DTS (buf) = pts;
   GST_BUFFER_DURATION (buf) = GST_SECOND / 30;
@@ -87,6 +249,19 @@ wait_for_outputs (guint want)
   gint64 deadline = g_get_monotonic_time () + DRAIN_TIMEOUT_US;
 
   while (mpp_mock_dec_outputs () < want) {
+    if (g_get_monotonic_time () > deadline)
+      return FALSE;
+    g_usleep (1000);
+  }
+  return TRUE;
+}
+
+static gboolean
+wait_for_accounted_outputs (guint want)
+{
+  gint64 deadline = g_get_monotonic_time () + DRAIN_TIMEOUT_US;
+
+  while (mpp_mock_dec_accounted_outputs () < want) {
     if (g_get_monotonic_time () > deadline)
       return FALSE;
     g_usleep (1000);
@@ -160,16 +335,47 @@ wait_for_output_buffer (GstHarness * h)
   return buffer;
 }
 
+static guint8
+output_identity (GstBuffer * buffer)
+{
+  GstMapInfo map = GST_MAP_INFO_INIT;
+  guint8 identity;
+
+  g_assert_true (gst_buffer_map (buffer, &map, GST_MAP_READ));
+  g_assert_cmpuint (map.size, >, 0);
+  identity = map.data[0];
+  gst_buffer_unmap (buffer, &map);
+  return identity;
+}
+
 static GstHarness *
-start_decoder (gboolean dma_feature)
+start_decoder_with_caps (gboolean dma_feature, const gchar * caps)
 {
   GstHarness *h = gst_harness_new ("mppvideodec");
 
   g_assert_nonnull (h);
   g_object_set (h->element, "dma-feature", dma_feature, NULL);
   mpp_mock_dec_arm (DEC_WIDTH, DEC_HEIGHT);
-  gst_harness_set_src_caps_str (h, SINK_CAPS_STR);
+  gst_harness_set_src_caps_str (h, caps);
   return h;
+}
+
+static GstHarness *
+start_element_with_caps (const gchar * element, const gchar * caps)
+{
+  GstHarness *h;
+
+  mpp_mock_dec_arm (DEC_WIDTH, DEC_HEIGHT);
+  h = gst_harness_new (element);
+  g_assert_nonnull (h);
+  gst_harness_set_src_caps_str (h, caps);
+  return h;
+}
+
+static GstHarness *
+start_decoder (gboolean dma_feature)
+{
+  return start_decoder_with_caps (dma_feature, SINK_CAPS_STR);
 }
 
 /* Reclaim is only safe once the element has stopped, because it deinitializes
@@ -180,6 +386,7 @@ reclaim_mock_packets (void)
 {
   mpp_mock_dec_release_packets ();
   g_assert_cmpuint (mpp_mock_dec_live_packets (), ==, 0);
+  g_assert_cmpuint (mpp_mock_dec_live_output_buffers (), ==, 0);
 }
 
 /* Disarm first so the element can drain, tear down, and only then reclaim. */
@@ -522,50 +729,176 @@ test_unmatched_pts_pending_list_is_bounded (void)
 }
 
 static void
-test_header_only_inputs_are_released_without_output (void)
+run_parameter_set_fixture (const gchar * label, const gchar * caps,
+    const guint8 * data, gsize size)
 {
-  GstHarness *h = start_decoder (FALSE);
+  GstHarness *h = start_decoder_with_caps (FALSE, caps);
   guint pending;
   guint i;
 
-  g_print ("== header-only input accounting ==\n");
   mpp_mock_dec_set_output_suppressed (TRUE);
-
   for (i = 0; i < HEADER_INPUTS; i++)
-    g_assert_cmpint (gst_harness_push (h,
-            make_untimestamped_input_buffer (32)), ==, GST_FLOW_OK);
+    g_assert_cmpint (gst_harness_push (h, make_fixture_input_buffer (data,
+                size, GST_CLOCK_TIME_NONE)), ==, GST_FLOW_OK);
 
   pending = pending_frame_count (h);
-  g_print ("SPS/PPS-only: %u accepted packets, %u outputs, %u pending frames\n",
+  g_print ("%s: %u accepted, %u outputs, %u pending\n", label,
       mpp_mock_dec_put_calls (), mpp_mock_dec_outputs (), pending);
   stop_decoder (h);
 
   if (pending != 0) {
-    g_printerr ("ERROR: header-only stream retained %u/%u codec frames despite "
-        "producing "
-        "no output\n", pending, HEADER_INPUTS);
+    g_printerr ("ERROR: %s retained %u/%u parameter-set frames\n", label,
+        pending, HEADER_INPUTS);
     accounting_failures++;
-  } else {
-    g_print ("header-only input accounting: OK\n");
   }
 }
 
 static void
-test_later_match_sweeps_untimestamped_stray (void)
+test_parameter_set_only_inputs_are_released (void)
+{
+  g_print ("== codec-aware parameter-set accounting ==\n");
+  run_parameter_set_fixture ("H.264 Annex-B SPS/PPS", H264_BYTE_STREAM_CAPS,
+      h264_parameter_sets_bytestream,
+      sizeof (h264_parameter_sets_bytestream));
+  run_parameter_set_fixture ("H.264 AVC SPS/PPS", H264_AVC_CAPS,
+      h264_parameter_sets_avc, sizeof (h264_parameter_sets_avc));
+  run_parameter_set_fixture ("H.265 Annex-B VPS/SPS/PPS",
+      H265_BYTE_STREAM_CAPS, h265_parameter_sets_bytestream,
+      sizeof (h265_parameter_sets_bytestream));
+  run_parameter_set_fixture ("H.265 hvc1 VPS/SPS/PPS", H265_HVC1_CAPS,
+      h265_parameter_sets_hvc1, sizeof (h265_parameter_sets_hvc1));
+  g_print ("codec-aware parameter-set accounting: complete\n");
+}
+
+static void
+test_tiny_invalid_pts_vcl_is_never_header (void)
+{
+  static const guint8 * const exact_parts[] = {
+    h264_idr_slice_1, h264_idr_slice_1, h264_idr_frame,
+  };
+  static const gsize exact_sizes[] = {
+    sizeof (h264_idr_slice_1), sizeof (h264_idr_slice_1),
+    sizeof (h264_idr_frame),
+  };
+  static const guint8 * const above_parts[] = {
+    h264_idr_slice_1, h264_idr_slice_2, h264_idr_frame, h264_p_slice,
+  };
+  static const gsize above_sizes[] = {
+    sizeof (h264_idr_slice_1), sizeof (h264_idr_slice_2),
+    sizeof (h264_idr_frame), sizeof (h264_p_slice),
+  };
+  static const guint8 * const mixed_parts[] = {
+    h264_parameter_sets_bytestream, h264_idr_frame,
+  };
+  static const gsize mixed_sizes[] = {
+    sizeof (h264_parameter_sets_bytestream), sizeof (h264_idr_frame),
+  };
+  static const struct {
+    const gchar *element;
+    const gchar *label;
+    const gchar *caps;
+  } unsupported[] = {
+    { "mppvideodec", "H.263", H263_CAPS },
+    { "mppvideodec", "AV1", AV1_CAPS },
+    { "mppvideodec", "VP8", VP8_CAPS },
+    { "mppvideodec", "VP9", VP9_CAPS },
+    { "mppvideodec", "MPEG-4", MPEG4_CAPS },
+    { "mppjpegdec", "JPEG", JPEG_CAPS },
+  };
+  GstHarness *h;
+  GstBuffer *buffer;
+  guint pending;
+  guint i;
+
+  g_print ("== tiny invalid-PTS VCL negative controls ==\n");
+  h = start_decoder_with_caps (FALSE, H264_BYTE_STREAM_CAPS);
+  mpp_mock_dec_set_output_suppressed (TRUE);
+  g_assert_cmpint (gst_harness_push (h, make_fixture_input_buffer (
+              h264_idr_frame, sizeof (h264_idr_frame), GST_CLOCK_TIME_NONE)),
+      ==, GST_FLOW_OK);
+  buffer = make_composite_input_buffer (GST_CLOCK_TIME_NONE, exact_parts,
+      exact_sizes, G_N_ELEMENTS (exact_parts));
+  g_assert_cmpuint (gst_buffer_get_size (buffer), ==, 128);
+  g_assert_cmpint (gst_harness_push (h, buffer), ==, GST_FLOW_OK);
+  buffer = make_composite_input_buffer (GST_CLOCK_TIME_NONE, above_parts,
+      above_sizes, G_N_ELEMENTS (above_parts));
+  g_assert_cmpuint (gst_buffer_get_size (buffer), >, 128);
+  g_assert_cmpint (gst_harness_push (h, buffer), ==, GST_FLOW_OK);
+  g_assert_cmpint (gst_harness_push (h, make_composite_input_buffer (
+              GST_CLOCK_TIME_NONE, mixed_parts, mixed_sizes,
+              G_N_ELEMENTS (mixed_parts))), ==, GST_FLOW_OK);
+  pending = pending_frame_count (h);
+  g_print ("H.264 Annex-B VCL sizes %zu/128/%zu plus mixed AU: pending=%u\n",
+      sizeof (h264_idr_frame),
+      sizeof (h264_idr_slice_1) + sizeof (h264_idr_slice_2) +
+      sizeof (h264_idr_frame) + sizeof (h264_p_slice), pending);
+  stop_decoder (h);
+  if (pending != 4) {
+    g_printerr ("ERROR: H.264 VCL/mixed negatives retained %u/4 frames\n",
+        pending);
+    accounting_failures++;
+  }
+
+  h = start_decoder_with_caps (FALSE, H264_AVC_CAPS);
+  mpp_mock_dec_set_output_suppressed (TRUE);
+  g_assert_cmpint (gst_harness_push (h, make_fixture_input_buffer (
+              h264_idr_frame_avc, sizeof (h264_idr_frame_avc),
+              GST_CLOCK_TIME_NONE)), ==, GST_FLOW_OK);
+  pending = pending_frame_count (h);
+  stop_decoder (h);
+  if (pending != 1) {
+    g_printerr ("ERROR: AVC VCL negative retained %u/1 frames\n", pending);
+    accounting_failures++;
+  }
+
+  for (i = 0; i < G_N_ELEMENTS (unsupported); i++) {
+    h = start_element_with_caps (unsupported[i].element, unsupported[i].caps);
+    mpp_mock_dec_set_output_suppressed (TRUE);
+    g_assert_cmpint (gst_harness_push (h,
+            make_untimestamped_input_buffer (32)), ==, GST_FLOW_OK);
+    pending = pending_frame_count (h);
+    g_print ("%s tiny invalid-PTS input: pending=%u\n",
+        unsupported[i].label, pending);
+    stop_decoder (h);
+    if (pending != 1) {
+      g_printerr ("ERROR: %s tiny invalid-PTS input retained %u/1 frames\n",
+          unsupported[i].label, pending);
+      accounting_failures++;
+    }
+  }
+
+  h = start_decoder_with_caps (FALSE, H264_UNKNOWN_FORMAT_CAPS);
+  mpp_mock_dec_set_output_suppressed (TRUE);
+  g_assert_cmpint (gst_harness_push (h, make_fixture_input_buffer (
+              h264_parameter_sets_bytestream,
+              sizeof (h264_parameter_sets_bytestream), GST_CLOCK_TIME_NONE)),
+      ==, GST_FLOW_OK);
+  pending = pending_frame_count (h);
+  stop_decoder (h);
+  if (pending != 1) {
+    g_printerr ("ERROR: unknown H.264 framing retained %u/1 frames\n",
+        pending);
+    accounting_failures++;
+  }
+}
+
+static void
+test_untimestamped_vcl_survives_later_match (void)
 {
   GstHarness *h = start_decoder (FALSE);
   guint before_match;
   guint after_match;
 
-  g_print ("== untimestamped stray sweep ==\n");
+  g_print ("== untimestamped VCL survives later match ==\n");
 
   g_assert_cmpint (gst_harness_push (h, make_input_buffer (0)), ==, GST_FLOW_OK);
   g_assert_true (wait_for_outputs (1));
   g_assert_true (wait_for_pending_count (h, 0, ACCOUNTING_TIMEOUT_US));
 
   mpp_mock_dec_set_output_suppressed (TRUE);
-  g_assert_cmpint (gst_harness_push (h,
-          make_untimestamped_input_buffer (256)), ==, GST_FLOW_OK);
+  g_assert_cmpint (gst_harness_push (h, make_fixture_input_buffer (
+              h264_idr_frame, sizeof (h264_idr_frame), GST_CLOCK_TIME_NONE)),
+      ==, GST_FLOW_OK);
   before_match = pending_frame_count (h);
 
   mpp_mock_dec_set_output_suppressed (FALSE);
@@ -575,64 +908,126 @@ test_later_match_sweeps_untimestamped_stray (void)
   wait_for_pending_count (h, 0, ACCOUNTING_TIMEOUT_US);
   after_match = pending_frame_count (h);
 
-  g_print ("older untimestamped pending frame: %u before later match, %u after\n",
+  g_print ("untimestamped VCL pending: %u before later match, %u after\n",
       before_match, after_match);
   stop_decoder (h);
 
-  if (before_match != 1 || after_match != 0) {
-    g_printerr ("ERROR: later timestamped match did not sweep the older "
-        "untimestamped "
-        "stray (%u -> %u)\n", before_match, after_match);
+  if (before_match != 1 || after_match != 1) {
+    g_printerr ("ERROR: later match retired untimestamped VCL (%u -> %u)\n",
+        before_match, after_match);
     accounting_failures++;
   } else {
-    g_print ("untimestamped stray sweep: OK\n");
+    g_print ("untimestamped VCL survives later match: OK\n");
   }
 }
 
 static void
-test_normal_stream_output_sequence (void)
+test_reordered_mixed_pts_output_identity (void)
 {
   GstHarness *h = start_decoder (FALSE);
-  GstClockTime actual[NORMAL_INPUTS - 1];
+  static const GstClockTime expected_pts[] = {
+    10 * GST_SECOND,
+    10 * GST_SECOND + GST_SECOND / 30,
+    10 * GST_SECOND + 2 * (GST_SECOND / 30),
+  };
+  static const guint8 expected_identity[] = { 0x10, 0x40, 0x20 };
+  GList *frames;
+  GstBuffer *invalid_input;
+  gboolean valid = TRUE;
   guint i;
 
-  g_print ("== normal ordered output sequence ==\n");
+  g_print ("== reordered mixed-PTS output identity ==\n");
   mpp_mock_dec_set_output_buffers (TRUE);
+  mpp_mock_dec_plan_output (0, -1, 0x10);
 
-  for (i = 0; i < NORMAL_INPUTS; i++) {
+  g_assert_cmpint (gst_harness_push (h, make_fixture_input_buffer (
+              h264_idr_frame, sizeof (h264_idr_frame), 10 * GST_SECOND)),
+      ==, GST_FLOW_OK);
+  g_assert_true (wait_for_accounted_outputs (1));
+
+  mpp_mock_dec_set_output_paused (TRUE);
+  mpp_mock_dec_plan_output (1,
+      (RK_S64)(10 * GST_SECOND + GST_SECOND / 30), 0x40);
+  mpp_mock_dec_plan_output (2, -1, 0x20);
+  mpp_mock_dec_plan_output (3,
+      (RK_S64)(10 * GST_SECOND + 2 * (GST_SECOND / 30)), 0x30);
+
+  invalid_input = make_fixture_input_buffer (h264_p_slice,
+      sizeof (h264_p_slice), GST_CLOCK_TIME_NONE);
+  g_assert_false (GST_BUFFER_PTS_IS_VALID (invalid_input));
+  g_assert_cmpint (gst_harness_push (h, invalid_input), ==, GST_FLOW_OK);
+  g_assert_cmpint (gst_harness_push (h, make_fixture_input_buffer (
+              h264_idr_frame, sizeof (h264_idr_frame),
+              10 * GST_SECOND + 2 * (GST_SECOND / 30))), ==, GST_FLOW_OK);
+  g_assert_cmpint (gst_harness_push (h, make_fixture_input_buffer (
+              h264_p_slice, sizeof (h264_p_slice),
+              10 * GST_SECOND + GST_SECOND / 30)), ==, GST_FLOW_OK);
+  g_assert_cmpuint (mpp_mock_dec_queued (), ==, 3);
+
+  mpp_mock_dec_set_output_paused (FALSE);
+  g_assert_true (wait_for_accounted_outputs (4));
+
+  for (i = 0; i < G_N_ELEMENTS (expected_pts); i++) {
     GstBuffer *output;
-
-    mpp_mock_dec_set_output_pts ((RK_S64) input_pts (i));
-    g_assert_cmpint (gst_harness_push (h, make_input_buffer (i)), ==,
-        GST_FLOW_OK);
-    g_assert_true (wait_for_outputs (i + 1));
-
-    if (i == 0)
-      continue;
+    GstClockTime pts;
+    guint8 identity;
 
     output = wait_for_output_buffer (h);
     g_assert_nonnull (output);
-    actual[i - 1] = GST_BUFFER_PTS (output);
-    g_assert_cmpuint (actual[i - 1], ==, input_pts (i - 1));
+    pts = GST_BUFFER_PTS (output);
+    identity = output_identity (output);
+    if (pts != expected_pts[i] || identity != expected_identity[i]) {
+      g_printerr ("ERROR: output %u got pts=%" G_GUINT64_FORMAT
+          " identity=0x%02x; expected pts=%" G_GUINT64_FORMAT
+          " identity=0x%02x\n", i, pts, identity, expected_pts[i],
+          expected_identity[i]);
+      valid = FALSE;
+    }
     gst_buffer_unref (output);
   }
 
-  g_print ("normal output sequence:");
-  for (i = 0; i < G_N_ELEMENTS (actual); i++)
-    g_print (" %" G_GUINT64_FORMAT, actual[i]);
-  g_print ("\n");
+  frames = gst_video_decoder_get_frames (GST_VIDEO_DECODER (h->element));
+  if (g_list_length (frames) != 1) {
+    g_printerr ("ERROR: retained-tail accounting has %u frames; expected 1\n",
+        g_list_length (frames));
+    valid = FALSE;
+  } else {
+    GstVideoCodecFrame *tail = frames->data;
+    guint8 identity = tail->output_buffer ?
+        output_identity (tail->output_buffer) : 0;
+
+    if (tail->system_frame_number != 2 ||
+        tail->pts != 10 * GST_SECOND + 2 * (GST_SECOND / 30) ||
+        identity != 0x30) {
+      g_printerr ("ERROR: retained tail frame=%d pts=%" G_GUINT64_FORMAT
+          " identity=0x%02x; expected frame=2 identity=0x30\n",
+          tail->system_frame_number, tail->pts, identity);
+      valid = FALSE;
+    }
+    g_print ("retained tail: frame=%d pts=%" G_GUINT64_FORMAT
+        " identity=0x%02x (deferred by one-frame output queue)\n",
+        tail->system_frame_number, tail->pts, identity);
+  }
+  g_list_free_full (frames, (GDestroyNotify) gst_video_codec_frame_unref);
+
+  g_print ("mixed invalid-PTS input delivered as identity=0x20 with "
+      "decoder-derived pts=%" G_GUINT64_FORMAT "\n", expected_pts[2]);
 
   stop_decoder (h);
-  g_print ("normal ordered output sequence: OK\n");
+  if (!valid)
+    accounting_failures++;
+  else
+    g_print ("reordered mixed-PTS output identity: OK\n");
 }
 
 static void
 run_accounting_tests (void)
 {
   test_unmatched_pts_pending_list_is_bounded ();
-  test_header_only_inputs_are_released_without_output ();
-  test_later_match_sweeps_untimestamped_stray ();
-  test_normal_stream_output_sequence ();
+  test_parameter_set_only_inputs_are_released ();
+  test_tiny_invalid_pts_vcl_is_never_header ();
+  test_untimestamped_vcl_survives_later_match ();
+  test_reordered_mixed_pts_output_identity ();
 }
 
 int

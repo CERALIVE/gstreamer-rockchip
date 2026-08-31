@@ -71,7 +71,7 @@ typedef struct MockPacket {
   int mpp_owned;
   struct MockPacket *next;
 } MockPacket;
-typedef struct {
+typedef struct MockBuffer {
   int fd;
   size_t size;
   void *data;
@@ -79,6 +79,8 @@ typedef struct {
   unsigned refs;
   size_t map_size;
   int enc_owned;
+  int dec_owned;
+  struct MockBuffer *dec_next;
 } MockBuffer;
 typedef struct {
   MppFrameFormat format;
@@ -90,6 +92,8 @@ typedef struct {
   RK_S64 pts;
   RK_U32 info_change;
   MppPacket packet;
+  int data_output;
+  int accounted;
 } MockFrame;
 typedef struct {
   RK_U32 width;
@@ -168,6 +172,13 @@ static atomic_uint dec_double_deinits;
 static atomic_uint dec_frame_deinits;
 static atomic_int dec_output_suppressed;
 static atomic_int dec_output_buffers_enabled;
+static atomic_int dec_output_paused;
+static atomic_uint dec_accounted_outputs;
+static atomic_uint dec_live_output_buffers;
+#define DEC_OUTPUT_PLAN_CAPACITY 32
+static atomic_int dec_output_plan_armed[DEC_OUTPUT_PLAN_CAPACITY];
+static RK_S64 dec_output_plan_pts[DEC_OUTPUT_PLAN_CAPACITY];
+static uint8_t dec_output_plan_identity[DEC_OUTPUT_PLAN_CAPACITY];
 static atomic_uint internal_group_types;
 static atomic_uint jpeg_input_timeouts_remaining;
 static atomic_uint jpeg_input_poll_calls;
@@ -175,7 +186,7 @@ static atomic_int jpeg_last_input_poll_timed_out;
 static MockTask jpeg_task;
 static MockPacket *packet_allocs;
 static atomic_uint dec_arena_packets;
-static MppBuffer dec_output_buffer;
+static MockBuffer *dec_output_buffers;
 static RK_U32 dec_width = 320;
 static RK_U32 dec_height = 240;
 static atomic_int dec_frame_format;
@@ -297,7 +308,28 @@ static MPP_RET enq_ok(MppCtx c, MppPortType t, MppTask p) {
   (void)p;
   return MPP_OK;
 }
-static MockFrame *dec_new_frame(RK_S64 pts, RK_U32 info_change) {
+static MppBuffer dec_new_output_buffer(uint8_t identity) {
+  MppBuffer buffer = NULL;
+  MockBuffer *mock;
+  size_t size = (size_t)dec_width * dec_height * 3 / 2;
+
+  size = (size + 4095) & ~(size_t)4095;
+  if (mpp_buffer_get_with_tag(NULL, &buffer, size, NULL, __func__) != MPP_OK)
+    abort();
+
+  mock = (MockBuffer *)buffer;
+  mock->dec_owned = 1;
+  mock->dec_next = dec_output_buffers;
+  dec_output_buffers = mock;
+  atomic_fetch_add(&dec_live_output_buffers, 1);
+  if (pwrite(mock->fd, &identity, sizeof(identity), 0) !=
+      (ssize_t)sizeof(identity))
+    abort();
+  return buffer;
+}
+
+static MockFrame *dec_new_frame(RK_S64 pts, RK_U32 info_change,
+                                uint8_t identity) {
   MockFrame *f = calloc(1, sizeof(*f));
   if (!f)
     return NULL;
@@ -308,8 +340,9 @@ static MockFrame *dec_new_frame(RK_S64 pts, RK_U32 info_change) {
   f->vertical_stride = dec_height;
   f->pts = pts;
   f->info_change = info_change;
-  if (!info_change && atomic_load(&dec_output_buffers_enabled))
-    f->buffer = dec_output_buffer;
+  f->data_output = !info_change;
+  if (f->data_output && atomic_load(&dec_output_buffers_enabled))
+    f->buffer = dec_new_output_buffer(identity);
   return f;
 }
 static MPP_RET get_frame_ok(MppCtx c, MppFrame *p) {
@@ -319,13 +352,15 @@ static MPP_RET get_frame_ok(MppCtx c, MppFrame *p) {
   *p = NULL;
   if (!atomic_load(&dec_enabled))
     return MPP_NOK;
+  if (atomic_load(&dec_output_paused))
+    return MPP_OK;
 
   if (!atomic_load(&dec_info_change_sent)) {
     int unsent = 0;
     if (!atomic_load(&dec_queued))
       return MPP_OK;
     if (atomic_compare_exchange_strong(&dec_info_change_sent, &unsent, 1)) {
-      *p = (MppFrame)dec_new_frame(-1, 1);
+      *p = (MppFrame)dec_new_frame(-1, 1, 0);
       return *p ? MPP_OK : MPP_NOK;
     }
   }
@@ -337,15 +372,18 @@ static MPP_RET get_frame_ok(MppCtx c, MppFrame *p) {
   if (!queued)
     return MPP_OK;
 
-  /* First data output carries an invalid PTS so the decoder abandons MPP
-   * timestamps and matches on the input PTS the test controls. */
-  RK_S64 pts = atomic_fetch_add(&dec_outputs, 1)
-                   ? (RK_S64)atomic_load(&dec_stale_pts)
-                   : -1;
+  unsigned ordinal = atomic_fetch_add(&dec_outputs, 1);
+  RK_S64 pts = ordinal ? (RK_S64)atomic_load(&dec_stale_pts) : -1;
+  uint8_t identity = (uint8_t)((ordinal % 255) + 1);
+
+  if (ordinal < DEC_OUTPUT_PLAN_CAPACITY &&
+      atomic_load(&dec_output_plan_armed[ordinal])) {
+    pts = dec_output_plan_pts[ordinal];
+    identity = dec_output_plan_identity[ordinal];
+  }
   /* Decoder accounting tests use bufferless outputs by default so the decode
-   * loop takes its drop path. Normal-stream tests opt into a shared fd-backed
-   * buffer and exercise the real downstream finish path. */
-  *p = (MppFrame)dec_new_frame(pts, 0);
+   * loop takes its drop path. Delivery tests opt into unique fd-backed output. */
+  *p = (MppFrame)dec_new_frame(pts, 0, identity);
   return *p ? MPP_OK : MPP_NOK;
 }
 static MPP_RET put_packet_ok(MppCtx c, MppPacket p) {
@@ -631,6 +669,8 @@ MPP_RET mpp_buffer_put_with_caller(MppBuffer buffer, const char *caller) {
       free(b->data);
     if (b->enc_owned)
       atomic_fetch_sub(&enc_live_buffers, 1);
+    if (b->dec_owned)
+      atomic_fetch_sub(&dec_live_output_buffers, 1);
     free(b);
   }
   return MPP_OK;
@@ -717,7 +757,13 @@ MppBuffer mpp_frame_get_buffer(const MppFrame frame) {
   return ((MockFrame *)frame)->buffer;
 }
 void mpp_frame_set_buffer(MppFrame frame, MppBuffer buffer) {
-  ((MockFrame *)frame)->buffer = buffer;
+  MockFrame *mock = (MockFrame *)frame;
+
+  mock->buffer = buffer;
+  if (!buffer && mock->data_output && !mock->accounted) {
+    mock->accounted = 1;
+    atomic_fetch_add(&dec_accounted_outputs, 1);
+  }
   atomic_fetch_add(&frame_set_buffer_count, 1);
 }
 
@@ -1204,9 +1250,11 @@ unsigned mpp_mock_buffer_ref_count(MppBuffer buffer) {
  * that forgets cannot carry an arena into the next one. */
 void mpp_mock_dec_release_packets(void) {
   atomic_store(&dec_output_buffers_enabled, 0);
-  if (dec_output_buffer) {
-    mpp_buffer_put_with_caller(dec_output_buffer, __func__);
-    dec_output_buffer = NULL;
+  while (dec_output_buffers) {
+    MockBuffer *buffer = dec_output_buffers;
+    dec_output_buffers = buffer->dec_next;
+    buffer->dec_next = NULL;
+    mpp_buffer_put_with_caller((MppBuffer)buffer, __func__);
   }
   while (packet_allocs) {
     MockPacket *packet = packet_allocs;
@@ -1241,7 +1289,14 @@ void mpp_mock_dec_arm(unsigned width, unsigned height) {
   atomic_store(&dec_frame_deinits, 0);
   atomic_store(&dec_output_suppressed, 0);
   atomic_store(&dec_output_buffers_enabled, 0);
+  atomic_store(&dec_output_paused, 0);
+  atomic_store(&dec_accounted_outputs, 0);
   atomic_store(&dec_stale_pts, 1);
+  for (unsigned i = 0; i < DEC_OUTPUT_PLAN_CAPACITY; i++) {
+    atomic_store(&dec_output_plan_armed[i], 0);
+    dec_output_plan_pts[i] = 0;
+    dec_output_plan_identity[i] = 0;
+  }
   atomic_store(&internal_group_types, 0);
   atomic_store(&jpeg_input_timeouts_remaining, 0);
   atomic_store(&jpeg_input_poll_calls, 0);
@@ -1253,20 +1308,30 @@ void mpp_mock_dec_arm(unsigned width, unsigned height) {
 void mpp_mock_dec_disarm(void) { atomic_store(&dec_enabled, 0); }
 unsigned mpp_mock_dec_queued(void) { return atomic_load(&dec_queued); }
 unsigned mpp_mock_dec_outputs(void) { return atomic_load(&dec_outputs); }
+unsigned mpp_mock_dec_accounted_outputs(void) {
+  return atomic_load(&dec_accounted_outputs);
+}
+unsigned mpp_mock_dec_live_output_buffers(void) {
+  return atomic_load(&dec_live_output_buffers);
+}
 void mpp_mock_dec_set_output_suppressed(int suppressed) {
   atomic_store(&dec_output_suppressed, !!suppressed);
 }
 void mpp_mock_dec_set_output_pts(RK_S64 pts) {
   atomic_store(&dec_stale_pts, pts);
 }
+void mpp_mock_dec_set_output_paused(int paused) {
+  atomic_store(&dec_output_paused, !!paused);
+}
+void mpp_mock_dec_plan_output(unsigned ordinal, RK_S64 pts,
+                              unsigned identity) {
+  if (ordinal >= DEC_OUTPUT_PLAN_CAPACITY || identity > UINT8_MAX)
+    abort();
+  dec_output_plan_pts[ordinal] = pts;
+  dec_output_plan_identity[ordinal] = (uint8_t)identity;
+  atomic_store(&dec_output_plan_armed[ordinal], 1);
+}
 void mpp_mock_dec_set_output_buffers(int enabled) {
-  if (enabled && !dec_output_buffer) {
-    size_t size = (size_t)dec_width * dec_height * 3 / 2;
-    size = (size + 4095) & ~(size_t)4095;
-    if (mpp_buffer_get_with_tag(NULL, &dec_output_buffer, size, NULL,
-                                __func__) != MPP_OK)
-      abort();
-  }
   atomic_store(&dec_output_buffers_enabled, !!enabled);
 }
 void mpp_mock_dec_set_frame_format(MppFrameFormat format) {
