@@ -1905,7 +1905,7 @@ different default by any of the three fixes; the only new symbol is the internal
 
 ### FIX-2 — allocator import failures leave MppBuffer ownership unchanged
 
-1. **Provenance SHA** — `380bc5ca2a9250909440629b9cbaef9d72e07ff6`, first-party
+1. **Provenance SHA** — `380bc5cadfa09ff7d9d18f16df4dc34b44209ed2`, first-party
    correction for the verified H1-B3/H2-B6 allocator mechanism. H1-B4 remains
    falsified and is deliberately untouched.
 2. **Red/green outputs** — `mpp-allocator-seam` creates real mock-backed dmafds and
