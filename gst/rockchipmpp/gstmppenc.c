@@ -648,6 +648,10 @@ gst_mpp_enc_scale_bitrate (guint bps, guint numerator, guint denominator)
  * same bps_max fallback -- so a level check cannot disagree with the numbers
  * MPP is actually handed.
  *
+ * The framerate is reported as the exact rational, not as the rounded integer
+ * the automatic bitrate is sized with. Rounding it would hide every violation
+ * that sits between two whole framerates, and MPP is given the rational too.
+ *
  * A zero bitrate means MPP is given no rate target at all (fixed-QP, or a
  * geometry too incomplete to derive one), so no level's bitrate limit applies.
  *
@@ -660,13 +664,26 @@ gst_mpp_enc_snapshot_rate_info (GstVideoEncoder * encoder,
   GstMppEnc *self = GST_MPP_ENC (encoder);
   guint bps;
 
+  gint fps_n = GST_VIDEO_INFO_FPS_N (&self->info);
+  gint fps_d = GST_VIDEO_INFO_FPS_D (&self->info);
+
   rate->width = GST_VIDEO_INFO_WIDTH (&self->info);
   rate->height = GST_VIDEO_INFO_HEIGHT (&self->info);
-  rate->fps = gst_mpp_enc_effective_fps (self->fps_out,
-      GST_VIDEO_INFO_FPS_N (&self->info), GST_VIDEO_INFO_FPS_D (&self->info));
+
+  /* Exactly the rc:fps_out_num / rc:fps_out_denorm pair written below. */
+  if (self->fps_out > 0) {
+    rate->fps_n = self->fps_out;
+    rate->fps_d = 1;
+  } else if (fps_n > 0 && fps_d > 0) {
+    rate->fps_n = fps_n;
+    rate->fps_d = fps_d;
+  } else {
+    rate->fps_n = DEFAULT_FPS;
+    rate->fps_d = 1;
+  }
 
   bps = self->bps ? self->bps : gst_mpp_enc_auto_bitrate (rate->width,
-      rate->height, rate->fps);
+      rate->height, gst_mpp_enc_effective_fps (self->fps_out, fps_n, fps_d));
 
   if (!bps || self->rc_mode == MPP_ENC_RC_MODE_FIXQP)
     rate->bitrate = 0;

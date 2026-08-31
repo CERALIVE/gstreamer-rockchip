@@ -1494,6 +1494,40 @@ GST_START_TEST(test_h265_src_caps_publish_profile_tier_and_level) {
 }
 GST_END_TEST
 
+/* A level ceiling can fall between two whole framerates, so the rate has to be
+ * carried as the exact rational MPP is given. 1080p is 8160 macroblocks; at
+ * 753/25 fps that is 245779.2 MB/s, over level 4's 245760 ceiling. Truncating
+ * to 30 fps gives 244800 and accepts level 4, which is the whole bug. Level 4.1
+ * shares the ceiling, so 4.2 is the answer. */
+GST_START_TEST(test_h264_level_uses_the_exact_fractional_frame_rate) {
+  mpp_mock_reset();
+  GstHarness *h = start_level_harness(
+      "mpph264enc",
+      "video/x-raw,format=NV12,width=1920,height=1080,framerate=753/25",
+      8000000);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("h264:level"), 42);
+  assert_src_caps_string(h, "level", "4.2");
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
+/* 1080p is 2073600 luma samples; at 806/25 fps that is 66852864 samples/s, over
+ * level 4's 66846720 ceiling. Truncating to 32 fps gives 66355200 and accepts
+ * level 4. */
+GST_START_TEST(test_h265_level_uses_the_exact_fractional_frame_rate) {
+  mpp_mock_reset();
+  GstHarness *h = start_level_harness(
+      "mpph265enc",
+      "video/x-raw,format=NV12,width=1920,height=1080,framerate=806/25",
+      8000000);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("h265:level"), 123);
+  assert_src_caps_string(h, "level", "4.1");
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
 /* Fixed-QP hands MPP no rate target at all, so no level bitrate limit applies
  * and the frame/rate axes decide alone. */
 GST_START_TEST(test_level_ignores_bitrate_under_fixed_qp) {
@@ -1844,6 +1878,8 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_h264_level_counts_partial_macroblock_rows);
   tcase_add_test(tc, test_h265_level_is_raised_for_an_out_of_level_frame_rate);
   tcase_add_test(tc, test_h265_level_follows_the_tier_bitrate_ceiling);
+  tcase_add_test(tc, test_h264_level_uses_the_exact_fractional_frame_rate);
+  tcase_add_test(tc, test_h265_level_uses_the_exact_fractional_frame_rate);
   tcase_add_test(tc, test_level_ignores_bitrate_under_fixed_qp);
   tcase_add_test(tc, test_h265_src_caps_publish_profile_tier_and_level);
   tcase_add_test(tc, test_zero_valued_tuning_resets_reach_mpp);

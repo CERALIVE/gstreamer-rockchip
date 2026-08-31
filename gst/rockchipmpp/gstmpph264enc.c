@@ -250,12 +250,18 @@ gst_mpp_h264_enc_required_level_index (GstMppH264Profile profile,
 {
   guint factor = gst_mpp_h264_enc_cpb_br_vcl_factor (profile);
   guint64 mbs;
-  guint64 mbps;
+  guint64 mb_ticks;
   guint i;
 
   mbs = (guint64) GST_ROUND_UP_16 (rate->width) *
       GST_ROUND_UP_16 (rate->height) / 256;
-  mbps = mbs * (guint64) rate->fps;
+
+  /* The macroblock rate is compared by cross-multiplication rather than by
+   * evaluating mbs * fps_n / fps_d: the quotient is not an integer in general,
+   * and rounding it either way loses violations that sit inside one frame per
+   * second. Both denominators are positive, so the comparison is exact and the
+   * products stay well inside guint64 for any geometry GstVideoInfo accepts. */
+  mb_ticks = mbs * (guint64) rate->fps_n;
 
   *conforming = TRUE;
 
@@ -264,7 +270,9 @@ gst_mpp_h264_enc_required_level_index (GstMppH264Profile profile,
 
     if (limits->level == GST_MPP_H264_LEVEL_1B)
       continue;
-    if (mbs > (guint64) limits->max_mbs || mbps > (guint64) limits->max_mbps)
+    if (mbs > (guint64) limits->max_mbs)
+      continue;
+    if (mb_ticks > (guint64) limits->max_mbps * (guint64) rate->fps_d)
       continue;
     if (rate->bitrate
         && (guint64) rate->bitrate > (guint64) limits->max_br * factor)
@@ -301,7 +309,8 @@ gst_mpp_h264_enc_effective_level (GstVideoEncoder * encoder,
   guint required_index;
   gint required;
 
-  if (rate->width <= 0 || rate->height <= 0 || rate->fps <= 0)
+  if (rate->width <= 0 || rate->height <= 0 || rate->fps_n <= 0
+      || rate->fps_d <= 0)
     return declared;
 
   declared_index = gst_mpp_h264_enc_level_index (declared);
@@ -310,17 +319,17 @@ gst_mpp_h264_enc_effective_level (GstVideoEncoder * encoder,
   required = gst_mpp_h264_enc_level_limits[required_index].level;
 
   if (!conforming) {
-    GST_WARNING_OBJECT (encoder, "%dx%d@%dfps at %u bps exceeds every H.264 "
+    GST_WARNING_OBJECT (encoder, "%dx%d@%d/%d fps at %u bps exceeds every H.264 "
         "level; encoding at the highest (%d), which the stream may still "
-        "exceed", rate->width, rate->height, rate->fps, rate->bitrate,
-        required);
+        "exceed", rate->width, rate->height, rate->fps_n, rate->fps_d,
+        rate->bitrate, required);
   } else if (required_index <= declared_index) {
     return declared;
   } else {
     GST_WARNING_OBJECT (encoder, "declared H.264 level %d cannot carry "
-        "%dx%d@%dfps at %u bps; raising to level %d so the bitstream and its "
-        "SPS agree", declared, rate->width, rate->height, rate->fps,
-        rate->bitrate, required);
+        "%dx%d@%d/%d fps at %u bps; raising to level %d so the bitstream and "
+        "its SPS agree", declared, rate->width, rate->height, rate->fps_n,
+        rate->fps_d, rate->bitrate, required);
   }
 
   return required;

@@ -238,11 +238,15 @@ gst_mpp_h265_enc_required_level_index (gint tier,
     const GstMppEncRateInfo * rate, gboolean * conforming)
 {
   guint64 luma_ps;
-  guint64 luma_sr;
+  guint64 luma_ticks;
   guint i;
 
   luma_ps = (guint64) rate->width * rate->height;
-  luma_sr = luma_ps * (guint64) rate->fps;
+
+  /* Cross-multiplied for the same reason as the H.264 macroblock rate: the
+   * exact sample rate is a rational, and rounding it hides violations narrower
+   * than one frame per second. */
+  luma_ticks = luma_ps * (guint64) rate->fps_n;
 
   *conforming = TRUE;
 
@@ -252,7 +256,9 @@ gst_mpp_h265_enc_required_level_index (gint tier,
 
     if (tier && max_br == G_MAXUINT)
       continue;
-    if (luma_ps > (guint64) limits->max_luma_ps || luma_sr > limits->max_luma_sr)
+    if (luma_ps > (guint64) limits->max_luma_ps)
+      continue;
+    if (luma_ticks > limits->max_luma_sr * (guint64) rate->fps_d)
       continue;
     if (rate->bitrate && (guint64) rate->bitrate >
         (guint64) max_br * GST_MPP_H265_CPB_BR_VCL_FACTOR)
@@ -285,7 +291,8 @@ gst_mpp_h265_enc_effective_level (GstVideoEncoder * encoder, gint tier,
   guint required_index;
   gint required;
 
-  if (rate->width <= 0 || rate->height <= 0 || rate->fps <= 0)
+  if (rate->width <= 0 || rate->height <= 0 || rate->fps_n <= 0
+      || rate->fps_d <= 0)
     return declared;
 
   declared_index = gst_mpp_h265_enc_level_index (declared);
@@ -294,17 +301,17 @@ gst_mpp_h265_enc_effective_level (GstVideoEncoder * encoder, gint tier,
   required = gst_mpp_h265_enc_level_limits[required_index].level;
 
   if (!conforming) {
-    GST_WARNING_OBJECT (encoder, "%dx%d@%dfps at %u bps exceeds every H.265 "
+    GST_WARNING_OBJECT (encoder, "%dx%d@%d/%d fps at %u bps exceeds every H.265 "
         "level; encoding at the highest (%d), which the stream may still "
-        "exceed", rate->width, rate->height, rate->fps, rate->bitrate,
-        required);
+        "exceed", rate->width, rate->height, rate->fps_n, rate->fps_d,
+        rate->bitrate, required);
   } else if (required_index <= declared_index) {
     return declared;
   } else {
     GST_WARNING_OBJECT (encoder, "declared H.265 level_idc %d cannot carry "
-        "%dx%d@%dfps at %u bps; raising to level_idc %d so the bitstream and "
-        "its VPS agree", declared, rate->width, rate->height, rate->fps,
-        rate->bitrate, required);
+        "%dx%d@%d/%d fps at %u bps; raising to level_idc %d so the bitstream "
+        "and its VPS agree", declared, rate->width, rate->height, rate->fps_n,
+        rate->fps_d, rate->bitrate, required);
   }
 
   return required;

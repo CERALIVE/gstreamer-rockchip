@@ -157,14 +157,21 @@ typedef void (*GstMppEncSnapshotPropertiesFunc) (GstVideoEncoder * encoder,
 typedef void (*GstMppEncConfigurePropertiesFunc) (GstVideoEncoder * encoder,
     gconstpointer snapshot);
 
-/* The three axes an H.264/H.265 level constrains. bitrate is the peak MPP is
- * configured for, or 0 when MPP is given no rate target and no bitrate limit
- * can apply. */
+/* The three axes an H.264/H.265 level constrains.
+ *
+ * The framerate is the exact rational MPP is given (rc:fps_out_num over
+ * rc:fps_out_denorm), NOT a rounded integer: a level's rate ceiling can sit
+ * between two whole framerates, so 1080p at 753/25 fps exceeds H.264 level 4
+ * while the same stream truncated to 30 fps does not.
+ *
+ * bitrate is the peak MPP is configured for, or 0 when MPP is given no rate
+ * target and no bitrate limit can apply. */
 typedef struct
 {
   gint width;
   gint height;
-  gint fps;
+  gint fps_n;
+  gint fps_d;
   guint bitrate;
 } GstMppEncRateInfo;
 
