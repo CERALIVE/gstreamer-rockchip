@@ -21,6 +21,10 @@ extern unsigned mpp_mock_control_count(int cmd);
 extern unsigned mpp_mock_frame_set_buffer_count(void);
 extern void mpp_mock_enc_arm_reset_drain(void);
 extern void mpp_mock_enc_release_packets(unsigned count);
+extern void mpp_mock_enc_reject_input(void);
+extern unsigned mpp_mock_enc_put_rejections(void);
+extern void mpp_mock_enc_set_empty_polls_between_packets(unsigned count);
+extern unsigned mpp_mock_enc_gap_empty_polls(void);
 extern void mpp_mock_enc_set_packet_length(unsigned ordinal, size_t length);
 extern void mpp_mock_enc_set_packet_intra(unsigned ordinal, int intra);
 extern unsigned mpp_mock_enc_queued_packets(void);
@@ -375,6 +379,78 @@ static void check_rc_drop_is_not_pushed(gboolean zero_copy_pkt) {
 
 GST_START_TEST(test_zero_length_rc_drop_is_not_pushed_downstream) {
   check_rc_drop_is_not_pushed(TRUE);
+}
+GST_END_TEST
+
+static GstFlowReturn finish_encoder(GstHarness *h) {
+  GstVideoEncoder *encoder = GST_VIDEO_ENCODER(h->element);
+  GstVideoEncoderClass *klass = GST_VIDEO_ENCODER_GET_CLASS(encoder);
+  GstFlowReturn result;
+  GST_VIDEO_ENCODER_STREAM_LOCK(encoder);
+  result = klass->finish(encoder);
+  GST_VIDEO_ENCODER_STREAM_UNLOCK(encoder);
+  return result;
+}
+
+static GstHarness *start_backpressured_encoder(void) {
+  GstHarness *h = gst_harness_new("mpph264enc");
+  fail_unless(h != NULL);
+  g_object_set(h->element, "bitrate", 500, "rc-mode", 1, "zero-copy-pkt",
+               FALSE, "max-pending", 4, NULL);
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=320,height=240,framerate=30/1");
+  gst_harness_set_drop_buffers(h, TRUE);
+  gst_harness_play(h);
+  return h;
+}
+
+GST_START_TEST(test_eos_drain_waits_through_temporary_packet_gaps) {
+  mpp_mock_reset();
+  mpp_mock_enc_arm_reset_drain();
+  mpp_mock_enc_set_empty_polls_between_packets(3);
+  GstHarness *h = start_backpressured_encoder();
+
+  for (guint i = 0; i < 4; i++)
+    push_reset_frame(h, i);
+  fail_unless(wait_for_uint(mpp_mock_enc_queued_packets, 4),
+              "encoder did not queue the EOS backlog");
+
+  GstFlowReturn result = finish_encoder(h);
+  fail_unless_equals_int(result, GST_FLOW_OK);
+  fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 4);
+  fail_unless(mpp_mock_enc_gap_empty_polls() >= 9,
+              "EOS drain stopped at the first temporary empty poll");
+  fail_unless_equals_int(mpp_mock_enc_packet_deinits(), 4);
+  fail_unless_equals_int(mpp_mock_enc_packet_double_deinits(), 0);
+  gst_harness_teardown(h);
+  fail_unless_equals_int(mpp_mock_enc_live_packets(), 0);
+  fail_unless_equals_int(mpp_mock_enc_live_buffers(), 0);
+}
+GST_END_TEST
+
+GST_START_TEST(test_eos_backpressure_is_bounded_and_not_reported_as_success) {
+  mpp_mock_reset();
+  mpp_mock_enc_reject_input();
+  GstHarness *h = start_backpressured_encoder();
+
+  for (guint i = 0; i < 4; i++)
+    push_reset_frame(h, i);
+  fail_unless(wait_for_uint(mpp_mock_enc_put_rejections, 1),
+              "mock MPP did not reject the queued input");
+  fail_unless_equals_int(mpp_mock_enc_queued_packets(), 0);
+
+  gint64 started = g_get_monotonic_time();
+  GstFlowReturn result = finish_encoder(h);
+  gint64 elapsed = g_get_monotonic_time() - started;
+  fail_unless(result != GST_FLOW_OK,
+              "incomplete EOS drain was silently reported as GST_FLOW_OK");
+  fail_unless(elapsed < 2 * G_USEC_PER_SEC,
+              "incomplete EOS drain exceeded its bounded deadline");
+  fail_unless_equals_int(mpp_mock_enc_packet_deinits(), 0);
+  fail_unless_equals_int(mpp_mock_enc_packet_double_deinits(), 0);
+  gst_harness_teardown(h);
+  fail_unless_equals_int(mpp_mock_enc_live_packets(), 0);
+  fail_unless_equals_int(mpp_mock_enc_live_buffers(), 0);
 }
 GST_END_TEST
 
@@ -914,8 +990,8 @@ GST_START_TEST(test_encoder_reset_drains_old_packets_before_new_session) {
   fail_unless(mpp_mock_enc_reset_generation() >= reset_generation);
   fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 16);
   fail_unless_equals_int(mpp_mock_enc_queue_depth(), 0);
-  fail_unless_equals_int(
-      mpp_mock_enc_empty_polls_for_generation(reset_generation), 1);
+  fail_unless(mpp_mock_enc_empty_polls_for_generation(reset_generation) > 1,
+              "reset drain did not wait through an idle interval");
   fail_unless_equals_int(mpp_mock_enc_duplicate_dequeues(), 0);
   fail_unless_equals_int(mpp_mock_enc_packet_deinits(), 16);
   fail_unless_equals_int(mpp_mock_enc_packet_double_deinits(), 0);
@@ -972,8 +1048,8 @@ GST_START_TEST(test_encoder_reset_drains_old_packets_before_new_session) {
               GST_STATE_CHANGE_FAILURE);
   fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 19);
   fail_unless_equals_int(mpp_mock_enc_queue_depth(), 0);
-  fail_unless_equals_int(
-      mpp_mock_enc_empty_polls_for_generation(reset_generation), 1);
+  fail_unless(mpp_mock_enc_empty_polls_for_generation(reset_generation) > 1,
+              "variable reset drain did not wait through an idle interval");
   fail_unless_equals_int(mpp_mock_enc_packet_deinits(), 19);
   fail_unless_equals_int(mpp_mock_enc_packet_double_deinits(), 0);
   fail_unless_equals_int(mpp_mock_enc_live_packets(), 0);
@@ -1402,6 +1478,9 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(
       tc, test_runtime_property_snapshot_is_coherent_and_eventually_applied);
   tcase_add_test(tc, test_encoder_reset_drains_old_packets_before_new_session);
+  tcase_add_test(tc, test_eos_drain_waits_through_temporary_packet_gaps);
+  tcase_add_test(tc,
+                 test_eos_backpressure_is_bounded_and_not_reported_as_success);
   tcase_add_test(tc, test_flush_wakes_pending_full_frame);
   tcase_add_test(tc, test_missing_oldest_frame_drops_normal_packet_safely);
   tcase_add_test(tc, test_missing_oldest_frame_drops_rc_packet_safely);

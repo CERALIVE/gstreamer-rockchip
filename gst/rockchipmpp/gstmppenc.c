@@ -61,6 +61,11 @@ G_DEFINE_ABSTRACT_TYPE (GstMppEnc, gst_mpp_enc, GST_TYPE_VIDEO_ENCODER);
 #define GST_MPP_ENC_FLUSHING(encoder) \
   g_atomic_int_get (&GST_MPP_ENC (encoder)->flushing)
 
+#define GST_MPP_ENC_PENDING(encoder) \
+  g_atomic_int_get (&GST_MPP_ENC (encoder)->pending_frames)
+#define GST_MPP_ENC_SET_PENDING(encoder, value) \
+  g_atomic_int_set (&GST_MPP_ENC (encoder)->pending_frames, value)
+
 #define GST_MPP_ENC_WAIT(encoder, condition) \
   g_mutex_lock (GST_MPP_ENC_EVENT_MUTEX (encoder)); \
   while (!(condition)) \
@@ -981,7 +986,7 @@ gst_mpp_enc_stop_task (GstVideoEncoder * encoder, gboolean drain)
 
   /* Discard pending frames */
   if (!drain)
-    self->pending_frames = 0;
+    GST_MPP_ENC_SET_PENDING (encoder, 0);
 
   GST_MPP_ENC_BROADCAST (encoder);
 
@@ -998,10 +1003,13 @@ gst_mpp_enc_stop_task (GstVideoEncoder * encoder, gboolean drain)
   GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
 }
 
-static void
+static GstFlowReturn
 gst_mpp_enc_reset (GstVideoEncoder * encoder, gboolean drain, gboolean final)
 {
   GstMppEnc *self = GST_MPP_ENC (encoder);
+  GstFlowReturn result;
+  gint64 no_progress_deadline;
+  gboolean fully_drained;
 
   GST_DEBUG_OBJECT (self, "resetting");
 
@@ -1019,19 +1027,34 @@ gst_mpp_enc_reset (GstVideoEncoder * encoder, gboolean drain, gboolean final)
   g_atomic_int_set (&self->flushing, final);
   self->draining = FALSE;
 
+  self->task_ret = GST_FLOW_OK;
   self->mpi->reset (self->mpp_ctx);
 
   /* MPP leaves encoder output queued across reset. Drain through the normal
    * output path so stale packets cannot be assigned to the next session. */
-  gint64 drain_deadline = g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
-  while (gst_mpp_enc_poll_packet_locked (encoder)) {
-    drain_deadline = g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
+  no_progress_deadline =
+      g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
+  while (g_get_monotonic_time () < no_progress_deadline) {
+    if (gst_mpp_enc_poll_packet_locked (encoder)) {
+      no_progress_deadline =
+          g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
+      continue;
+    }
+    g_usleep (1000);
   }
-  if (g_get_monotonic_time () >= drain_deadline)
-    GST_ERROR_OBJECT (self, "MPP encoder reset drain exceeded its deadline");
+
+  result = self->task_ret;
+  fully_drained =
+      GST_MPP_ENC_PENDING (encoder) == 0 && self->frames == NULL;
+  if (drain && !fully_drained) {
+    GST_ERROR_OBJECT (self,
+        "EOS drain timed out with %d pending and %u unsubmitted frames",
+        GST_MPP_ENC_PENDING (encoder), g_list_length (self->frames));
+    result = GST_FLOW_ERROR;
+  }
 
   self->task_ret = GST_FLOW_OK;
-  self->pending_frames = 0;
+  GST_MPP_ENC_SET_PENDING (encoder, 0);
 
   if (self->frames) {
     g_list_free (self->frames);
@@ -1044,6 +1067,7 @@ gst_mpp_enc_reset (GstVideoEncoder * encoder, gboolean drain, gboolean final)
   GST_MPP_ENC_PROP_UNLOCK (encoder);
 
   GST_MPP_ENC_UNLOCK (encoder);
+  return result;
 }
 
 static gboolean
@@ -1093,7 +1117,7 @@ gst_mpp_enc_start (GstVideoEncoder * encoder)
   self->input_state = NULL;
   GST_MPP_ENC_PROP_UNLOCK (encoder);
   g_atomic_int_set (&self->flushing, FALSE);
-  self->pending_frames = 0;
+  GST_MPP_ENC_SET_PENDING (encoder, 0);
   self->frames = NULL;
 
   g_mutex_init (&self->mutex);
@@ -1160,16 +1184,14 @@ static gboolean
 gst_mpp_enc_flush (GstVideoEncoder * encoder)
 {
   GST_DEBUG_OBJECT (encoder, "flushing");
-  gst_mpp_enc_reset (encoder, FALSE, FALSE);
-  return TRUE;
+  return gst_mpp_enc_reset (encoder, FALSE, FALSE) == GST_FLOW_OK;
 }
 
-static gboolean
+static GstFlowReturn
 gst_mpp_enc_finish (GstVideoEncoder * encoder)
 {
   GST_DEBUG_OBJECT (encoder, "finishing");
-  gst_mpp_enc_reset (encoder, TRUE, FALSE);
-  return GST_FLOW_OK;
+  return gst_mpp_enc_reset (encoder, TRUE, FALSE);
 }
 
 static gboolean
@@ -1217,7 +1239,8 @@ gst_mpp_enc_set_format (GstVideoEncoder * encoder, GstVideoCodecState * state)
   GST_MPP_ENC_PROP_UNLOCK (encoder);
 
   if (old_state) {
-    gst_mpp_enc_reset (encoder, TRUE, FALSE);
+    if (gst_mpp_enc_reset (encoder, TRUE, FALSE) != GST_FLOW_OK)
+      return FALSE;
 
     GST_MPP_ENC_PROP_LOCK (encoder);
     self->input_state = NULL;
@@ -1746,7 +1769,7 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
     output_intra = 0;
 
   /* Wake up the frame producer */
-  self->pending_frames--;
+  g_atomic_int_add (&self->pending_frames, -1);
   GST_MPP_ENC_BROADCAST (encoder);
 
   /* This encoded frame must be the oldest one */
@@ -1830,11 +1853,12 @@ gst_mpp_enc_loop (GstVideoEncoder * encoder)
   GstMppEnc *self = GST_MPP_ENC (encoder);
   gboolean packet_progress = FALSE;
 
-  GST_MPP_ENC_WAIT (encoder, self->pending_frames || GST_MPP_ENC_FLUSHING (encoder));
+  GST_MPP_ENC_WAIT (encoder,
+      GST_MPP_ENC_PENDING (encoder) || GST_MPP_ENC_FLUSHING (encoder));
 
   GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
 
-  if (GST_MPP_ENC_FLUSHING (encoder) && !self->pending_frames) {
+  if (GST_MPP_ENC_FLUSHING (encoder) && !GST_MPP_ENC_PENDING (encoder)) {
     GST_INFO_OBJECT (self, "flushing");
     self->task_ret = GST_FLOW_FLUSHING;
     goto out;
@@ -1847,7 +1871,7 @@ gst_mpp_enc_loop (GstVideoEncoder * encoder)
   while (gst_mpp_enc_poll_packet_locked (encoder))
     packet_progress = TRUE;
 
-  if (GST_MPP_ENC_FLUSHING (encoder) && self->pending_frames &&
+  if (GST_MPP_ENC_FLUSHING (encoder) && GST_MPP_ENC_PENDING (encoder) &&
       !packet_progress) {
     gint64 deadline = g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
     do {
@@ -1857,8 +1881,8 @@ gst_mpp_enc_loop (GstVideoEncoder * encoder)
 
     if (!packet_progress) {
       GST_WARNING_OBJECT (self,
-          "pausing encoder drain with %u pending frames after no output progress",
-          self->pending_frames);
+          "pausing encoder drain with %d pending frames after no output progress",
+          GST_MPP_ENC_PENDING (encoder));
       self->task_ret = GST_FLOW_FLUSHING;
     }
   }
@@ -1919,11 +1943,12 @@ gst_mpp_enc_handle_frame (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
   frame->output_buffer = buffer;
 
   /* Avoid holding too many frames */
-  if (G_UNLIKELY (self->pending_frames >=
-          gst_mpp_enc_get_max_pending (encoder))) {
+  if (G_UNLIKELY (GST_MPP_ENC_PENDING (encoder) >=
+          (gint) gst_mpp_enc_get_max_pending (encoder))) {
     GST_VIDEO_ENCODER_STREAM_UNLOCK (encoder);
     GST_MPP_ENC_WAIT (encoder,
-        self->pending_frames < gst_mpp_enc_get_max_pending (encoder) ||
+        GST_MPP_ENC_PENDING (encoder) <
+        (gint) gst_mpp_enc_get_max_pending (encoder) ||
         GST_MPP_ENC_FLUSHING (encoder));
     GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
   }
@@ -1931,7 +1956,7 @@ gst_mpp_enc_handle_frame (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
   if (G_UNLIKELY (GST_MPP_ENC_FLUSHING (encoder)))
     goto flushing;
 
-  self->pending_frames++;
+  g_atomic_int_inc (&self->pending_frames);
   self->frames =
       g_list_append (self->frames,
       GUINT_TO_POINTER (frame->system_frame_number));

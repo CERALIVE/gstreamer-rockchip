@@ -129,6 +129,11 @@ static atomic_uint enc_empty_polls_by_generation[ENC_RESET_GENERATIONS];
 static atomic_uint enc_packet_deinits;
 static atomic_uint enc_packet_double_deinits;
 static atomic_uint enc_live_packets;
+static atomic_int enc_reject_put;
+static atomic_uint enc_put_rejections;
+static atomic_uint enc_gap_empty_polls;
+static atomic_uint enc_gap_empty_polls_remaining;
+static atomic_uint enc_gap_empty_polls_per_packet;
 
 /* Off unless a test arms it, so the encoder harness keeps the MPP behavior it
  * was written against. */
@@ -399,6 +404,11 @@ static MockBuffer *enc_buffer_new(unsigned char payload) {
 }
 static MPP_RET encode_put(MppCtx c, MppFrame f) {
   (void)c;
+  if (atomic_load(&enc_reject_put)) {
+    atomic_fetch_add(&enc_put_rejections, 1);
+    return MPP_NOK;
+  }
+
   unsigned head = atomic_load(&enc_head);
   unsigned tail = atomic_load(&enc_tail);
   if (tail - head >= ENC_PACKET_CAPACITY)
@@ -433,6 +443,17 @@ static MPP_RET encode_get(MppCtx c, MppPacket *p) {
   if (!p)
     return MPP_NOK;
 
+  unsigned gap_remaining = atomic_load(&enc_gap_empty_polls_remaining);
+  while (gap_remaining && !atomic_compare_exchange_weak(
+                              &enc_gap_empty_polls_remaining, &gap_remaining,
+                              gap_remaining - 1))
+    ;
+  if (gap_remaining) {
+    atomic_fetch_add(&enc_gap_empty_polls, 1);
+    *p = NULL;
+    return MPP_OK;
+  }
+
   if (atomic_load(&enc_test_armed) && !atomic_load(&enc_reset_seen) &&
       atomic_load(&enc_dequeued_packets) >= atomic_load(&enc_release_limit)) {
     *p = NULL;
@@ -457,6 +478,8 @@ static MPP_RET encode_get(MppCtx c, MppPacket *p) {
 
   atomic_store(&enc_head, head + 1);
   atomic_fetch_add(&enc_dequeued_packets, 1);
+  atomic_store(&enc_gap_empty_polls_remaining,
+               atomic_load(&enc_gap_empty_polls_per_packet));
   *p = (MppPacket)packet;
   return MPP_OK;
 }
@@ -1022,6 +1045,16 @@ void mpp_mock_enc_arm_reset_drain(void) {
 void mpp_mock_enc_release_packets(unsigned count) {
   atomic_store(&enc_release_limit, count);
 }
+void mpp_mock_enc_reject_input(void) { atomic_store(&enc_reject_put, 1); }
+unsigned mpp_mock_enc_put_rejections(void) {
+  return atomic_load(&enc_put_rejections);
+}
+void mpp_mock_enc_set_empty_polls_between_packets(unsigned count) {
+  atomic_store(&enc_gap_empty_polls_per_packet, count);
+}
+unsigned mpp_mock_enc_gap_empty_polls(void) {
+  return atomic_load(&enc_gap_empty_polls);
+}
 /* An MPP rate-controller drop is a zero-length packet that still carries its
  * MppBuffer, so the backing buffer is deliberately left intact here. */
 void mpp_mock_enc_set_packet_length(unsigned ordinal, size_t length) {
@@ -1196,6 +1229,11 @@ void mpp_mock_reset(void) {
   atomic_store(&enc_packet_deinits, 0);
   atomic_store(&enc_packet_double_deinits, 0);
   atomic_store(&enc_live_packets, 0);
+  atomic_store(&enc_reject_put, 0);
+  atomic_store(&enc_put_rejections, 0);
+  atomic_store(&enc_gap_empty_polls, 0);
+  atomic_store(&enc_gap_empty_polls_remaining, 0);
+  atomic_store(&enc_gap_empty_polls_per_packet, 0);
   memset(enc_packets, 0, sizeof(enc_packets));
   atomic_store(&enc_live_buffers, 0);
   atomic_store(&buffer_unmappable_armed, 0);

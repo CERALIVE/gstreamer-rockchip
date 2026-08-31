@@ -65,7 +65,9 @@ struct _GstMppEnc
   /* Max number of pending frames */
   guint32 max_pending;
 
-  guint pending_frames;
+  /* Shared by the frame producer and output task. All accesses are atomic;
+   * event_mutex only sequences event_cond sleep/wake and never owns this value. */
+  gint pending_frames;
   GMutex event_mutex;
   GCond event_cond;
 

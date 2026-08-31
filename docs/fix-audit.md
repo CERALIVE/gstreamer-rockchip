@@ -25,12 +25,22 @@ Every fix row appended by later todos must contain exactly these five fields:
    and trixie/GStreamer 1.26. The test uses a one-second wake deadline and an independent
    ten-second process alarm; a hang is a failure, never a delayed pass. ThreadSanitizer compiled
    but could not start under qemu-user: `unsupported VMA range; Found 47 - Supported 39, 42 and
-   48`. The deterministic queue-full/wake ordering assertion is the substitute.
+   48`. The deterministic queue-full/wake ordering assertion is the substitute. PR #12 follow-up
+   tests then locked the mandated review findings: at the rejected head, temporary packet gaps
+   drained only `1` of `4` packets and permanent `encode_put_frame` rejection still returned
+   `GST_FLOW_OK` (`Checks: 2, Failures: 2`). GREEN follows the genuine idle deadline and finish
+   error propagation (`Checks: 4, Failures: 0, Errors: 0` focused; full Meson 3/3 in both suites).
+   Mutants restoring first-empty-poll termination or unconditional finish success each fail their
+   focused case. The unchanged flush-wake test passed 20/20 consecutive runs.
 3. **Hardware gate** — `hardware-independent`.
 4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so`
    reported 68 referenced-and-present MPP symbols and an empty closure diff in both suites.
-5. **Reviewer verdict** — `confirmed` by independent concurrency review after the
-   no-progress deadline and watchdog-cleanup mutation paths were exercised.
+5. **Reviewer verdict** — `needs-human-review`. The mandated orchestrator-dispatched
+   review on PR #12 rejected the original commit: `pending_frames` raced across two
+   locks, the reset drain stopped at its first empty poll, and incomplete EOS drain
+   returned `GST_FLOW_OK`. The follow-up atomics/idle-deadline/error-propagation change
+   is awaiting a new independent review round; earlier self-directed review does not
+   satisfy the reviewer-must-differ-from-author rule.
 
 ### aa7c308d2a4b74de91c4e07677a09f705a71c23f — missing oldest-frame hardening
 
@@ -47,8 +57,9 @@ Every fix row appended by later todos must contain exactly these five fields:
 3. **Hardware gate** — `hardware-independent`.
 4. **MPP ABI closure** — bookworm and trixie `ci/check-mpp-abi.sh` runs each reported 68
    referenced-and-present MPP symbols and an empty diff against pinned MPP 1.5.0-1.
-5. **Reviewer verdict** — `confirmed` by the same independent review; both normal
-   and rate-controller-drop orphan packet paths converge on one packet deinit.
+5. **Reviewer verdict** — `confirmed` by the orchestrator-dispatched PR #12 review;
+   both normal and rate-controller-drop orphan packet paths converge on one packet
+   deinit. This verdict applies only to the hardening commit, not the flush commit.
 
 All three rows below were produced in a native-headers `debian:bookworm-slim`
 aarch64 container with the pinned MPP 1.5.0-1 / RGA 2.2.0-1 packages, built with
