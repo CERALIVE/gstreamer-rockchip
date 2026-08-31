@@ -235,6 +235,11 @@ gst_mpp_dec_reset (GstVideoDecoder * decoder, gboolean drain, gboolean final)
   GstFlowReturn result;
   GList *frames;
 
+  if (!drain) {
+    g_atomic_int_inc (&self->reset_generation);
+    self->mpi->reset (self->mpp_ctx);
+  }
+
   GST_MPP_DEC_LOCK (decoder);
 
   GST_DEBUG_OBJECT (self, "resetting");
@@ -253,7 +258,8 @@ gst_mpp_dec_reset (GstVideoDecoder * decoder, gboolean drain, gboolean final)
     self->mpp_frame = NULL;
   }
 
-  self->mpi->reset (self->mpp_ctx);
+  if (drain)
+    self->mpi->reset (self->mpp_ctx);
   self->task_ret = GST_FLOW_OK;
   self->decoded_frames = 0;
 
@@ -302,6 +308,7 @@ gst_mpp_dec_start (GstVideoDecoder * decoder)
   self->task_ret = GST_FLOW_OK;
   self->decoded_frames = 0;
   self->flushing = FALSE;
+  g_atomic_int_set (&self->reset_generation, 0);
 
   /* Prefer using MPP PTS */
   self->use_mpp_pts = TRUE;

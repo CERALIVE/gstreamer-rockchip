@@ -32,6 +32,9 @@
 #define GST_MPP_JPEG_DEC(obj) (G_TYPE_CHECK_INSTANCE_CAST((obj), \
     GST_TYPE_MPP_JPEG_DEC, GstMppJpegDec))
 
+#define MPP_JPEG_DEC_DRAIN_NO_PROGRESS_US (100 * 1000)
+#define MPP_JPEG_DEC_DRAIN_POLL_MS 10
+
 #define GST_CAT_DEFAULT mpp_jpeg_dec_debug
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
 
@@ -440,17 +443,44 @@ gst_mpp_jpeg_dec_poll_mpp_frame (GstVideoDecoder * decoder, gint timeout_ms)
 }
 
 static gboolean
-gst_mpp_jpeg_dec_shutdown (GstVideoDecoder * decoder, gboolean drain UNUSED)
+gst_mpp_jpeg_dec_shutdown (GstVideoDecoder * decoder, gboolean drain)
 {
   GstMppJpegDec *self = GST_MPP_JPEG_DEC (decoder);
   GstMppDec *mppdec = GST_MPP_DEC (decoder);
   MppFrame mframe = NULL;
   MppTask mtask = NULL;
+  MPP_RET ret;
+  gint reset_generation;
+  gint64 deadline;
+
+  if (!drain)
+    return FALSE;
 
   GST_DEBUG_OBJECT (self, "sending EOS");
 
-  mppdec->mpi->poll (mppdec->mpp_ctx, MPP_PORT_INPUT, MPP_POLL_BLOCK);
-  mppdec->mpi->dequeue (mppdec->mpp_ctx, MPP_PORT_INPUT, &mtask);
+  reset_generation = g_atomic_int_get (&mppdec->reset_generation);
+  deadline = g_get_monotonic_time () + MPP_JPEG_DEC_DRAIN_NO_PROGRESS_US;
+  do {
+    ret = mppdec->mpi->poll (mppdec->mpp_ctx, MPP_PORT_INPUT,
+        MPP_JPEG_DEC_DRAIN_POLL_MS);
+    if (g_atomic_int_get (&mppdec->reset_generation) != reset_generation) {
+      GST_DEBUG_OBJECT (self, "JPEG drain cancelled by reset");
+      goto error;
+    }
+    if (ret == MPP_OK)
+      break;
+    if (ret != MPP_ERR_TIMEOUT)
+      goto error;
+  } while (g_get_monotonic_time () < deadline);
+
+  if (ret != MPP_OK) {
+    GST_WARNING_OBJECT (self, "timed out waiting for JPEG input capacity");
+    goto error;
+  }
+
+  ret = mppdec->mpi->dequeue (mppdec->mpp_ctx, MPP_PORT_INPUT, &mtask);
+  if (ret != MPP_OK)
+    goto error;
   if (!mtask)
     goto error;
 

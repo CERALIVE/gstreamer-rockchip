@@ -185,6 +185,10 @@ static atomic_uint internal_group_types;
 static atomic_uint jpeg_input_timeouts_remaining;
 static atomic_uint jpeg_input_poll_calls;
 static atomic_int jpeg_last_input_poll_timed_out;
+static atomic_int jpeg_block_input_poll_armed;
+static atomic_int jpeg_block_input_poll_entered;
+static atomic_int jpeg_block_input_poll_release;
+static atomic_uint jpeg_input_enqueues;
 static MockTask jpeg_task;
 static MockPacket *packet_allocs;
 static atomic_uint dec_arena_packets;
@@ -278,6 +282,12 @@ static MPP_RET port_ok(MppCtx c, MppPortType t, MppPollType p) {
   (void)p;
   if (atomic_load(&dec_enabled) && t == MPP_PORT_INPUT) {
     atomic_fetch_add(&jpeg_input_poll_calls, 1);
+    if (atomic_exchange(&jpeg_block_input_poll_armed, 0)) {
+      atomic_store(&jpeg_block_input_poll_entered, 1);
+      while (!atomic_load(&jpeg_block_input_poll_release))
+        usleep(100);
+      return MPP_ERR_TIMEOUT;
+    }
     unsigned remaining = atomic_load(&jpeg_input_timeouts_remaining);
     while (remaining && !atomic_compare_exchange_weak(
                             &jpeg_input_timeouts_remaining, &remaining,
@@ -306,8 +316,9 @@ static MPP_RET deq_ok(MppCtx c, MppPortType t, MppTask *p) {
 }
 static MPP_RET enq_ok(MppCtx c, MppPortType t, MppTask p) {
   (void)c;
-  (void)t;
   (void)p;
+  if (atomic_load(&dec_enabled) && t == MPP_PORT_INPUT)
+    atomic_fetch_add(&jpeg_input_enqueues, 1);
   return MPP_OK;
 }
 static MppBuffer dec_new_output_buffer(uint8_t identity) {
@@ -577,6 +588,7 @@ static MPP_RET encode_get(MppCtx c, MppPacket *p) {
 }
 static MPP_RET mock_reset(MppCtx c) {
   (void)c;
+  atomic_store(&jpeg_block_input_poll_release, 1);
   atomic_fetch_add(&dec_reset_calls, 1);
   atomic_fetch_add(&enc_reset_generation, 1);
   atomic_store(&enc_reset_seen, 1);
@@ -1317,6 +1329,10 @@ void mpp_mock_dec_arm(unsigned width, unsigned height) {
   atomic_store(&jpeg_input_timeouts_remaining, 0);
   atomic_store(&jpeg_input_poll_calls, 0);
   atomic_store(&jpeg_last_input_poll_timed_out, 0);
+  atomic_store(&jpeg_block_input_poll_armed, 0);
+  atomic_store(&jpeg_block_input_poll_entered, 0);
+  atomic_store(&jpeg_block_input_poll_release, 1);
+  atomic_store(&jpeg_input_enqueues, 0);
   atomic_store(&dec_enabled, 1);
 }
 /* Stops the mock producing so a harness teardown can drain, but deliberately
@@ -1393,6 +1409,17 @@ void mpp_mock_jpeg_set_input_timeouts(unsigned count) {
 }
 unsigned mpp_mock_jpeg_input_poll_calls(void) {
   return atomic_load(&jpeg_input_poll_calls);
+}
+void mpp_mock_jpeg_block_input_poll(void) {
+  atomic_store(&jpeg_block_input_poll_entered, 0);
+  atomic_store(&jpeg_block_input_poll_release, 0);
+  atomic_store(&jpeg_block_input_poll_armed, 1);
+}
+unsigned mpp_mock_jpeg_input_poll_entered(void) {
+  return (unsigned)atomic_load(&jpeg_block_input_poll_entered);
+}
+unsigned mpp_mock_jpeg_input_enqueues(void) {
+  return atomic_load(&jpeg_input_enqueues);
 }
 void mpp_mock_reset(void) {
   memset(control_counts, 0, sizeof(control_counts));

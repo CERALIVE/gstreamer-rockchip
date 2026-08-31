@@ -10,6 +10,7 @@
 #include <gst/gst.h>
 #include <gst/video/gstvideodecoder.h>
 #include <rockchip/rk_mpi.h>
+#include <unistd.h>
 
 void mpp_mock_dec_arm (unsigned width, unsigned height);
 void mpp_mock_dec_disarm (void);
@@ -39,6 +40,9 @@ unsigned mpp_mock_dec_frame_deinits (void);
 unsigned mpp_mock_internal_group_types (void);
 void mpp_mock_jpeg_set_input_timeouts (unsigned count);
 unsigned mpp_mock_jpeg_input_poll_calls (void);
+void mpp_mock_jpeg_block_input_poll (void);
+unsigned mpp_mock_jpeg_input_poll_entered (void);
+unsigned mpp_mock_jpeg_input_enqueues (void);
 
 #define DEC_WIDTH 320
 #define DEC_HEIGHT 240
@@ -705,6 +709,72 @@ test_jpeg_input_timeout_is_retried (void)
   g_print ("one MPP_ERR_TIMEOUT retried; accepted on poll 2\n");
 }
 
+typedef struct
+{
+  GstHarness *h;
+  GstFlowReturn result;
+  gint done;
+} DecoderFinishCall;
+
+static gpointer
+finish_decoder_thread (gpointer data)
+{
+  DecoderFinishCall *call = data;
+
+  call->result = finish_decoder (call->h);
+  g_atomic_int_set (&call->done, TRUE);
+  return NULL;
+}
+
+static void
+test_jpeg_blocked_drain_is_cancelled_by_flush (void)
+{
+  DecoderFinishCall call = { 0, };
+  GstVideoDecoder *decoder;
+  GstVideoDecoderClass *klass;
+  GstHarness *h;
+  GThread *thread;
+  guint enqueues_before;
+  gint64 deadline;
+
+  g_print ("== jpeg blocked drain flush cancellation ==\n");
+  alarm (5);
+  mpp_mock_dec_arm (DEC_WIDTH, DEC_HEIGHT);
+  h = gst_harness_new ("mppjpegdec");
+  g_assert_nonnull (h);
+  gst_harness_set_src_caps_str (h, JPEG_CAPS);
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (0)), ==, GST_FLOW_OK);
+  enqueues_before = mpp_mock_jpeg_input_enqueues ();
+
+  mpp_mock_jpeg_block_input_poll ();
+  call.h = h;
+  thread = g_thread_new ("jpeg-drain", finish_decoder_thread, &call);
+  deadline = g_get_monotonic_time () + G_USEC_PER_SEC;
+  while (!mpp_mock_jpeg_input_poll_entered () &&
+      g_get_monotonic_time () < deadline)
+    g_usleep (1000);
+  g_assert_true (mpp_mock_jpeg_input_poll_entered ());
+
+  decoder = GST_VIDEO_DECODER (h->element);
+  klass = GST_VIDEO_DECODER_GET_CLASS (decoder);
+  GST_VIDEO_DECODER_STREAM_LOCK (decoder);
+  g_assert_true (klass->flush (decoder));
+  GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
+
+  deadline = g_get_monotonic_time () + G_USEC_PER_SEC;
+  while (!g_atomic_int_get (&call.done) && g_get_monotonic_time () < deadline)
+    g_usleep (1000);
+  g_assert_true (g_atomic_int_get (&call.done));
+  g_thread_join (thread);
+  g_assert_cmpuint (mpp_mock_jpeg_input_enqueues (), ==, enqueues_before);
+  alarm (0);
+  g_print ("non-draining reset woke blocked JPEG input poll within one second\n");
+
+  mpp_mock_dec_disarm ();
+  gst_harness_teardown (h);
+  reclaim_mock_packets ();
+}
+
 static void
 test_dma_feature_reaches_negotiated_caps (void)
 {
@@ -1194,6 +1264,7 @@ main (int argc, char **argv)
   test_put_packet_result_drives_fullness ();
   test_video_drain_classifies_put_packet_errors ();
   test_jpeg_input_timeout_is_retried ();
+  test_jpeg_blocked_drain_is_cancelled_by_flush ();
   test_dma_feature_reaches_negotiated_caps ();
 #if GST_CHECK_VERSION(1, 24, 0)
   test_dma_drm_peer_selects_dma_drm_caps ();

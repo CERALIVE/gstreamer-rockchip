@@ -71,6 +71,9 @@ struct _GstMppDec
   /* stop handling new frame when flushing */
   gboolean flushing;
 
+  /* generation bumped before a non-draining reset wakes blocked MPP calls */
+  gint reset_generation;
+
   /* drop frames when flushing but not draining */
   gboolean draining;
 

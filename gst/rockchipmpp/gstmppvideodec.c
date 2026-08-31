@@ -275,11 +275,8 @@ gst_mpp_video_dec_shutdown (GstVideoDecoder * decoder, gboolean drain)
   gint64 deadline;
 
   /* It's safe to stop decoding immediately */
-  if (!drain) {
-    /* Interrupt the frame polling */
-    mppdec->mpi->reset (mppdec->mpp_ctx);
+  if (!drain)
     return FALSE;
-  }
 
   mpp_packet_init (&mpkt, NULL, 0);
   mpp_packet_set_eos (mpkt);
