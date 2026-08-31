@@ -1925,3 +1925,40 @@ different default by any of the three fixes; the only new symbol is the internal
    trixie. The fix adds no MPP API call and the mock retains the pinned five-argument
    `mpp_buffer_import_with_tag()` declaration.
 5. **Reviewer verdict** — `confirmed`. Confirmed by independent oracle review: cross-group import failure now correctly returns NULL before any mpp_buffer_inc_ref/qdata operation (traced: the old leak was real — GStreamer's gst_mini_object_set_qdata() rejects a null object before installing its destroy notifier, so a failed import's ref increment could never be balanced). dup(fd) failure now correctly checked before gst_fd_allocator_alloc() (traced the real consequence through downstream consumers: neither GStreamer 1.22 nor 1.26 validates the fd at allocation time, so unchecked fd=-1 would produce false-success invalid memory reaching drmPrimeFDToHandle() in gstkmsallocator.c and the rkximage display path — EBADF at point of use, not an immediate crash, but a genuine defect). H1-B4 (killed/falsified claim) confirmed untouched — gst_mpp_allocator_alloc_mppbuf() is byte-unchanged. FIX-3/H1-B5 confirmed not redundantly touched (already landed in todo 15's gstmppenc.c, this PR has no gstmppenc.c diff). Mutation-verified: removing either NULL-return check causes the corresponding test assertion to fail as expected.
+
+### Decoder no-output input accounting
+
+1. **Provenance SHA** — `7d12668d67419041effd3d9129fcb41e4f3e7b77`, first-party
+   `tier-a-adapted` correction based on Kelvin Lawson's
+   `44578bdd745674d8e3917fe7a44486f5d9d42b17`. The adaptation places the
+   post-consumption release after this fork's buffered/copy packet ownership branch.
+   It builds on the already-landed `d27ae920e36fd72fe116e6c00108a65235c3e3d5`
+   oldest-pending fallback; that fallback and `7ffd7f40576bbfb861bc7a7d3492c710d149aff8`'s
+   packet-level backpressure are preserved unchanged. No retained-frame cap was added.
+2. **Red/green outputs** — focused command in the arm64 bookworm container:
+   `MPP_DECODER_SEAM_ACCOUNTING_ONLY=1 .../mpp-decoder-seam`. With the exact
+   pre-`d27ae92` decoder source, the stale-PTS storm reported `300` outputs but
+   `299` pending frames; the sequential case degraded after output 2 with one
+   unmatched frame already retained. At this task's parent (`171c35bc`), the
+   already-landed stale fallback was green, while the remaining defects were red:
+   `SPS/PPS-only: 300 accepted packets, 0 outputs, 300 pending frames` and
+   `older untimestamped pending frame: 1 before later match, 1 after`. GREEN at
+   `7d12668d`: stale burst/sequential pending `0/0`, SPS/PPS-only pending `0`, and
+   the older untimestamped stray `1 -> 0`. The normal-stream A/B sequence was
+   identical at the parent and fix:
+   `10000000000 10033333333 10066666666 10099999999 10133333332 10166666665 10199999998`.
+   An isolated mutant restoring only unbounded `last_frame` reuse was killed:
+   stale burst pending `64` (the existing safety bound) and sequential pending `1`,
+   while both header cases and the normal sequence stayed green. Full Meson passed
+   `4/4` in bookworm/GStreamer 1.22 and trixie/GStreamer 1.26; source-contract
+   parity passed both goldens in both suites. Absolute mocked-host runtime parity
+   remains the documented non-gate because decoder goldens are board captures.
+3. **Hardware gate** — `hardware-independent`. The assertions cover
+   GstVideoDecoder pending-frame ownership, output matching, and downstream frame
+   sequence entirely at the mature mock-MPP boundary.
+4. **MPP ABI closure** — bookworm resolved 68 referenced-and-present MPP symbols
+   against 26 sibling libraries; trixie resolved the same 68 against 23. Both
+   reported an empty diff against pinned MPP 1.5.0-1. The fix adds no MPP API call.
+5. **Reviewer verdict** — `needs-human-review`. Reviewer == author. No
+   orchestrator-dispatched independent review has run, and self-directed review is
+   not claimed as F27 evidence; the branch remains open for that review.
