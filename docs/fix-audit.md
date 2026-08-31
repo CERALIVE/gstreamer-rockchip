@@ -12,6 +12,26 @@ Every fix row appended by later todos must contain exactly these five fields:
 
 ## Rows
 
+### Runtime resolution drain before geometry swap
+
+1. **Provenance SHA** — first-party correction against task baseline
+   `f66fbd5b6e46440f57df1f38db465af86b7c6817`; the fix commit is the commit containing this row.
+2. **Red/green outputs** — focused command:
+   `GST_CHECKS=test_runtime_resolution_drains_old_geometry_before_caps_switch .../mpp-gstharness`
+   in the arm64 bookworm container. RED at the baseline and with an explicit mutant that moved the
+   drain below the `mpp_frame` geometry writes: old frame 0 reached MPP at width `160` instead of
+   its original width `320` (`Checks: 1, Failures: 1`). GREEN with drain-before-swap:
+   `runtime resolution drain: 4 old frames, 20.075 ms, caps 320x240 -> 160x120 at a frame boundary`
+   and `Checks: 1, Failures: 0, Errors: 0`. The four-frame drain is below the 30-frame GOP bound.
+   Full Meson passed 3/3 in both bookworm/GStreamer 1.22 and trixie/GStreamer 1.26.
+3. **Hardware gate** — `hardware-gated`, drill id `d7-runtime-resolution-drain`. The mock proves
+   old/new geometry ownership and caps ordering; todo 26 validates the existing in-code MPP
+   live-reconfiguration assumption and measures the boundary on RK3588 hardware.
+4. **MPP ABI closure** — bookworm and trixie `ci/check-mpp-abi.sh` runs each reported 68
+   referenced-and-present MPP symbols and an empty diff against pinned MPP 1.5.0-1.
+5. **Reviewer verdict** — `needs-human-review`. No self-directed review is claimed; the branch and
+   PR remain open for the orchestrator-dispatched independent F27 review.
+
 ### ab2e7d1f2985167a3a242726c001ae47452ae0e4 — flush cancellation and bounded encoder drain
 
 1. **Provenance SHA** — first-party correction against task baseline
