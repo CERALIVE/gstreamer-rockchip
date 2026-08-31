@@ -120,6 +120,9 @@ static int enc_plan_intra_armed[ENC_PLAN_CAPACITY];
 #define ENC_BUFFER_MAP_SIZE 4096
 static MockPacket enc_packets[ENC_PACKET_CAPACITY];
 static atomic_uint enc_live_buffers;
+static atomic_int buffer_import_failure_armed;
+static atomic_uint buffer_import_calls;
+static atomic_uint buffer_inc_ref_calls;
 /* One-shot: the next buffer MPP hands out carries a dmafd the CPU cannot map. */
 static atomic_int buffer_unmappable_armed;
 static atomic_uint buffer_unmappable_handed_out;
@@ -594,6 +597,19 @@ MPP_RET mpp_buffer_get_with_tag(MppBufferGroup group, MppBuffer *buffer,
   *buffer = (MppBuffer)b;
   return MPP_OK;
 }
+MPP_RET mpp_buffer_import_with_tag(MppBufferGroup group, MppBufferInfo *info,
+                                   MppBuffer *buffer, const char *tag,
+                                   const char *caller) {
+  (void)tag;
+  (void)caller;
+  if (!info || !buffer)
+    return MPP_NOK;
+  *buffer = NULL;
+  atomic_fetch_add(&buffer_import_calls, 1);
+  if (atomic_exchange(&buffer_import_failure_armed, 0))
+    return MPP_NOK;
+  return mpp_buffer_get_with_tag(group, buffer, info->size, tag, caller);
+}
 MPP_RET mpp_buffer_put_with_caller(MppBuffer buffer, const char *caller) {
   (void)caller;
   MockBuffer *b = (MockBuffer *)buffer;
@@ -617,6 +633,7 @@ MPP_RET mpp_buffer_inc_ref_with_caller(MppBuffer buffer, const char *caller) {
   if (!b)
     return MPP_NOK;
   b->refs++;
+  atomic_fetch_add(&buffer_inc_ref_calls, 1);
   return MPP_OK;
 }
 int mpp_buffer_get_fd_with_caller(MppBuffer buffer, const char *caller) {
@@ -1162,6 +1179,18 @@ void mpp_mock_arm_unmappable_buffer(void) {
 unsigned mpp_mock_unmappable_buffers(void) {
   return atomic_load(&buffer_unmappable_handed_out);
 }
+void mpp_mock_fail_next_buffer_import(void) {
+  atomic_store(&buffer_import_failure_armed, 1);
+}
+unsigned mpp_mock_buffer_import_calls(void) {
+  return atomic_load(&buffer_import_calls);
+}
+unsigned mpp_mock_buffer_inc_ref_calls(void) {
+  return atomic_load(&buffer_inc_ref_calls);
+}
+unsigned mpp_mock_buffer_ref_count(MppBuffer buffer) {
+  return buffer ? ((MockBuffer *)buffer)->refs : 0;
+}
 /* Safe only once no element can still own a packet, i.e. after the harness has
  * been torn down. Callers reclaim explicitly; arming reclaims again so a test
  * that forgets cannot carry an arena into the next one. */
@@ -1293,6 +1322,9 @@ void mpp_mock_reset(void) {
   atomic_store(&enc_gap_empty_polls_per_packet, 0);
   memset(enc_packets, 0, sizeof(enc_packets));
   atomic_store(&enc_live_buffers, 0);
+  atomic_store(&buffer_import_failure_armed, 0);
+  atomic_store(&buffer_import_calls, 0);
+  atomic_store(&buffer_inc_ref_calls, 0);
   atomic_store(&buffer_unmappable_armed, 0);
   atomic_store(&buffer_unmappable_handed_out, 0);
   memset(enc_plan_length, 0, sizeof(enc_plan_length));

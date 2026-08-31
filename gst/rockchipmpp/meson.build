@@ -48,6 +48,19 @@ test('rockchipmpp GstHarness factories and caps', mpp_harness,
   workdir : meson.project_build_root(),
   is_parallel : false)
 
+mpp_allocator_seam = executable('mpp-allocator-seam',
+  ['../../tests/mpp_allocator_seam.c', 'gstmppallocator.c'],
+  c_args : [gst_rockchip_args, '-Wextra'],
+  include_directories : configinc,
+  dependencies : [gst_dep, gstallocators_dep, gstcheck_dep, mpp_dep],
+  link_with : mock_mpp,
+  link_args : ['-Wl,--wrap=dup', '-Wl,--wrap=gst_fd_allocator_alloc'])
+
+test('rockchipmpp allocator import error handling', mpp_allocator_seam,
+  depends : mock_mpp,
+  workdir : meson.project_build_root(),
+  is_parallel : false)
+
 decoder_seam = executable('mpp-decoder-seam', '../../tests/mpp_decoder_seam.c',
   dependencies : [gst_dep, gstvideo_dep, gstallocators_dep, gstcheck_dep, mpp_dep],
   link_with : mock_mpp)
