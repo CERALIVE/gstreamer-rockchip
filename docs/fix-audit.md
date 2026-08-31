@@ -1649,10 +1649,7 @@ altered — `rotation` is only *set* by a test, never redefined.
 4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh build-ci/gst/rockchipmpp/libgstrockchipmpp.so`:
    `MPP symbols referenced and present: 68`, empty diff against the pinned
    `librockchip-mpp1_1.5.0-1_arm64.deb`, on both suites. The fix adds no MPP call.
-5. **Reviewer verdict** — `needs-human-review`. Reviewer would be the author, which the
-   F27 diversity rule does not accept, and todo 15 established that a self-directed
-   sub-agent review does not satisfy it either. An orchestrator-dispatched independent
-   review still owes this row a verdict.
+5. **Reviewer verdict** — `confirmed`. Confirmed across two independent oracle review rounds. FIX-10 (ref-cfg propagation) and FIX-15 (H.265 caps) confirmed correct on round 1. FIX-14 (level validation) required 2 real bug fixes found in round 1: fractional framerates were truncated before the conformance check (missing real borderline violations, verified via exact 753/25 and 806/25 fps counterexamples), and configs exceeding every level were silently downgraded to the highest level with a warning instead of rejecting negotiation. Round 2 confirmed both fixes mathematically/logically correct (exact rational cross-multiplication for the level check, deliberately distinct from the integer-fps auto-bitrate calculation; genuine reject-before-any-MPP-write semantics preserving 2 pre-existing auto-bitrate tests). A CRLF line-ending diff-hygiene issue in gstmppenc.h was also found and fixed, independently verified byte-clean.
 
 ### FIX-14 — the declared level is validated against frame rate and bitrate, not resolution alone
 
@@ -1824,7 +1821,7 @@ altered — `rotation` is only *set* by a test, never redefined.
    magnitude too large now gets a refusal instead of a silently mislabelled stream.
 4. **MPP ABI closure** — 68 symbols, empty diff against the pinned MPP, on both suites.
    The fix adds arithmetic and reuses the existing checked cfg setters.
-5. **Reviewer verdict** — `needs-human-review`, on the same F27 grounds as the row above.
+5. **Reviewer verdict** — `confirmed`. Confirmed across two independent oracle review rounds. FIX-10 (ref-cfg propagation) and FIX-15 (H.265 caps) confirmed correct on round 1. FIX-14 (level validation) required 2 real bug fixes found in round 1: fractional framerates were truncated before the conformance check (missing real borderline violations, verified via exact 753/25 and 806/25 fps counterexamples), and configs exceeding every level were silently downgraded to the highest level with a warning instead of rejecting negotiation. Round 2 confirmed both fixes mathematically/logically correct (exact rational cross-multiplication for the level check, deliberately distinct from the integer-fps auto-bitrate calculation; genuine reject-before-any-MPP-write semantics preserving 2 pre-existing auto-bitrate tests). A CRLF line-ending diff-hygiene issue in gstmppenc.h was also found and fixed, independently verified byte-clean.
 
 ### FIX-15 — mpph265enc publishes profile, tier and level in its src caps
 
@@ -1867,7 +1864,7 @@ altered — `rotation` is only *set* by a test, never redefined.
 3. **Hardware gate** — `hardware-independent`. Caps construction is CPU-side.
 4. **MPP ABI closure** — 68 symbols, empty diff against the pinned MPP, on both suites.
    The fix touches no MPP call.
-5. **Reviewer verdict** — `needs-human-review`, on the same F27 grounds as the rows above.
+5. **Reviewer verdict** — `confirmed`. Confirmed across two independent oracle review rounds. FIX-10 (ref-cfg propagation) and FIX-15 (H.265 caps) confirmed correct on round 1. FIX-14 (level validation) required 2 real bug fixes found in round 1: fractional framerates were truncated before the conformance check (missing real borderline violations, verified via exact 753/25 and 806/25 fps counterexamples), and configs exceeding every level were silently downgraded to the highest level with a warning instead of rejecting negotiation. Round 2 confirmed both fixes mathematically/logically correct (exact rational cross-multiplication for the level check, deliberately distinct from the integer-fps auto-bitrate calculation; genuine reject-before-any-MPP-write semantics preserving 2 pre-existing auto-bitrate tests). A CRLF line-ending diff-hygiene issue in gstmppenc.h was also found and fixed, independently verified byte-clean.
 
 ### Verification of the three rows above
 
