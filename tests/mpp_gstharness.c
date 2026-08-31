@@ -446,6 +446,7 @@ GST_START_TEST(test_eos_backpressure_is_bounded_and_not_reported_as_success) {
               "incomplete EOS drain was silently reported as GST_FLOW_OK");
   fail_unless(elapsed < 2 * G_USEC_PER_SEC,
               "incomplete EOS drain exceeded its bounded deadline");
+  fail_unless_equals_int(encoder_frame_count(h->element), 4);
   fail_unless_equals_int(mpp_mock_enc_packet_deinits(), 0);
   fail_unless_equals_int(mpp_mock_enc_packet_double_deinits(), 0);
   gst_harness_teardown(h);
