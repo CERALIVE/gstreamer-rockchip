@@ -692,6 +692,56 @@ test_video_drain_classifies_put_packet_errors (void)
 }
 
 static void
+test_drain_finishes_retained_tail_frame (void)
+{
+  GstHarness *h = start_decoder (FALSE);
+  static const guint8 expected_identity[NORMAL_INPUTS] = {
+    0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68,
+  };
+  guint delivered = 0;
+  guint i;
+
+  g_print ("== drain finishes retained tail frame ==\n");
+  mpp_mock_dec_set_output_buffers (TRUE);
+  mpp_mock_dec_set_output_paused (TRUE);
+
+  for (i = 0; i < NORMAL_INPUTS; i++) {
+    mpp_mock_dec_plan_output (i, i ? (RK_S64) input_pts (i) : -1,
+        expected_identity[i]);
+    g_assert_cmpint (gst_harness_push (h, make_fixture_input_buffer (
+                h264_p_slice, sizeof (h264_p_slice), input_pts (i))), ==,
+        GST_FLOW_OK);
+  }
+
+  mpp_mock_dec_set_output_paused (FALSE);
+  g_assert_true (wait_for_accounted_outputs (NORMAL_INPUTS));
+  g_assert_true (wait_for_pending_count (h, 1, ACCOUNTING_TIMEOUT_US));
+  g_assert_cmpint (finish_decoder (h), ==, GST_FLOW_OK);
+  g_assert_true (wait_for_pending_count (h, 0, ACCOUNTING_TIMEOUT_US));
+
+  while (TRUE) {
+    GstBuffer *output = gst_harness_try_pull (h);
+    guint8 identity;
+
+    if (!output)
+      break;
+    identity = output_identity (output);
+    if (identity) {
+      g_assert_cmpuint (delivered, <, NORMAL_INPUTS);
+      g_assert_cmpuint (identity, ==, expected_identity[delivered]);
+      delivered++;
+    }
+    gst_buffer_unref (output);
+  }
+  g_print ("drain delivered %u/%u decoded data frames\n", delivered,
+      NORMAL_INPUTS);
+  g_assert_cmpuint (delivered, ==, NORMAL_INPUTS);
+
+  stop_decoder (h);
+  g_print ("drain delivered all %u decoded frames\n", NORMAL_INPUTS);
+}
+
+static void
 test_jpeg_input_timeout_is_retried (void)
 {
   GstHarness *h;
@@ -1374,6 +1424,7 @@ main (int argc, char **argv)
   test_packet_ownership_is_decided_before_send ();
   test_put_packet_result_drives_fullness ();
   test_video_drain_classifies_put_packet_errors ();
+  test_drain_finishes_retained_tail_frame ();
   test_video_drain_failure_survives_concurrent_output_completion ();
   test_jpeg_input_timeout_is_retried ();
   test_jpeg_input_poll_and_dequeue_results_are_preserved ();

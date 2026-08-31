@@ -231,11 +231,38 @@ gst_mpp_dec_stop_task (GstVideoDecoder * decoder, gboolean drain)
 }
 
 static GstFlowReturn
+gst_mpp_dec_flush_ready_frames (GstVideoDecoder * decoder, gboolean finish)
+{
+  GstMppDec *self = GST_MPP_DEC (decoder);
+  GstFlowReturn result = GST_FLOW_OK;
+  GstVideoCodecFrame *frame;
+
+  if (!self->ready_frames)
+    return result;
+
+  while ((frame = g_queue_pop_head (self->ready_frames))) {
+    if (finish) {
+      GstFlowReturn finish_result = gst_video_decoder_finish_frame (decoder, frame);
+
+      if (result == GST_FLOW_OK && finish_result != GST_FLOW_OK)
+        result = finish_result;
+    } else {
+      gst_video_decoder_release_frame (decoder, frame);
+    }
+  }
+
+  g_queue_free (self->ready_frames);
+  self->ready_frames = NULL;
+  return result;
+}
+
+static GstFlowReturn
 gst_mpp_dec_reset (GstVideoDecoder * decoder, gboolean drain, gboolean final)
 {
   GstMppDec *self = GST_MPP_DEC (decoder);
   GstFlowReturn shutdown_result;
   GstFlowReturn result;
+  GstFlowReturn ready_result;
   GList *frames;
 
   if (!drain) {
@@ -268,16 +295,9 @@ gst_mpp_dec_reset (GstVideoDecoder * decoder, gboolean drain, gboolean final)
   self->task_ret = GST_FLOW_OK;
   self->decoded_frames = 0;
 
-  /* Clear the output frame queue, if present */
-  if (self->ready_frames) {
-    GstVideoCodecFrame *f;
-    while (f = g_queue_pop_head(self->ready_frames)) {
-      gst_video_decoder_release_frame (decoder, f);
-    }
-
-    g_queue_free (self->ready_frames);
-    self->ready_frames = NULL;
-  }
+  ready_result = gst_mpp_dec_flush_ready_frames (decoder, drain);
+  if (result == GST_FLOW_OK && ready_result != GST_FLOW_OK)
+    result = ready_result;
 
   /* Clear pending input frames */
   frames = gst_video_decoder_get_frames (decoder);
@@ -1311,6 +1331,11 @@ gst_mpp_dec_loop (GstVideoDecoder * decoder)
     goto info_change;
   }
 
+  if (mpp_frame_get_eos (mframe)) {
+    self->task_ret = gst_mpp_dec_flush_ready_frames (decoder, TRUE);
+    goto out;
+  }
+
   frame = gst_mpp_dec_get_frame (decoder, mpp_frame_get_pts (mframe));
   if (!frame)
     goto no_frame;
@@ -1403,7 +1428,8 @@ out:
   if (mframe) {
     if (mpp_frame_get_eos (mframe)) {
       GST_INFO_OBJECT (self, "got eos");
-      self->task_ret = GST_FLOW_EOS;
+      if (self->task_ret == GST_FLOW_OK)
+        self->task_ret = GST_FLOW_EOS;
     }
 
     if (self->mpp_frame)

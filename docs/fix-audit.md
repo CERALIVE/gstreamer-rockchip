@@ -2126,3 +2126,23 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    diff against pinned MPP 1.5.0-1. The test-only correction adds no MPP API call.
 5. **Reviewer verdict** — `confirmed`. Confirmed across THREE independent oracle review rounds. Round 1 found a genuinely serious defect: the original invalid-PTS+size-heuristic header detector could misclassify real small VCL (decoded picture) frames as parameter-set headers, releasing their GstVideoCodecFrame accounting and causing lost or misattributed decoder output on genuine video data — a real data-corruption-class bug, caught before merge. Round 2 confirmed the replacement (a proper codec-aware AVC/HEVC NAL-type parser, supporting both Annex-B and length-prefixed framing, scoped only to H.264/H.265) is correct and robust, with one remaining test-coverage gap. Round 3 confirmed the gap closed (an 8-frame normal-stream regression restored alongside the 4-frame reordered-identity test). Oldest-orphan consumption, d27ae92/7ffd7f4 preservation, and 066ca39 non-reintroduction all confirmed correct throughout. A real ASAN-detected use-after-free in test infrastructure was also found and fixed as a byproduct. The branch remains open for final
    independent confirmation and must not be self-merged.
+
+### Drain retained decoder tail frame
+
+1. **Provenance SHA** — first-party correction against task baseline
+   `0da5f2c6143a0d93ec30b03e65436fb7ee61db0f`.
+2. **Red/green outputs** — the arm64/bookworm decoder seam plans eight unique fd-backed
+   video outputs, waits until the deliberately one-frame-deferred tail is the sole pending
+   frame, then executes the real decoder finish/drain vfunc. RED at the parent prints
+   `drain delivered 7/8 decoded data frames` because the EOS frame matches and releases
+   the retained tail before reset. GREEN flushes the ready queue on the EOS path through
+   `gst_video_decoder_finish_frame()` and prints `drain delivered all 8 decoded frames`.
+   Mutation check: replacing the EOS queue flush with the parent path restores `7 == 8`.
+3. **Hardware gate** — `hardware-independent`. The mock supplies fd-backed output buffers
+   while the real `GstVideoDecoder` output path, EOS drain, and one-frame queue own delivery.
+4. **MPP ABI closure** — unchanged: no MPP API was added or removed; the existing closure
+   remains empty against pinned MPP 1.5.0-1.
+5. **Reviewer verdict** — `needs-human-review`. This change deliberately touches the same
+   ready-frame/drain area as the confirmed orphan-frame accounting work; hosted CI and an
+   orchestrator-dispatched independent review are still required, and this branch is not
+   self-merged.
