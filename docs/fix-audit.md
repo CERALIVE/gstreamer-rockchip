@@ -1928,6 +1928,10 @@ different default by any of the three fixes; the only new symbol is the internal
 
 ### Decoder no-output input accounting
 
+This row records the initial PR submission. Its header-classification and broad-sweep
+claims were rejected by the first independent review and are superseded by the review
+correction row below; the `d27ae92` oldest-orphan evidence remains valid.
+
 1. **Provenance SHA** — `7d12668d67419041effd3d9129fcb41e4f3e7b77`, first-party
    `tier-a-adapted` correction based on Kelvin Lawson's
    `44578bdd745674d8e3917fe7a44486f5d9d42b17`. The adaptation places the
@@ -1959,6 +1963,48 @@ different default by any of the three fixes; the only new symbol is the internal
 4. **MPP ABI closure** — bookworm resolved 68 referenced-and-present MPP symbols
    against 26 sibling libraries; trixie resolved the same 68 against 23. Both
    reported an empty diff against pinned MPP 1.5.0-1. The fix adds no MPP API call.
-5. **Reviewer verdict** — `needs-human-review`. Reviewer == author. No
-   orchestrator-dispatched independent review has run, and self-directed review is
-   not claimed as F27 evidence; the branch remains open for that review.
+5. **Reviewer verdict** — `needs-fix`. The first orchestrator-dispatched independent
+   oracle review confirmed oldest-orphan consumption, `d27ae92`/`7ffd7f4` preservation,
+   `066ca39` non-reintroduction, and diff hygiene, but rejected the no-output detector.
+   Invalid PTS is a supported picture state, real VCL access units can be at or below
+   128 bytes, and the common base applied that proxy to every codec. The review also
+   rejected the blanket invalid-PTS sweep because decode-order precedence does not prove
+   a reordered picture will never produce output. Both paths could remove the genuine
+   codec frame before output and shift content/PTS metadata onto another frame.
+
+### Decoder parameter-set recognition — review correction
+
+1. **Provenance SHA** — `353602891600ddba82080bd372c1615babeff151`,
+   first-party correction to the independently rejected heuristic in `7d12668d`. The
+   detector is disabled by default and enabled only for negotiated H.264/H.265 framing:
+   Annex-B for `byte-stream`, or length-prefixed `avc`/`avc3`/`hvc1`/`hev1` when avcC or
+   hvcC supplies a supported NAL length size. Every NAL in the access unit must be SPS/PPS
+   for AVC or VPS/SPS/PPS for HEVC. The broad invalid-PTS sweep is removed.
+2. **Red/green outputs** — strengthened focused command:
+   `MPP_DECODER_SEAM_ACCOUNTING_ONLY=1 .../mpp-decoder-seam`. RED against the first
+   submission: real GStreamer AVC VCL fixtures at 24, exactly 128, and 143 bytes plus an
+   SPS/PPS+IDR mixed AU retained only `1/4`; length-prefixed AVC VCL and tiny invalid-PTS
+   VP8/unknown-framing inputs retained `0/1`; an untimestamped VCL frame was already gone
+   before a later match (`0 -> 0`). The reordered stream expected output identities
+   `0x10,0x40,0x20`, but received `0x10,0x20,0x20`, duplicating content under the wrong
+   PTS. GREEN at `35360289`: real H.264 SPS/PPS and H.265 VPS/SPS/PPS fixtures settle at
+   zero for both Annex-B and length-prefixed framing; VCL/mixed negatives retain `4/4`;
+   AVC VCL, unknown H.264 framing, and tiny invalid-PTS H.263/AV1/VP8/VP9/MPEG-4/JPEG
+   inputs each retain `1/1`; untimestamped VCL remains `1 -> 1`. Reordered downstream
+   identities are `0x10,0x40,0x20`; the fourth planned identity `0x30` is explicitly
+   verified on retained frame 2 with PTS `10066666666`, documenting the existing
+   one-frame output queue instead of silently omitting the tail. Isolated mutations
+   restoring the size proxy, broad sweep, or `last_frame` reuse are all killed. Full
+   Meson passed `4/4` in bookworm/GStreamer 1.22 and trixie/GStreamer 1.26; source-contract
+   parity passed both goldens in both suites. ASAN also identified and locked a test-only
+   JPEG setup-order UAF (mock arm now precedes element creation); production was not
+   implicated.
+3. **Hardware gate** — `hardware-independent`. Framing recognition, GstVideoDecoder
+   ownership, reordered frame association, PTS, and fd-backed content identity are all
+   asserted at the mock-MPP boundary. No MPP hardware behavior is approximated.
+4. **MPP ABI closure** — bookworm resolved 68 referenced-and-present MPP symbols against
+   26 sibling libraries; trixie resolved the same 68 against 23. Both reported an empty
+   diff against pinned MPP 1.5.0-1. The correction adds no MPP API call.
+5. **Reviewer verdict** — `needs-human-review`. This correction responds to the first
+   independent `needs-fix` verdict but has not received the required follow-up independent
+   review. It remains open and must not be self-merged.
