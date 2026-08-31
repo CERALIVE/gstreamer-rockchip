@@ -5,6 +5,7 @@
 #include <rockchip/rk_venc_cfg.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -110,6 +111,9 @@ static int enc_plan_intra_armed[ENC_PLAN_CAPACITY];
 #define ENC_BUFFER_MAP_SIZE 4096
 static MockPacket enc_packets[ENC_PACKET_CAPACITY];
 static atomic_uint enc_live_buffers;
+/* One-shot: the next buffer MPP hands out carries a dmafd the CPU cannot map. */
+static atomic_int buffer_unmappable_armed;
+static atomic_uint buffer_unmappable_handed_out;
 static atomic_uint enc_head;
 static atomic_uint enc_tail;
 static atomic_uint frame_set_buffer_count;
@@ -481,6 +485,23 @@ MPP_RET mpp_buffer_group_clear(MppBufferGroup group) {
   (void)group;
   return MPP_OK;
 }
+/*
+ * Reopen a memfd write-only through /proc so the handle MPP publishes cannot be
+ * mmap()ed at all: MAP_SHARED refuses both PROT_WRITE and PROT_READ on an
+ * O_WRONLY description. That is how a CPU-inaccessible DMA buffer presents to
+ * the plugin.
+ *
+ * Read-only would NOT do. gst_buffer_map() routes through
+ * gst_memory_make_mapped(), which silently falls back to copying the memory
+ * when the direct map fails, and that copy only needs a READ map -- so a
+ * read-only fd maps for writing just fine at the buffer level.
+ */
+static int reopen_unmappable(int fd) {
+  char path[64];
+  snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+  return open(path, O_WRONLY | O_CLOEXEC);
+}
+
 MPP_RET mpp_buffer_get_with_tag(MppBufferGroup group, MppBuffer *buffer,
                                 size_t size, const char *tag,
                                 const char *caller) {
@@ -498,6 +519,17 @@ MPP_RET mpp_buffer_get_with_tag(MppBufferGroup group, MppBuffer *buffer,
       close(b->fd);
     free(b);
     return MPP_NOK;
+  }
+  if (atomic_exchange(&buffer_unmappable_armed, 0)) {
+    int blind_fd = reopen_unmappable(b->fd);
+    if (blind_fd < 0) {
+      close(b->fd);
+      free(b);
+      return MPP_NOK;
+    }
+    close(b->fd);
+    b->fd = blind_fd;
+    atomic_fetch_add(&buffer_unmappable_handed_out, 1);
   }
   b->size = size;
   b->data = calloc(1, size ? size : 1);
@@ -1039,6 +1071,12 @@ unsigned mpp_mock_enc_live_packets(void) {
 unsigned mpp_mock_enc_live_buffers(void) {
   return atomic_load(&enc_live_buffers);
 }
+void mpp_mock_arm_unmappable_buffer(void) {
+  atomic_store(&buffer_unmappable_armed, 1);
+}
+unsigned mpp_mock_unmappable_buffers(void) {
+  return atomic_load(&buffer_unmappable_handed_out);
+}
 /* Safe only once no element can still own a packet, i.e. after the harness has
  * been torn down. Callers reclaim explicitly; arming reclaims again so a test
  * that forgets cannot carry an arena into the next one. */
@@ -1160,6 +1198,8 @@ void mpp_mock_reset(void) {
   atomic_store(&enc_live_packets, 0);
   memset(enc_packets, 0, sizeof(enc_packets));
   atomic_store(&enc_live_buffers, 0);
+  atomic_store(&buffer_unmappable_armed, 0);
+  atomic_store(&buffer_unmappable_handed_out, 0);
   memset(enc_plan_length, 0, sizeof(enc_plan_length));
   memset(enc_plan_length_armed, 0, sizeof(enc_plan_length_armed));
   memset(enc_plan_intra, 0, sizeof(enc_plan_intra));

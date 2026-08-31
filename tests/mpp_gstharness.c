@@ -32,6 +32,8 @@ extern unsigned mpp_mock_enc_packet_deinits(void);
 extern unsigned mpp_mock_enc_packet_double_deinits(void);
 extern unsigned mpp_mock_enc_live_packets(void);
 extern unsigned mpp_mock_enc_live_buffers(void);
+extern void mpp_mock_arm_unmappable_buffer(void);
+extern unsigned mpp_mock_unmappable_buffers(void);
 extern void mpp_mock_reset(void);
 
 static atomic_uint reset_output_count;
@@ -405,6 +407,61 @@ GST_START_TEST(test_intra_output_is_marked_as_a_sync_point) {
 }
 GST_END_TEST
 
+/*
+ * A source memory the CPU cannot read at all, standing in for input the
+ * software-conversion fallback cannot touch (a protected or already
+ * exclusively-held buffer). It is not a dmabuf, so the encoder's zero-copy
+ * import declines it and the frame reaches the conversion path, where
+ * gst_video_frame_map(GST_MAP_READ) is the first thing that can fail.
+ */
+#define TEST_TYPE_UNMAPPABLE_ALLOCATOR (test_unmappable_allocator_get_type())
+G_DECLARE_FINAL_TYPE(TestUnmappableAllocator, test_unmappable_allocator, TEST,
+                     UNMAPPABLE_ALLOCATOR, GstAllocator)
+struct _TestUnmappableAllocator {
+  GstAllocator parent;
+};
+G_DEFINE_TYPE(TestUnmappableAllocator, test_unmappable_allocator,
+              GST_TYPE_ALLOCATOR)
+
+static gpointer test_unmappable_map(GstMemory *mem, gsize maxsize,
+                                    GstMapFlags flags) {
+  (void)mem;
+  (void)maxsize;
+  (void)flags;
+  return NULL;
+}
+
+static void test_unmappable_unmap(GstMemory *mem) { (void)mem; }
+
+static GstMemory *test_unmappable_alloc(GstAllocator *allocator, gsize size,
+                                        GstAllocationParams *params) {
+  (void)params;
+  GstMemory *mem = g_new0(GstMemory, 1);
+  gst_memory_init(mem, GST_MEMORY_FLAG_NO_SHARE, allocator, NULL, size, 0, 0,
+                  size);
+  return mem;
+}
+
+static void test_unmappable_free(GstAllocator *allocator, GstMemory *mem) {
+  (void)allocator;
+  g_free(mem);
+}
+
+static void
+test_unmappable_allocator_class_init(TestUnmappableAllocatorClass *klass) {
+  GstAllocatorClass *allocator_class = GST_ALLOCATOR_CLASS(klass);
+  allocator_class->alloc = test_unmappable_alloc;
+  allocator_class->free = test_unmappable_free;
+}
+
+static void test_unmappable_allocator_init(TestUnmappableAllocator *self) {
+  GstAllocator *allocator = GST_ALLOCATOR_CAST(self);
+  allocator->mem_type = "test-unmappable";
+  allocator->mem_map = test_unmappable_map;
+  allocator->mem_unmap = test_unmappable_unmap;
+  GST_OBJECT_FLAG_SET(self, GST_ALLOCATOR_FLAG_CUSTOM_ALLOC);
+}
+
 #define CONVERT_FRAME_WIDTH 320
 #define CONVERT_FRAME_HEIGHT 240
 #define CONVERT_FRAME_SIZE (CONVERT_FRAME_WIDTH * CONVERT_FRAME_HEIGHT * 3 / 2)
@@ -427,6 +484,19 @@ static GstFlowReturn push_conversion_frame(GstHarness *h, GstBuffer *frame) {
   GST_BUFFER_PTS(frame) = 0;
   GST_BUFFER_DURATION(frame) = GST_SECOND / 30;
   return gst_harness_push(h, frame);
+}
+
+/*
+ * A GstVideoFrame map that is never released leaves the memory locked, and a
+ * locked memory refuses a write map. Nothing else in the suite notices a
+ * leaked map, so the conversion paths check it here on the input memory they
+ * were handed.
+ */
+static void assert_memory_is_unmapped(GstMemory *mem) {
+  GstMapInfo info;
+  fail_unless(gst_memory_map(mem, &info, GST_MAP_WRITE),
+              "the conversion left a map on the input memory");
+  gst_memory_unmap(mem, &info);
 }
 
 /*
@@ -457,6 +527,98 @@ GST_START_TEST(test_failed_rotation_leaves_appended_memory_singly_owned) {
 
   gst_harness_teardown(h);
   fail_unless_equals_int(mpp_mock_enc_queued_packets(), 0);
+  fail_unless_equals_int(mpp_mock_enc_live_buffers(), 0);
+}
+GST_END_TEST
+
+/*
+ * When the source frame cannot be mapped there is nothing to copy from, so the
+ * MPP buffer still holds whatever the allocator last left in it. Falling
+ * through as "software converted" hands that uninitialised memory to the
+ * encoder, which is why the submission count is read after teardown: by then
+ * the encoder task has drained, so a submitted frame cannot hide behind the
+ * race between the pushing thread and the task that consumes the queue.
+ */
+GST_START_TEST(test_unreadable_source_frame_fails_the_conversion) {
+  mpp_mock_reset();
+  GstHarness *h = start_conversion_harness(0);
+
+  GstAllocator *unmappable = g_object_new(TEST_TYPE_UNMAPPABLE_ALLOCATOR, NULL);
+  GstBuffer *frame = gst_buffer_new();
+  gst_buffer_append_memory(
+      frame, gst_allocator_alloc(unmappable, CONVERT_FRAME_SIZE, NULL));
+
+  GstFlowReturn ret = push_conversion_frame(h, frame);
+
+  fail_unless_equals_int(ret, GST_FLOW_NOT_NEGOTIATED);
+  assert_no_frames_left_pending(h->element);
+
+  gst_harness_teardown(h);
+  gst_object_unref(unmappable);
+  g_print("unreadable source: flow=%s mpp-frames=%u\n", gst_flow_get_name(ret),
+          mpp_mock_enc_queued_packets());
+  fail_unless_equals_int(mpp_mock_enc_queued_packets(), 0);
+  fail_unless_equals_int(mpp_mock_enc_live_buffers(), 0);
+}
+GST_END_TEST
+
+/*
+ * The mirror case: the source maps but the destination MPP buffer cannot be
+ * mapped by the CPU, so gst_video_frame_copy() never runs. The failure is one
+ * level deeper than the source case -- the outer map succeeded -- and the
+ * fall-through is just as silent.
+ *
+ * The buffer must be unmappable rather than merely read-only: gst_buffer_map()
+ * goes through gst_memory_make_mapped(), which falls back to copying the
+ * memory when the direct map fails, and that copy only needs a READ map. A
+ * read-only destination therefore write-maps successfully and proves nothing.
+ */
+GST_START_TEST(test_unwritable_destination_frame_fails_the_conversion) {
+  mpp_mock_reset();
+  GstHarness *h = start_conversion_harness(0);
+
+  /* Armed here so the buffer gst_mpp_enc_convert() allocates for this frame is
+   * the unmappable one; handle_frame() converts on the pushing thread, so no
+   * other allocation can slip in between. */
+  mpp_mock_arm_unmappable_buffer();
+  GstBuffer *frame = gst_buffer_new_allocate(NULL, CONVERT_FRAME_SIZE, NULL);
+  GstMemory *input = gst_memory_ref(gst_buffer_peek_memory(frame, 0));
+  GstFlowReturn ret = push_conversion_frame(h, frame);
+
+  fail_unless_equals_int(mpp_mock_unmappable_buffers(), 1);
+  fail_unless_equals_int(ret, GST_FLOW_NOT_NEGOTIATED);
+  assert_memory_is_unmapped(input);
+  gst_memory_unref(input);
+  assert_no_frames_left_pending(h->element);
+
+  gst_harness_teardown(h);
+  g_print("unwritable destination: flow=%s mpp-frames=%u\n",
+          gst_flow_get_name(ret), mpp_mock_enc_queued_packets());
+  fail_unless_equals_int(mpp_mock_enc_queued_packets(), 0);
+  fail_unless_equals_int(mpp_mock_enc_live_buffers(), 0);
+}
+GST_END_TEST
+
+/*
+ * The control for the two failure cases: a conversion that actually runs must
+ * still leave both frames unmapped. Only this path reaches the unmap after the
+ * copy, so without it a leaked map there would go unnoticed by the whole suite.
+ */
+GST_START_TEST(test_completed_software_conversion_releases_its_frame_maps) {
+  mpp_mock_reset();
+  GstHarness *h = start_conversion_harness(0);
+
+  GstBuffer *frame = gst_buffer_new_allocate(NULL, CONVERT_FRAME_SIZE, NULL);
+  GstMemory *input = gst_memory_ref(gst_buffer_peek_memory(frame, 0));
+  GstFlowReturn ret = push_conversion_frame(h, frame);
+
+  fail_unless_equals_int(ret, GST_FLOW_OK);
+  assert_memory_is_unmapped(input);
+  gst_memory_unref(input);
+  g_print("completed conversion: flow=%s input memory remappable\n",
+          gst_flow_get_name(ret));
+
+  gst_harness_teardown(h);
   fail_unless_equals_int(mpp_mock_enc_live_buffers(), 0);
 }
 GST_END_TEST
@@ -1050,6 +1212,10 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_zero_length_rc_drop_is_not_pushed_when_copying);
   tcase_add_test(tc, test_intra_output_is_marked_as_a_sync_point);
   tcase_add_test(tc, test_failed_rotation_leaves_appended_memory_singly_owned);
+  tcase_add_test(tc, test_unreadable_source_frame_fails_the_conversion);
+  tcase_add_test(tc, test_unwritable_destination_frame_fails_the_conversion);
+  tcase_add_test(tc,
+                 test_completed_software_conversion_releases_its_frame_maps);
   tcase_add_test(
       tc, test_runtime_property_snapshot_is_coherent_and_eventually_applied);
   tcase_add_test(tc, test_encoder_reset_drains_old_packets_before_new_session);
