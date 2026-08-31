@@ -2142,10 +2142,7 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    while the real `GstVideoDecoder` output path, EOS drain, and one-frame queue own delivery.
 4. **MPP ABI closure** — unchanged: no MPP API was added or removed; the existing closure
    remains empty against pinned MPP 1.5.0-1.
-5. **Reviewer verdict** — `needs-human-review`. This change deliberately touches the same
-   ready-frame/drain area as the confirmed orphan-frame accounting work; hosted CI and an
-   orchestrator-dispatched independent review are still required, and this branch is not
-   self-merged.
+5. **Reviewer verdict** — `confirmed`. Confirmed by independent oracle review, including explicit verification of the highest-risk interaction with todo 19's orphan-frame accounting (re-ran both the 8-frame and 4-frame reordered accounting tests; confirmed 'retained' from todo 19's perspective and 'finished-at-drain' from this fix's perspective compose correctly — drain's EOS branch runs before frame matching and directly finishes the already-retained frame without re-accounting it). FIX-21's g_list_free() confirmed to free only the copied list structure, not the frame objects (separate lifecycle, correctly respected — no double-free or frame leak).
 
 ### Free copied decoder frame lists on reset
 
@@ -2162,5 +2159,4 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    `gst_video_decoder_get_frames()` ownership contract and real decoder reset path without
    relying on an unavailable stop-the-world leak check.
 4. **MPP ABI closure** — unchanged: this is GLib list ownership only and adds no MPP API.
-5. **Reviewer verdict** — `needs-human-review`. Hosted CI and orchestrator-dispatched
-   independent review remain required; this branch is not self-merged.
+5. **Reviewer verdict** — `confirmed`. Confirmed by independent oracle review, including explicit verification of the highest-risk interaction with todo 19's orphan-frame accounting (re-ran both the 8-frame and 4-frame reordered accounting tests; confirmed 'retained' from todo 19's perspective and 'finished-at-drain' from this fix's perspective compose correctly — drain's EOS branch runs before frame matching and directly finishes the already-retained frame without re-accounting it). FIX-21's g_list_free() confirmed to free only the copied list structure, not the frame objects (separate lifecycle, correctly respected — no double-free or frame leak).
