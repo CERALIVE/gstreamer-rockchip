@@ -1560,7 +1560,13 @@ gst_mpp_enc_convert (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
           self->mpp_cfg))
     goto err;
 
+  /*
+   * Invariant: out_mem names a reference this function still owns. Appending
+   * transfers it to outbuf, so clearing it is what lets convert: and err:
+   * release it without knowing which path reached them.
+   */
   gst_buffer_append_memory (outbuf, out_mem);
+  out_mem = NULL;
 
   /* Keep a ref of the original memory */
   gst_buffer_append_memory (outbuf, gst_memory_ref (in_mem));
@@ -1578,11 +1584,14 @@ convert:
     goto err;
 
   gst_buffer_append_memory (outbuf, out_mem);
+  out_mem = NULL;
 
 #ifdef HAVE_RGA
+  /* outbuf owns the memory now, so the blit borrows it back rather than
+   * keeping a second name for it alive across the error paths below. */
   if (gst_mpp_use_rga () &&
-      gst_mpp_rga_convert (inbuf, &src_info, out_mem, &dst_info,
-          rotation)) {
+      gst_mpp_rga_convert (inbuf, &src_info,
+          gst_buffer_peek_memory (outbuf, 0), &dst_info, rotation)) {
     GST_DEBUG_OBJECT (self, "using RGA converted buffer");
     goto out;
   }

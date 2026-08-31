@@ -405,6 +405,62 @@ GST_START_TEST(test_intra_output_is_marked_as_a_sync_point) {
 }
 GST_END_TEST
 
+#define CONVERT_FRAME_WIDTH 320
+#define CONVERT_FRAME_HEIGHT 240
+#define CONVERT_FRAME_SIZE (CONVERT_FRAME_WIDTH * CONVERT_FRAME_HEIGHT * 3 / 2)
+
+static GstHarness *start_conversion_harness(gint rotation) {
+  GstHarness *h = gst_harness_new("mpph264enc");
+  fail_unless(h != NULL);
+  g_object_set(h->element, "bitrate", 500, "rc-mode", 1, "zero-copy-pkt", FALSE,
+               NULL);
+  if (rotation)
+    g_object_set(h->element, "rotation", rotation, NULL);
+  gst_harness_set_src_caps_str(h, "video/x-raw,format=NV12,width=320,"
+                                  "height=240,framerate=30/1");
+  gst_harness_set_drop_buffers(h, TRUE);
+  gst_harness_play(h);
+  return h;
+}
+
+static GstFlowReturn push_conversion_frame(GstHarness *h, GstBuffer *frame) {
+  GST_BUFFER_PTS(frame) = 0;
+  GST_BUFFER_DURATION(frame) = GST_SECOND / 30;
+  return gst_harness_push(h, frame);
+}
+
+/*
+ * gst_mpp_enc_convert() appends the freshly allocated MPP memory to the output
+ * buffer before it knows the conversion will work, so the buffer owns that
+ * memory from then on. A rotation the RGA blit cannot service -- RGA is
+ * compiled in, so set_format accepts the property, but no RGA hardware exists
+ * here so the blit fails -- lands on the error path with the append already
+ * done. Releasing the local reference there is a second release of memory the
+ * buffer is about to release itself.
+ *
+ * The flow return is an error either way, so what marks the defect is not an
+ * assertion here but GStreamer's own parent tracking: gst_buffer_append_memory()
+ * registers the buffer as a parent of the memory, and finalising the memory
+ * while that registration stands raises "object finalizing but still has 1
+ * parents", which gst_check turns into a failure.
+ */
+GST_START_TEST(test_failed_rotation_leaves_appended_memory_singly_owned) {
+  mpp_mock_reset();
+  GstHarness *h = start_conversion_harness(90);
+
+  GstFlowReturn ret = push_conversion_frame(
+      h, gst_buffer_new_allocate(NULL, CONVERT_FRAME_SIZE, NULL));
+
+  fail_unless_equals_int(ret, GST_FLOW_NOT_NEGOTIATED);
+  assert_no_frames_left_pending(h->element);
+  g_print("failed rotation: flow=%s\n", gst_flow_get_name(ret));
+
+  gst_harness_teardown(h);
+  fail_unless_equals_int(mpp_mock_enc_queued_packets(), 0);
+  fail_unless_equals_int(mpp_mock_enc_live_buffers(), 0);
+}
+GST_END_TEST
+
 static void check_factory(const char *name, const char *property) {
   GstElementFactory *f = gst_element_factory_find(name);
   fail_unless(f != NULL, "missing %s", name);
@@ -993,6 +1049,7 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_zero_length_rc_drop_is_not_pushed_downstream);
   tcase_add_test(tc, test_zero_length_rc_drop_is_not_pushed_when_copying);
   tcase_add_test(tc, test_intra_output_is_marked_as_a_sync_point);
+  tcase_add_test(tc, test_failed_rotation_leaves_appended_memory_singly_owned);
   tcase_add_test(
       tc, test_runtime_property_snapshot_is_coherent_and_eventually_applied);
   tcase_add_test(tc, test_encoder_reset_drains_old_packets_before_new_session);
