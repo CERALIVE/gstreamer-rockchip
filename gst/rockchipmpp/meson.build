@@ -35,6 +35,8 @@ mock_mpp = shared_library('mppmock', '../../tests/mock_mpp.c',
 
 gstcheck_dep = dependency('gstreamer-check-1.0', version : gst_req)
 mpp_harness = executable('mpp-gstharness', '../../tests/mpp_gstharness.c',
+  c_args : gst_rockchip_args,
+  include_directories : configinc,
   dependencies : [gst_dep, gstvideo_dep, gstcheck_dep, mpp_dep],
   link_with : mock_mpp)
 

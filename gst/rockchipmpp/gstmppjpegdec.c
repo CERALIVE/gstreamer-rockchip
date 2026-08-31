@@ -72,9 +72,15 @@ static GstStaticPadTemplate gst_mpp_jpeg_dec_sink_template =
     GST_STATIC_CAPS ("image/jpeg," "parsed = (boolean) true" ";")
     );
 
+#ifdef HAVE_RGA
+#define MPP_JPEGDEC_CONVERSION_FORMATS \
+    ", BGR16, RGB16, ABGR, ARGB, BGRA, RGBA, xBGR, xRGB, BGRx, RGBx"
+#else
+#define MPP_JPEGDEC_CONVERSION_FORMATS ""
+#endif
+
 #define MPP_JPEGDEC_FORMATS \
-    MPP_DEC_FORMATS ", BGR16, RGB16, " \
-    "ABGR, ARGB, BGRA, RGBA, xBGR, xRGB, BGRx, RGBx"
+    MPP_DEC_FORMATS MPP_JPEGDEC_CONVERSION_FORMATS
 
 static GstStaticPadTemplate gst_mpp_jpeg_dec_src_template =
     GST_STATIC_PAD_TEMPLATE ("src",

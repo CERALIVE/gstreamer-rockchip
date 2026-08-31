@@ -1,3 +1,5 @@
+#include "config.h"
+
 #include <gst/check/gstcheck.h>
 #include <gst/check/gstharness.h>
 #include <gst/video/video.h>
@@ -1107,7 +1109,60 @@ GST_START_TEST(test_encoder_reset_drains_old_packets_before_new_session) {
   gst_harness_teardown(h);
 }
 GST_END_TEST
+static gboolean
+format_is_expected (const gchar * format, const gchar * const * expected,
+    gsize expected_len)
+{
+  for (gsize i = 0; i < expected_len; i++) {
+    if (g_str_equal (format, expected[i]))
+      return TRUE;
+  }
+
+  return FALSE;
+}
+
+static void
+assert_src_template_formats (GstElement * element,
+    const gchar * const * expected, gsize expected_len)
+{
+  static const gchar * const all_formats[] = {
+    "NV12", "NV16", "NV12_10LE40", "NV16_10LE40", "NV21", "I420",
+    "YV12", "NV61", "BGR16", "RGB16", "RGB", "BGR", "RGBA", "BGRA",
+    "RGBx", "BGRx", "ABGR", "ARGB", "xBGR", "xRGB",
+  };
+  GstPad *src = gst_element_get_static_pad (element, "src");
+  GstCaps *caps;
+
+  fail_unless (src != NULL);
+  caps = gst_pad_get_pad_template_caps (src);
+  fail_unless (caps != NULL);
+
+  for (gsize i = 0; i < G_N_ELEMENTS (all_formats); i++) {
+    gchar *description = g_strdup_printf ("video/x-raw,format=%s", all_formats[i]);
+    GstCaps *format_caps = gst_caps_from_string (description);
+    gboolean advertised = gst_caps_can_intersect (caps, format_caps);
+    gboolean wanted = format_is_expected (all_formats[i], expected, expected_len);
+
+    fail_unless (advertised == wanted,
+        "%s caps %s %s but build deliverability requires it to be %s",
+        GST_OBJECT_NAME (element), all_formats[i],
+        advertised ? "advertise" : "omit", wanted ? "advertised" : "omitted");
+    gst_caps_unref (format_caps);
+    g_free (description);
+  }
+
+  gst_caps_unref (caps);
+  gst_object_unref (src);
+}
+
 GST_START_TEST(test_jpeg_caps_with_harness) {
+  static const gchar * const expected_formats[] = {
+    "NV12", "NV16", "NV12_10LE40", "NV16_10LE40",
+#ifdef HAVE_RGA
+    "NV21", "I420", "YV12", "NV61", "BGR16", "RGB16", "RGB", "BGR",
+    "RGBA", "BGRA", "RGBx", "BGRx", "ABGR", "ARGB", "xBGR", "xRGB",
+#endif
+  };
   GstHarness *h = gst_harness_new_empty();
   fail_unless(h != NULL);
   GstElement *e = gst_element_factory_make("mppjpegdec", NULL);
@@ -1122,6 +1177,8 @@ GST_START_TEST(test_jpeg_caps_with_harness) {
   fail_unless(gst_caps_can_intersect(caps, nv12));
   fail_unless(gst_caps_can_intersect(caps, nv12_range));
   fail_unless(gst_caps_is_fixed(caps) == FALSE);
+  assert_src_template_formats(e, expected_formats,
+      G_N_ELEMENTS(expected_formats));
   gst_caps_unref(nv12);
   gst_caps_unref(nv12_range);
   gst_caps_unref(caps);

@@ -2160,3 +2160,22 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    relying on an unavailable stop-the-world leak check.
 4. **MPP ABI closure** — unchanged: this is GLib list ownership only and adds no MPP API.
 5. **Reviewer verdict** — `confirmed`. Confirmed by independent oracle review, including explicit verification of the highest-risk interaction with todo 19's orphan-frame accounting (re-ran both the 8-frame and 4-frame reordered accounting tests; confirmed 'retained' from todo 19's perspective and 'finished-at-drain' from this fix's perspective compose correctly — drain's EOS branch runs before frame matching and directly finishes the already-retained frame without re-accounting it). FIX-21's g_list_free() confirmed to free only the copied list structure, not the frame objects (separate lifecycle, correctly respected — no double-free or frame leak).
+
+### Restrict JPEG conversion caps to RGA builds
+
+1. **Provenance SHA** — first-party correction against task baseline
+   `ee2df5dd13d5a5c5774a0fd35a123779b9f64dbc`.
+2. **Red/green outputs** — the arm64/bookworm harness is configured with
+   `-Drga=disabled` and runs `GST_CHECKS=test_jpeg_caps_with_harness`. The deliberate
+   unconditional-cap mutant fails RED with `mppjpegdec0 caps BGR16 advertise but build
+   deliverability requires it to be omitted`. GREEN omits BGR16, RGB16, and all eight
+   32-bit RGB conversion formats while retaining the base decoder formats. The normal
+   RGA-enabled bookworm and trixie legs each pass the exact template-format assertion.
+3. **Hardware gate** — `hardware-independent`. The assertion reads the registered
+   `mppjpegdec` source pad template under the same Meson feature configuration that
+   compiled the conversion path.
+4. **MPP ABI closure** — unchanged: this is static caps construction only and introduces
+   no MPP API call; the closure remains empty against pinned MPP 1.5.0-1.
+5. **Reviewer verdict** — `needs-human-review`. Self-mutation coverage is not an
+   independent F27 review; this row remains for orchestrator-dispatched review and is not
+   self-approved or self-merged.
