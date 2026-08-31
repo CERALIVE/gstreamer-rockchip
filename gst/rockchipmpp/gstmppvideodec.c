@@ -267,7 +267,8 @@ gst_mpp_video_dec_poll_mpp_frame (GstVideoDecoder * decoder, gint timeout_ms)
 }
 
 static gboolean
-gst_mpp_video_dec_shutdown (GstVideoDecoder * decoder, gboolean drain)
+gst_mpp_video_dec_shutdown (GstVideoDecoder * decoder, gboolean drain,
+    GstFlowReturn * shutdown_result)
 {
   GstMppDec *mppdec = GST_MPP_DEC (decoder);
   MppPacket mpkt;
@@ -300,7 +301,7 @@ gst_mpp_video_dec_shutdown (GstVideoDecoder * decoder, gboolean drain)
   GST_ERROR_OBJECT (decoder, "timed out waiting for decoder input capacity");
 
 error:
-  mppdec->task_ret = GST_FLOW_ERROR;
+  *shutdown_result = GST_FLOW_ERROR;
   mppdec->mpi->reset (mppdec->mpp_ctx);
   mpp_packet_deinit (&mpkt);
   return FALSE;

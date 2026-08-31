@@ -202,18 +202,19 @@ gst_mpp_dec_get_property (GObject * object,
   }
 }
 
-static void
+static GstFlowReturn
 gst_mpp_dec_stop_task (GstVideoDecoder * decoder, gboolean drain)
 {
   GstMppDecClass *klass = GST_MPP_DEC_GET_CLASS (decoder);
+  GstFlowReturn shutdown_result = GST_FLOW_OK;
 
   if (!GST_MPP_DEC_TASK_STARTED (decoder))
-    return;
+    return shutdown_result;
 
   GST_DEBUG_OBJECT (decoder, "stopping decoding thread");
 
   GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
-  if (klass->shutdown && klass->shutdown (decoder, drain)) {
+  if (klass->shutdown && klass->shutdown (decoder, drain, &shutdown_result)) {
     /* Wait for task thread to pause */
     GstTask *task = decoder->srcpad->task;
     if (task) {
@@ -226,12 +227,14 @@ gst_mpp_dec_stop_task (GstVideoDecoder * decoder, gboolean drain)
 
   gst_pad_stop_task (decoder->srcpad);
   GST_VIDEO_DECODER_STREAM_LOCK (decoder);
+  return shutdown_result;
 }
 
 static GstFlowReturn
 gst_mpp_dec_reset (GstVideoDecoder * decoder, gboolean drain, gboolean final)
 {
   GstMppDec *self = GST_MPP_DEC (decoder);
+  GstFlowReturn shutdown_result;
   GstFlowReturn result;
   GList *frames;
 
@@ -247,9 +250,11 @@ gst_mpp_dec_reset (GstVideoDecoder * decoder, gboolean drain, gboolean final)
   self->flushing = TRUE;
   self->draining = drain;
 
-  gst_mpp_dec_stop_task (decoder, drain);
+  shutdown_result = gst_mpp_dec_stop_task (decoder, drain);
 
   result = self->task_ret == GST_FLOW_EOS ? GST_FLOW_OK : self->task_ret;
+  if (shutdown_result != GST_FLOW_OK)
+    result = shutdown_result;
   self->flushing = final;
   self->draining = FALSE;
 

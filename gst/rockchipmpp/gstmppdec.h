@@ -112,7 +112,8 @@ struct _GstMppDecClass
     MPP_RET (*send_mpp_packet) (GstVideoDecoder * decoder,
       MppPacket mpkt, gint timeout_ms);
     MppFrame (*poll_mpp_frame) (GstVideoDecoder * decoder, gint timeout_ms);
-    gboolean (*shutdown) (GstVideoDecoder * decoder, gboolean drain);
+    gboolean (*shutdown) (GstVideoDecoder * decoder, gboolean drain,
+      GstFlowReturn * shutdown_result);
 };
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (GstMppDec, gst_object_unref);

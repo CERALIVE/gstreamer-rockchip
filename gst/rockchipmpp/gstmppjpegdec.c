@@ -444,7 +444,8 @@ gst_mpp_jpeg_dec_poll_mpp_frame (GstVideoDecoder * decoder, gint timeout_ms)
 }
 
 static gboolean
-gst_mpp_jpeg_dec_shutdown (GstVideoDecoder * decoder, gboolean drain)
+gst_mpp_jpeg_dec_shutdown (GstVideoDecoder * decoder, gboolean drain,
+    GstFlowReturn * shutdown_result UNUSED)
 {
   GstMppJpegDec *self = GST_MPP_JPEG_DEC (decoder);
   GstMppDec *mppdec = GST_MPP_DEC (decoder);

@@ -59,7 +59,8 @@ Every fix row appended by later todos must contain exactly these five fields:
 ### Bounded video-decoder EOS submission
 
 1. **Provenance SHA** — first-party correction against task baseline
-   `0a8de6751ffd16c340a4f7683b3115ad35b0a891`; the fix commit is the commit containing this row.
+   `0a8de6751ffd16c340a4f7683b3115ad35b0a891`; initial fix `18bce5f5c8f64fe877c6e24fba13cbe012857967`,
+   with the independent-review race correction in the commit containing this updated row.
 2. **Red/green outputs** — focused arm64/bookworm command:
    `timeout 10s .../mpp-decoder-seam`. RED at the baseline after the mock accepted an EOS only
    after three `MPP_ERR_BUFFER_FULL` responses, then returned persistent `MPP_NOK`: the process
@@ -70,13 +71,22 @@ Every fix row appended by later todos must contain exactly these five fields:
    permanent path made one and returned `GST_FLOW_ERROR` inside the one-second semantic bound.
    Mutation check: retrying every MPP error failed with `96 == 2`, proving the test rejects a
    bounded loop that still misclassifies permanent errors as backpressure.
+   Independent review then found that the output task could overwrite the shared `task_ret`
+   after shutdown chose failure but before reset captured it. A deterministic two-thread repro
+   paused MPP reset after the failure decision, completed two queued outputs, and observed RED
+   on the initial fix: `call.result == GST_FLOW_ERROR: (0 == -5)`. GREEN carries shutdown's
+   result through a stack-local out parameter owned by the reset call:
+   `drain failure survived two concurrent output completions`. Removing that handoff makes the
+   direct failure assertion red again (`0 == -5`).
 3. **Hardware gate** — `hardware-independent`. The mock drives the subclass shutdown vfunc and
    base-class finish result through the same MPP API and GstVideoDecoder call chain as hardware.
 4. **MPP ABI closure** — baseline and fix both report 68 referenced-and-present MPP symbols;
    `bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so` reports an empty diff
    against pinned MPP 1.5.0-1.
-5. **Reviewer verdict** — `needs-human-review`. Reviewer == author; no self-review is counted
-   toward F27.
+5. **Reviewer verdict** — `needs-human-review`. Independent review correctly returned
+   `needs-fix` on the initial shared-`task_ret` handoff. The dedicated shutdown-result correction
+   and its race test require a fresh independent review; implementer mutation testing does not
+   satisfy F27.
 
 ### Runtime resolution drain before geometry swap
 

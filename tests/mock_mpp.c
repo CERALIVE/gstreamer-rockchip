@@ -162,6 +162,9 @@ static atomic_uint dec_queued;
 static atomic_uint dec_outputs;
 static atomic_uint dec_eos_seen;
 static atomic_uint dec_reset_calls;
+static atomic_int dec_reset_pause_armed;
+static atomic_int dec_reset_pause_entered;
+static atomic_int dec_reset_pause_release;
 static atomic_uint dec_put_calls;
 static atomic_uint dec_buffer_full_remaining;
 static atomic_int dec_put_terminal;
@@ -605,6 +608,11 @@ static MPP_RET mock_reset(MppCtx c) {
   (void)c;
   atomic_store(&jpeg_block_input_poll_release, 1);
   atomic_fetch_add(&dec_reset_calls, 1);
+  if (atomic_exchange(&dec_reset_pause_armed, 0)) {
+    atomic_store(&dec_reset_pause_entered, 1);
+    while (!atomic_load(&dec_reset_pause_release))
+      usleep(100);
+  }
   atomic_fetch_add(&enc_reset_generation, 1);
   atomic_store(&enc_reset_seen, 1);
   atomic_store(&enc_release_limit, UINT32_MAX);
@@ -1320,6 +1328,9 @@ void mpp_mock_dec_arm(unsigned width, unsigned height) {
   atomic_store(&dec_outputs, 0);
   atomic_store(&dec_eos_seen, 0);
   atomic_store(&dec_reset_calls, 0);
+  atomic_store(&dec_reset_pause_armed, 0);
+  atomic_store(&dec_reset_pause_entered, 0);
+  atomic_store(&dec_reset_pause_release, 1);
   atomic_store(&dec_put_calls, 0);
   atomic_store(&dec_buffer_full_remaining, 0);
   atomic_store(&dec_put_terminal, MPP_OK);
@@ -1395,6 +1406,17 @@ void mpp_mock_dec_set_put_result(unsigned buffer_full_count,
 unsigned mpp_mock_dec_put_calls(void) { return atomic_load(&dec_put_calls); }
 unsigned mpp_mock_dec_reset_calls(void) {
   return atomic_load(&dec_reset_calls);
+}
+void mpp_mock_dec_pause_next_reset(void) {
+  atomic_store(&dec_reset_pause_entered, 0);
+  atomic_store(&dec_reset_pause_release, 0);
+  atomic_store(&dec_reset_pause_armed, 1);
+}
+unsigned mpp_mock_dec_reset_paused(void) {
+  return (unsigned)atomic_load(&dec_reset_pause_entered);
+}
+void mpp_mock_dec_resume_reset(void) {
+  atomic_store(&dec_reset_pause_release, 1);
 }
 void mpp_mock_dec_set_next_packet_has_buffer(int has_buffer) {
   atomic_store(&dec_next_packet_has_buffer, !!has_buffer);

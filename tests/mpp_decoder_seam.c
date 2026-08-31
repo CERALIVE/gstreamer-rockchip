@@ -30,6 +30,9 @@ void mpp_mock_dec_set_frame_format (MppFrameFormat format);
 void mpp_mock_dec_set_put_result (unsigned buffer_full_count, MPP_RET terminal);
 unsigned mpp_mock_dec_put_calls (void);
 unsigned mpp_mock_dec_reset_calls (void);
+void mpp_mock_dec_pause_next_reset (void);
+unsigned mpp_mock_dec_reset_paused (void);
+void mpp_mock_dec_resume_reset (void);
 void mpp_mock_dec_set_next_packet_has_buffer (int has_buffer);
 unsigned mpp_mock_dec_packet_buffer_queries (void);
 unsigned mpp_mock_dec_packet_post_send_accesses (void);
@@ -763,6 +766,46 @@ finish_decoder_thread (gpointer data)
 }
 
 static void
+test_video_drain_failure_survives_concurrent_output_completion (void)
+{
+  DecoderFinishCall call = { 0, };
+  GstHarness *h = start_decoder (FALSE);
+  GThread *thread;
+  gint64 deadline;
+
+  g_print ("== video drain failure versus concurrent output ==\n");
+  mpp_mock_dec_set_output_buffers (TRUE);
+  mpp_mock_dec_set_output_paused (TRUE);
+  mpp_mock_dec_plan_output (0, -1, 0x71);
+  mpp_mock_dec_plan_output (1, (RK_S64) input_pts (1), 0x72);
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (0)), ==, GST_FLOW_OK);
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (1)), ==, GST_FLOW_OK);
+  g_assert_cmpuint (mpp_mock_dec_queued (), ==, 2);
+
+  mpp_mock_dec_set_put_result (0, MPP_NOK);
+  mpp_mock_dec_pause_next_reset ();
+  call.h = h;
+  thread = g_thread_new ("video-drain-race", finish_decoder_thread, &call);
+  deadline = g_get_monotonic_time () + G_USEC_PER_SEC;
+  while (!mpp_mock_dec_reset_paused () && g_get_monotonic_time () < deadline)
+    g_usleep (1000);
+  g_assert_true (mpp_mock_dec_reset_paused ());
+
+  mpp_mock_dec_set_output_paused (FALSE);
+  g_assert_true (wait_for_accounted_outputs (2));
+  mpp_mock_dec_resume_reset ();
+
+  deadline = g_get_monotonic_time () + G_USEC_PER_SEC;
+  while (!g_atomic_int_get (&call.done) && g_get_monotonic_time () < deadline)
+    g_usleep (1000);
+  g_assert_true (g_atomic_int_get (&call.done));
+  g_thread_join (thread);
+  g_assert_cmpint (call.result, ==, GST_FLOW_ERROR);
+  g_print ("drain failure survived two concurrent output completions\n");
+  stop_decoder (h);
+}
+
+static void
 test_jpeg_blocked_drain_is_cancelled_by_flush (void)
 {
   DecoderFinishCall call = { 0, };
@@ -1299,6 +1342,7 @@ main (int argc, char **argv)
   test_packet_ownership_is_decided_before_send ();
   test_put_packet_result_drives_fullness ();
   test_video_drain_classifies_put_packet_errors ();
+  test_video_drain_failure_survives_concurrent_output_completion ();
   test_jpeg_input_timeout_is_retried ();
   test_jpeg_input_poll_and_dequeue_results_are_preserved ();
   test_jpeg_blocked_drain_is_cancelled_by_flush ();
