@@ -12,6 +12,25 @@ Every fix row appended by later todos must contain exactly these five fields:
 
 ## Rows
 
+### ab2e7d1f2985167a3a242726c001ae47452ae0e4 — flush cancellation and bounded encoder drain
+
+1. **Provenance SHA** — first-party correction against task baseline
+   `ab2e7d1f2985167a3a242726c001ae47452ae0e4`; the fix commit is the commit containing this row.
+2. **Red/green outputs** — focused command:
+   `GST_CHECKS=test_flush_wakes_pending_full_frame .../mpp-gstharness` in the arm64 bookworm
+   container. RED with the production source restored from the baseline, and again with the
+   reset broadcast removed: `pending-full frame missed the flush wake deadline` after 1.07 s.
+   GREEN with the correction: `Checks: 1, Failures: 0, Errors: 0`; ten consecutive focused runs
+   passed. Full `meson test -C build --print-errorlogs` passed 3/3 in both bookworm/GStreamer 1.22
+   and trixie/GStreamer 1.26. The test uses a one-second wake deadline and an independent
+   ten-second process alarm; a hang is a failure, never a delayed pass. ThreadSanitizer compiled
+   but could not start under qemu-user: `unsupported VMA range; Found 47 - Supported 39, 42 and
+   48`. The deterministic queue-full/wake ordering assertion is the substitute.
+3. **Hardware gate** — `hardware-independent`.
+4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so`
+   reported 68 referenced-and-present MPP symbols and an empty closure diff in both suites.
+5. **Reviewer verdict** — `needs-human-review`.
+
 All three rows below were produced in a native-headers `debian:bookworm-slim`
 aarch64 container with the pinned MPP 1.5.0-1 / RGA 2.2.0-1 packages, built with
 the same feature flags CI and `debian/rules` use

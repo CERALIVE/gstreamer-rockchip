@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <rockchip/rk_mpi_cmd.h>
 #include <stdatomic.h>
+#include <unistd.h>
 extern int mpp_mock_last_cfg_s32(const char *name);
 extern int64_t mpp_mock_enc_cfg_record_value(unsigned index, const char *name);
 extern unsigned mpp_mock_enc_cfg_record_count(void);
@@ -53,6 +54,21 @@ typedef struct {
   atomic_int failed;
 } PropertyHammer;
 
+typedef struct {
+  GstHarness *harness;
+  guint frame_index;
+  atomic_int started;
+  atomic_int done;
+  GstFlowReturn result;
+} BlockingPush;
+
+typedef struct {
+  GstHarness *harness;
+  atomic_int started;
+  atomic_int done;
+  gboolean result;
+} FlushStart;
+
 /* gst_mpp_enc_handle_frame() only queues the frame and broadcasts; the
  * mpp_frame_set_buffer() call happens later on the encoder's srcpad task
  * thread. Sampling the counter straight after gst_harness_push() therefore
@@ -75,6 +91,46 @@ static gboolean wait_for_uint(unsigned (*read_value)(void), unsigned want) {
     g_usleep(1000);
   }
   return TRUE;
+}
+
+static gboolean wait_for_atomic(atomic_int *value, gint64 timeout_us) {
+  gint64 deadline = g_get_monotonic_time() + timeout_us;
+  while (!atomic_load(value)) {
+    if (g_get_monotonic_time() >= deadline)
+      return FALSE;
+    g_usleep(1000);
+  }
+  return TRUE;
+}
+
+static unsigned encoder_frame_count(GstElement *element) {
+  GList *frames = gst_video_encoder_get_frames(GST_VIDEO_ENCODER(element));
+  unsigned count = g_list_length(frames);
+  g_list_free_full(frames, (GDestroyNotify)gst_video_codec_frame_unref);
+  return count;
+}
+
+static gpointer push_blocked_frame(gpointer data) {
+  BlockingPush *push = data;
+  GstBuffer *frame = gst_buffer_new_allocate(NULL, 115200, NULL);
+  GST_BUFFER_PTS(frame) = push->frame_index * (GST_SECOND / 30);
+  GST_BUFFER_DURATION(frame) = GST_SECOND / 30;
+  atomic_store(&push->started, 1);
+  push->result = gst_harness_push(push->harness, frame);
+  atomic_store(&push->done, 1);
+  return NULL;
+}
+
+static gpointer send_flush_start(gpointer data) {
+  FlushStart *flush = data;
+  GstVideoEncoder *encoder = GST_VIDEO_ENCODER(flush->harness->element);
+  GstVideoEncoderClass *klass = GST_VIDEO_ENCODER_GET_CLASS(encoder);
+  atomic_store(&flush->started, 1);
+  GST_VIDEO_ENCODER_STREAM_LOCK(encoder);
+  flush->result = klass->flush(encoder);
+  GST_VIDEO_ENCODER_STREAM_UNLOCK(encoder);
+  atomic_store(&flush->done, 1);
+  return NULL;
 }
 
 static gpointer set_bitrate_at_bps_pause(gpointer data) {
@@ -319,6 +375,87 @@ static void check_rc_drop_is_not_pushed(gboolean zero_copy_pkt) {
 
 GST_START_TEST(test_zero_length_rc_drop_is_not_pushed_downstream) {
   check_rc_drop_is_not_pushed(TRUE);
+}
+GST_END_TEST
+
+GST_START_TEST(test_flush_wakes_pending_full_frame) {
+  const guint max_pending = 4;
+  const gint64 wake_deadline_us = G_USEC_PER_SEC;
+  mpp_mock_reset();
+  mpp_mock_enc_arm_reset_drain();
+
+  GstHarness *h = gst_harness_new("mpph264enc");
+  fail_unless(h != NULL);
+  g_object_set(h->element, "bitrate", 500, "rc-mode", 1, "zero-copy-pkt",
+               FALSE, "max-pending", max_pending, NULL);
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=320,height=240,framerate=30/1");
+  gst_harness_set_drop_buffers(h, TRUE);
+  gst_harness_play(h);
+
+  for (guint i = 0; i < max_pending; i++)
+    push_reset_frame(h, i);
+  fail_unless(wait_for_uint(mpp_mock_enc_queued_packets, max_pending),
+              "mock MPP did not accept the full pending window");
+  fail_unless_equals_int(mpp_mock_enc_queue_depth(), max_pending);
+
+  BlockingPush push = {.harness = h,
+                       .frame_index = max_pending,
+                       .result = GST_FLOW_OK};
+  GThread *push_thread = g_thread_new("pending-full-push", push_blocked_frame,
+                                      &push);
+  fail_unless(wait_for_atomic(&push.started, G_USEC_PER_SEC),
+              "extra push thread did not start");
+
+  gint64 frame_deadline = g_get_monotonic_time() + G_USEC_PER_SEC;
+  while (encoder_frame_count(h->element) < max_pending + 1 &&
+         g_get_monotonic_time() < frame_deadline)
+    g_usleep(1000);
+  fail_unless_equals_int(encoder_frame_count(h->element), max_pending + 1);
+  fail_unless(!atomic_load(&push.done),
+              "extra frame did not block at the pending-full wait");
+  fail_unless_equals_int(mpp_mock_enc_queue_depth(), max_pending);
+
+  alarm(10);
+  FlushStart flush = {.harness = h, .result = FALSE};
+  GThread *flush_thread =
+      g_thread_new("flush-start", send_flush_start, &flush);
+  gboolean flush_started = wait_for_atomic(&flush.started, G_USEC_PER_SEC);
+  gint64 wake_started = g_get_monotonic_time();
+  gboolean push_woke =
+      flush_started && wait_for_atomic(&push.done, wake_deadline_us);
+  gint64 wake_elapsed = g_get_monotonic_time() - wake_started;
+
+  if (!push_woke)
+    mpp_mock_enc_release_packets(max_pending);
+  gboolean push_finished = wait_for_atomic(&push.done, 2 * G_USEC_PER_SEC);
+
+  gboolean flush_finished = wait_for_atomic(&flush.done, 5 * G_USEC_PER_SEC);
+  if (!flush_finished) {
+    mpp_mock_enc_release_packets(max_pending);
+    flush_finished = wait_for_atomic(&flush.done, 2 * G_USEC_PER_SEC);
+  }
+  if (!push_finished || !flush_finished) {
+    alarm(1);
+    while (TRUE)
+      g_usleep(G_USEC_PER_SEC);
+  }
+
+  g_thread_join(push_thread);
+  g_thread_join(flush_thread);
+  alarm(0);
+  fail_unless(flush_started, "flush thread did not start");
+  fail_unless(push_woke,
+              "pending-full frame missed the flush wake deadline");
+  fail_unless(flush_finished,
+              "flush-start did not complete before the outer deadline");
+  fail_unless_equals_int(push.result, GST_FLOW_FLUSHING);
+  fail_unless(flush.result);
+  g_print("pending-full flush wake: latency=%" G_GINT64_FORMAT
+          "us queued=%u\n",
+          wake_elapsed, mpp_mock_enc_queued_packets());
+
+  gst_harness_teardown(h);
 }
 GST_END_TEST
 
@@ -1192,6 +1329,7 @@ GST_END_TEST
 Suite *mpp_gstharness_suite(void) {
   Suite *s = suite_create("rockchipmpp");
   TCase *tc = tcase_create("caps");
+  tcase_set_timeout(tc, 15);
   tcase_add_test(tc, test_factories_properties);
   tcase_add_test(tc, test_jpeg_caps_with_harness);
   tcase_add_test(tc, test_video_decoder_caps_truth);
@@ -1219,6 +1357,7 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(
       tc, test_runtime_property_snapshot_is_coherent_and_eventually_applied);
   tcase_add_test(tc, test_encoder_reset_drains_old_packets_before_new_session);
+  tcase_add_test(tc, test_flush_wakes_pending_full_frame);
   suite_add_tcase(s, tc);
   return s;
 }

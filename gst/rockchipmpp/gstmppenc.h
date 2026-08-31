@@ -54,7 +54,7 @@ struct _GstMppEnc
   GstVideoInfo info;
 
   /* stop handling new frame when flushing */
-  gboolean flushing;
+  gint flushing;
 
   /* drop frames when flushing but not draining */
   gboolean draining;
