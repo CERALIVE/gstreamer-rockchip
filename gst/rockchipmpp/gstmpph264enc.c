@@ -174,6 +174,158 @@ gst_mpp_h264_enc_level_get_type (void)
   return level;
 }
 
+/*
+ * H.264 level limits, Table A-1 of ITU-T H.264. Identical values to MPP's own
+ * `level_infos[]` (mpp/codec/enc/h264/h264e_sps.c at the pinned 1.5.0-1), which
+ * is deliberate: MPP consults only max_mbs there, so this table extends the
+ * same numbers to the two axes it leaves unchecked while agreeing with it
+ * exactly on the one it does check.
+ *
+ * max_br is in units of cpbBrVclFactor bits/s -- 1000 for Baseline/Main, 1250
+ * for High (Table A-1's "cpbBrVclFactor" column) -- not bits/s.
+ *
+ * Ordered by increasing capability, which is NOT numeric level order: 1b is 99.
+ * Everything here therefore compares table indices, never level values.
+ */
+typedef struct
+{
+  gint level;
+  gint max_mbps;
+  gint max_mbs;
+  gint max_br;
+} GstMppH264LevelLimits;
+
+static const GstMppH264LevelLimits gst_mpp_h264_enc_level_limits[] = {
+  {10, 1485, 99, 64},
+  {99, 1485, 99, 128},          /* 1b */
+  {11, 3000, 396, 192},
+  {12, 6000, 396, 384},
+  {13, 11880, 396, 768},
+  {20, 11880, 396, 2000},
+  {21, 19800, 792, 4000},
+  {22, 20250, 1620, 4000},
+  {30, 40500, 1620, 10000},
+  {31, 108000, 3600, 14000},
+  {32, 216000, 5120, 20000},
+  {40, 245760, 8192, 20000},
+  {41, 245760, 8192, 50000},
+  {42, 522240, 8704, 50000},
+  {50, 589824, 22080, 135000},
+  {51, 983040, 36864, 240000},
+  {52, 2073600, 36864, 240000},
+  {60, 4177920, 139264, 240000},
+  {61, 8355840, 139264, 480000},
+  {62, 16711680, 139264, 800000},
+};
+
+#define GST_MPP_H264_LEVEL_1B 99
+
+static guint
+gst_mpp_h264_enc_level_index (gint level)
+{
+  guint i;
+
+  for (i = 0; i < G_N_ELEMENTS (gst_mpp_h264_enc_level_limits); i++) {
+    if (gst_mpp_h264_enc_level_limits[i].level == level)
+      return i;
+  }
+  return 0;
+}
+
+static guint
+gst_mpp_h264_enc_cpb_br_vcl_factor (GstMppH264Profile profile)
+{
+  return profile == GST_MPP_H264_PROFILE_HIGH ? 1250 : 1000;
+}
+
+/*
+ * The lowest level index whose frame size, macroblock rate AND bitrate limits
+ * all admit this configuration. 1b is skipped as a target exactly as MPP skips
+ * it, and an unreachable configuration saturates at the top level rather than
+ * wrapping to a small one.
+ */
+static guint
+gst_mpp_h264_enc_required_level_index (GstMppH264Profile profile,
+    const GstMppEncRateInfo * rate, gboolean * conforming)
+{
+  guint factor = gst_mpp_h264_enc_cpb_br_vcl_factor (profile);
+  guint64 mbs;
+  guint64 mbps;
+  guint i;
+
+  mbs = (guint64) GST_ROUND_UP_16 (rate->width) *
+      GST_ROUND_UP_16 (rate->height) / 256;
+  mbps = mbs * (guint64) rate->fps;
+
+  *conforming = TRUE;
+
+  for (i = 0; i < G_N_ELEMENTS (gst_mpp_h264_enc_level_limits); i++) {
+    const GstMppH264LevelLimits *limits = &gst_mpp_h264_enc_level_limits[i];
+
+    if (limits->level == GST_MPP_H264_LEVEL_1B)
+      continue;
+    if (mbs > (guint64) limits->max_mbs || mbps > (guint64) limits->max_mbps)
+      continue;
+    if (rate->bitrate
+        && (guint64) rate->bitrate > (guint64) limits->max_br * factor)
+      continue;
+    return i;
+  }
+
+  *conforming = FALSE;
+  return G_N_ELEMENTS (gst_mpp_h264_enc_level_limits) - 1;
+}
+
+/*
+ * The level the bitstream actually conforms to, which is what the SPS and the
+ * src caps must both carry.
+ *
+ * MPP raises an under-declared level for frame size alone (h264e_sps.c only
+ * tests max_MBs), so a 1080p60 stream declared at level 4 keeps emitting an SPS
+ * that claims level 4 while exceeding its macroblock rate by 2x. Raising here
+ * is what MPP already does on the one axis it checks, extended to the two it
+ * does not.
+ *
+ * Raising rather than rejecting is deliberate and load-bearing: `level`
+ * defaults to 4 and cerastream never sets it, so every shipped 1080p50/60,
+ * 1440p and 2160p profile would fail negotiation under a hard rejection. A
+ * warning plus a conforming stream is the honest outcome; a refusal to encode
+ * is not.
+ */
+static gint
+gst_mpp_h264_enc_effective_level (GstVideoEncoder * encoder,
+    GstMppH264Profile profile, gint declared, const GstMppEncRateInfo * rate)
+{
+  gboolean conforming;
+  guint declared_index;
+  guint required_index;
+  gint required;
+
+  if (rate->width <= 0 || rate->height <= 0 || rate->fps <= 0)
+    return declared;
+
+  declared_index = gst_mpp_h264_enc_level_index (declared);
+  required_index =
+      gst_mpp_h264_enc_required_level_index (profile, rate, &conforming);
+  required = gst_mpp_h264_enc_level_limits[required_index].level;
+
+  if (!conforming) {
+    GST_WARNING_OBJECT (encoder, "%dx%d@%dfps at %u bps exceeds every H.264 "
+        "level; encoding at the highest (%d), which the stream may still "
+        "exceed", rate->width, rate->height, rate->fps, rate->bitrate,
+        required);
+  } else if (required_index <= declared_index) {
+    return declared;
+  } else {
+    GST_WARNING_OBJECT (encoder, "declared H.264 level %d cannot carry "
+        "%dx%d@%dfps at %u bps; raising to level %d so the bitstream and its "
+        "SPS agree", declared, rate->width, rate->height, rate->fps,
+        rate->bitrate, required);
+  }
+
+  return required;
+}
+
 static void
 gst_mpp_h264_enc_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec)
@@ -339,9 +491,16 @@ gst_mpp_h264_enc_snapshot_properties (GstVideoEncoder * encoder,
   GstMppH264Enc *self = GST_MPP_H264_ENC (encoder);
   GstMppEnc *mppenc = GST_MPP_ENC (encoder);
   GstMppH264EncPropertiesSnapshot *properties = snapshot;
+  GstMppEncRateInfo rate;
+
+  gst_mpp_enc_snapshot_rate_info (encoder, &rate);
 
   properties->profile = self->profile;
-  properties->level = self->level;
+  /* The declared level is what the operator asked for; the effective one is
+   * what MPP is configured with and what the caps publish. They differ when the
+   * declared level cannot carry the negotiated rate. */
+  properties->level = gst_mpp_h264_enc_effective_level (encoder, self->profile,
+      self->level, &rate);
   properties->qp_init = self->qp_init;
   properties->qp_min = self->qp_min;
   properties->qp_max = self->qp_max;

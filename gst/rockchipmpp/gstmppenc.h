@@ -157,6 +157,17 @@ typedef void (*GstMppEncSnapshotPropertiesFunc) (GstVideoEncoder * encoder,
 typedef void (*GstMppEncConfigurePropertiesFunc) (GstVideoEncoder * encoder,
     gconstpointer snapshot);
 
+/* The three axes an H.264/H.265 level constrains. bitrate is the peak MPP is
+ * configured for, or 0 when MPP is given no rate target and no bitrate limit
+ * can apply. */
+typedef struct
+{
+  gint width;
+  gint height;
+  gint fps;
+  guint bitrate;
+} GstMppEncRateInfo;
+
 #define MPP_ENC_IN_FORMATS \
     "NV12, I420, YUY2, UYVY, " \
     "BGR16, RGB16, BGR, RGB, " \
@@ -176,6 +187,9 @@ gboolean gst_mpp_enc_cfg_set_s32 (GstMppEnc * self, const gchar * key,
     gint value);
 gboolean gst_mpp_enc_cfg_set_u32 (GstMppEnc * self, const gchar * key,
     guint value);
+
+void gst_mpp_enc_snapshot_rate_info (GstVideoEncoder * encoder,
+    GstMppEncRateInfo * rate);
 
 gboolean gst_mpp_enc_apply_properties (GstVideoEncoder * encoder);
 gboolean gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,

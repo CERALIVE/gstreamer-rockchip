@@ -1302,6 +1302,181 @@ GST_START_TEST(test_refused_temporal_ref_cfg_fails_the_apply_and_retries) {
 }
 GST_END_TEST
 
+static void assert_src_caps_string(GstHarness *h, const char *field,
+                                   const char *want) {
+  GstCaps *caps = gst_pad_get_current_caps(h->sinkpad);
+  fail_unless(caps != NULL, "the encoder never negotiated src caps");
+  const GstStructure *s = gst_caps_get_structure(caps, 0);
+  const char *got = gst_structure_get_string(s, field);
+  fail_unless(got != NULL, "src caps carry no '%s' field: %" GST_PTR_FORMAT,
+              field, caps);
+  fail_unless(g_str_equal(got, want), "src caps %s is '%s', expected '%s'",
+              field, got, want);
+  gst_caps_unref(caps);
+}
+
+static GstHarness *start_level_harness(const char *factory, const char *caps,
+                                       guint bitrate) {
+  GstHarness *h = gst_harness_new(factory);
+  fail_unless(h != NULL, "could not create %s", factory);
+  g_object_set(h->element, "rc-mode", 1, "zero-copy-pkt", FALSE, "bitrate",
+               bitrate, NULL);
+  gst_harness_set_src_caps_str(h, caps);
+  return h;
+}
+
+/* 1920x1088 is 8160 macroblocks, inside level 4's 8192 frame-size limit, so
+ * MPP's own correction (h264e_sps.c tests max_MBs and nothing else) leaves the
+ * level alone -- while 60fps of them is 489600 MB/s against level 4's 245760
+ * ceiling. Level 4.2 is the first that admits the rate. */
+GST_START_TEST(test_h264_level_is_raised_for_an_out_of_level_frame_rate) {
+  mpp_mock_reset();
+  GstHarness *h = start_level_harness(
+      "mpph264enc",
+      "video/x-raw,format=NV12,width=1920,height=1080,framerate=60/1", 8000000);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("h264:level"), 42);
+  assert_src_caps_string(h, "level", "4.2");
+
+  gint declared = 0;
+  g_object_get(h->element, "level", &declared, NULL);
+  fail_unless_equals_int(declared, 40);
+
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
+/* Same 1080p30 frame and macroblock rate that level 4 admits, but a peak rate
+ * above its 20000 x 1250 bits/s High-profile ceiling. */
+GST_START_TEST(test_h264_level_is_raised_for_an_out_of_level_bitrate) {
+  mpp_mock_reset();
+  GstHarness *h = start_level_harness(
+      "mpph264enc",
+      "video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1",
+      30000000);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("h264:level"), 41);
+  assert_src_caps_string(h, "level", "4.1");
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
+/* The declared level must survive a configuration it genuinely carries, or the
+ * property would be advisory only -- and a level declared far above what the
+ * stream needs must not be pulled down to the minimum either. This only ever
+ * raises. */
+GST_START_TEST(test_h264_level_is_kept_when_the_stream_conforms) {
+  mpp_mock_reset();
+  GstHarness *h = start_level_harness(
+      "mpph264enc",
+      "video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1", 8000000);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("h264:level"), 40);
+  assert_src_caps_string(h, "level", "4");
+  gst_harness_teardown(h);
+
+  mpp_mock_reset();
+  h = start_level_harness(
+      "mpph264enc",
+      "video/x-raw,format=NV12,width=320,height=240,framerate=30/1", 500000);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("h264:level"), 40);
+  assert_src_caps_string(h, "level", "4");
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
+/* Level 1b's value is 99, above every other level's, so ordering by value puts
+ * the weakest level at the top and silently accepts anything declared at it.
+ * The comparison is by table position for exactly this reason. */
+GST_START_TEST(test_h264_level_1b_is_raised_despite_its_numeric_value) {
+  mpp_mock_reset();
+  GstHarness *h = gst_harness_new("mpph264enc");
+  fail_unless(h != NULL);
+  g_object_set(h->element, "rc-mode", 1, "zero-copy-pkt", FALSE, "bitrate",
+               8000000, "level", 99, NULL);
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1");
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("h264:level"), 40);
+  assert_src_caps_string(h, "level", "4");
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
+/* The frame size has to be counted in whole macroblocks the way MPP counts it
+ * (MPP_ALIGN 16 on both axes). 1920x1090 is 8175 raw macroblocks, inside level
+ * 4's 8192 limit, but 8280 aligned ones, outside it -- and MPP would then raise
+ * the level past ours on its own, putting the caps back out of step with the
+ * SPS. */
+GST_START_TEST(test_h264_level_counts_partial_macroblock_rows) {
+  mpp_mock_reset();
+  GstHarness *h = start_level_harness(
+      "mpph264enc",
+      "video/x-raw,format=NV12,width=1920,height=1090,framerate=30/1", 8000000);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("h264:level"), 42);
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
+/* 1920x1080 is 2073600 luma samples, inside level 4's 2228224 picture-size
+ * limit that h265e_ps.c checks, but 60fps of them is 124416000 samples/s
+ * against level 4's 66846720 ceiling. */
+GST_START_TEST(test_h265_level_is_raised_for_an_out_of_level_frame_rate) {
+  mpp_mock_reset();
+  GstHarness *h = start_level_harness(
+      "mpph265enc",
+      "video/x-raw,format=NV12,width=1920,height=1080,framerate=60/1", 8000000);
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("h265:level"), 123);
+
+  gint declared = 0;
+  g_object_get(h->element, "level", &declared, NULL);
+  fail_unless_equals_int(declared, 120);
+
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
+/* The main tier's 12000 x 1000 bits/s ceiling at level 4; the high tier's is
+ * 30000 x 1000 and admits the same stream. */
+GST_START_TEST(test_h265_level_follows_the_tier_bitrate_ceiling) {
+  mpp_mock_reset();
+  GstHarness *h = start_level_harness(
+      "mpph265enc",
+      "video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1",
+      16000000);
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("h265:level"), 123);
+  gst_harness_teardown(h);
+
+  mpp_mock_reset();
+  h = gst_harness_new("mpph265enc");
+  fail_unless(h != NULL);
+  g_object_set(h->element, "rc-mode", 1, "zero-copy-pkt", FALSE, "bitrate",
+               16000000, "tier", 1, NULL);
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1");
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("h265:level"), 120);
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
+/* Fixed-QP hands MPP no rate target at all, so no level bitrate limit applies
+ * and the frame/rate axes decide alone. */
+GST_START_TEST(test_level_ignores_bitrate_under_fixed_qp) {
+  mpp_mock_reset();
+  GstHarness *h = gst_harness_new("mpph264enc");
+  fail_unless(h != NULL);
+  g_object_set(h->element, "rc-mode", 2, "zero-copy-pkt", FALSE, "bitrate",
+               30000000, NULL);
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1");
+
+  fail_unless_equals_int(mpp_mock_last_cfg_s32("h264:level"), 40);
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
 GST_START_TEST(test_zero_valued_tuning_resets_reach_mpp) {
   mpp_mock_reset();
   GstHarness *h =
@@ -1629,6 +1804,14 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_drop_threshold_uses_the_key_mpp_actually_registers);
   tcase_add_test(tc, test_rejected_config_key_fails_the_apply);
   tcase_add_test(tc, test_refused_temporal_ref_cfg_fails_the_apply_and_retries);
+  tcase_add_test(tc, test_h264_level_is_raised_for_an_out_of_level_frame_rate);
+  tcase_add_test(tc, test_h264_level_is_raised_for_an_out_of_level_bitrate);
+  tcase_add_test(tc, test_h264_level_is_kept_when_the_stream_conforms);
+  tcase_add_test(tc, test_h264_level_1b_is_raised_despite_its_numeric_value);
+  tcase_add_test(tc, test_h264_level_counts_partial_macroblock_rows);
+  tcase_add_test(tc, test_h265_level_is_raised_for_an_out_of_level_frame_rate);
+  tcase_add_test(tc, test_h265_level_follows_the_tier_bitrate_ceiling);
+  tcase_add_test(tc, test_level_ignores_bitrate_under_fixed_qp);
   tcase_add_test(tc, test_zero_valued_tuning_resets_reach_mpp);
   tcase_add_test(tc, test_super_frame_thresholds_reset_to_unreachable_not_zero);
   tcase_add_test(tc, test_auto_bitrate_recomputes_for_new_output_geometry);

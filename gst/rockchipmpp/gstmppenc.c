@@ -573,18 +573,25 @@ gst_mpp_enc_super_threshold (guint threshold)
  * one off the input rate gets twice the bitrate and a two-second GOP.
  */
 static gint
-gst_mpp_enc_effective_fps_out (const GstMppEncPropertiesSnapshot * properties)
+gst_mpp_enc_effective_fps (gint fps_out, gint fps_n, gint fps_d)
 {
   gint fps;
 
-  if (properties->fps_out > 0)
-    return properties->fps_out;
+  if (fps_out > 0)
+    return fps_out;
 
-  if (properties->fps_n <= 0 || properties->fps_d <= 0)
+  if (fps_n <= 0 || fps_d <= 0)
     return DEFAULT_FPS;
 
-  fps = properties->fps_n / properties->fps_d;
+  fps = fps_n / fps_d;
   return fps > 0 ? fps : DEFAULT_FPS;
+}
+
+static gint
+gst_mpp_enc_effective_fps_out (const GstMppEncPropertiesSnapshot * properties)
+{
+  return gst_mpp_enc_effective_fps (properties->fps_out, properties->fps_n,
+      properties->fps_d);
 }
 
 /*
@@ -632,6 +639,40 @@ gst_mpp_enc_scale_bitrate (guint bps, guint numerator, guint denominator)
   scaled = scaled * numerator / denominator;
 
   return scaled > limit ? G_MAXINT : (gint) scaled;
+}
+
+/*
+ * The encode geometry, output framerate and peak bitrate a codec subclass has
+ * to size its declared level against, derived exactly as the config writes
+ * below derive them -- same auto-bitrate sentinel, same fps-out decimation,
+ * same bps_max fallback -- so a level check cannot disagree with the numbers
+ * MPP is actually handed.
+ *
+ * A zero bitrate means MPP is given no rate target at all (fixed-QP, or a
+ * geometry too incomplete to derive one), so no level's bitrate limit applies.
+ *
+ * Called from a snapshot callback, i.e. with the property lock already held.
+ */
+void
+gst_mpp_enc_snapshot_rate_info (GstVideoEncoder * encoder,
+    GstMppEncRateInfo * rate)
+{
+  GstMppEnc *self = GST_MPP_ENC (encoder);
+  guint bps;
+
+  rate->width = GST_VIDEO_INFO_WIDTH (&self->info);
+  rate->height = GST_VIDEO_INFO_HEIGHT (&self->info);
+  rate->fps = gst_mpp_enc_effective_fps (self->fps_out,
+      GST_VIDEO_INFO_FPS_N (&self->info), GST_VIDEO_INFO_FPS_D (&self->info));
+
+  bps = self->bps ? self->bps : gst_mpp_enc_auto_bitrate (rate->width,
+      rate->height, rate->fps);
+
+  if (!bps || self->rc_mode == MPP_ENC_RC_MODE_FIXQP)
+    rate->bitrate = 0;
+  else
+    rate->bitrate = self->bps_max ? self->bps_max :
+        (guint) gst_mpp_enc_scale_bitrate (bps, 17, 16);
 }
 
 /*

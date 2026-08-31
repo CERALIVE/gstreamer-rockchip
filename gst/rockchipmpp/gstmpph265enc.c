@@ -180,6 +180,135 @@ static GstStaticPadTemplate gst_mpp_h265_enc_sink_template =
         "format = (string) { " MPP_H265_ENC_FORMATS " }, "
         GST_MPP_H265_ENC_SIZE_CAPS ";"));
 
+/*
+ * H.265 level limits, Tables A.6/A.8/A.9 of ITU-T H.265, keyed by
+ * general_level_idc. Identical values to MPP's own `levels[]`
+ * (mpp/codec/enc/h265/h265e_ps.c at the pinned 1.5.0-1), which is deliberate:
+ * MPP consults only max_luma_ps there, so this table extends the same numbers
+ * to the two axes it leaves unchecked while agreeing with it exactly on the one
+ * it does check. Level 8.5 is omitted -- it is the unbounded still-picture
+ * level, not a streaming target, and the level property does not offer it.
+ *
+ * max_br_* is in units of CpbBrVclFactor bits/s, 1000 for every profile this
+ * element offers (Main, Main 10, Main Still Picture -- Table A.2), not bits/s.
+ * G_MAXUINT in max_br_high marks a level at which the high tier is not defined.
+ */
+typedef struct
+{
+  gint level;
+  guint max_luma_ps;
+  guint64 max_luma_sr;
+  guint max_br_main;
+  guint max_br_high;
+} GstMppH265LevelLimits;
+
+static const GstMppH265LevelLimits gst_mpp_h265_enc_level_limits[] = {
+  {30, 36864, 552960, 128, G_MAXUINT},
+  {60, 122880, 3686400, 1500, G_MAXUINT},
+  {63, 245760, 7372800, 3000, G_MAXUINT},
+  {90, 552960, 16588800, 6000, G_MAXUINT},
+  {93, 983040, 33177600, 10000, G_MAXUINT},
+  {120, 2228224, 66846720, 12000, 30000},
+  {123, 2228224, 133693440, 20000, 50000},
+  {150, 8912896, 267386880, 25000, 100000},
+  {153, 8912896, 534773760, 40000, 160000},
+  {156, 8912896, 1069547520, 60000, 240000},
+  {180, 35651584, 1069547520, 60000, 240000},
+  {183, 35651584, 2139095040, 120000, 480000},
+  {186, 35651584, 4278190080ULL, 240000, 800000},
+};
+
+#define GST_MPP_H265_CPB_BR_VCL_FACTOR 1000
+
+static guint
+gst_mpp_h265_enc_level_index (gint level)
+{
+  guint i;
+
+  for (i = 0; i < G_N_ELEMENTS (gst_mpp_h265_enc_level_limits); i++) {
+    if (gst_mpp_h265_enc_level_limits[i].level == level)
+      return i;
+  }
+  return 0;
+}
+
+static guint
+gst_mpp_h265_enc_required_level_index (gint tier,
+    const GstMppEncRateInfo * rate, gboolean * conforming)
+{
+  guint64 luma_ps;
+  guint64 luma_sr;
+  guint i;
+
+  luma_ps = (guint64) rate->width * rate->height;
+  luma_sr = luma_ps * (guint64) rate->fps;
+
+  *conforming = TRUE;
+
+  for (i = 0; i < G_N_ELEMENTS (gst_mpp_h265_enc_level_limits); i++) {
+    const GstMppH265LevelLimits *limits = &gst_mpp_h265_enc_level_limits[i];
+    guint max_br = tier ? limits->max_br_high : limits->max_br_main;
+
+    if (tier && max_br == G_MAXUINT)
+      continue;
+    if (luma_ps > (guint64) limits->max_luma_ps || luma_sr > limits->max_luma_sr)
+      continue;
+    if (rate->bitrate && (guint64) rate->bitrate >
+        (guint64) max_br * GST_MPP_H265_CPB_BR_VCL_FACTOR)
+      continue;
+    return i;
+  }
+
+  *conforming = FALSE;
+  return G_N_ELEMENTS (gst_mpp_h265_enc_level_limits) - 1;
+}
+
+/*
+ * The level the bitstream actually conforms to, which is what the VPS/SPS and
+ * the src caps must both carry.
+ *
+ * MPP raises an under-declared level for picture size alone (h265e_ps.c only
+ * tests maxLumaSamples), so a 1080p60 stream declared at level 4 keeps emitting
+ * a VPS claiming level 4 while exceeding its luma sample rate by 2x.
+ *
+ * Raising rather than rejecting is deliberate: `level` defaults to 4 and
+ * cerastream never sets it, so every shipped 1080p50/60, 1440p and 2160p
+ * profile would fail negotiation under a hard rejection.
+ */
+static gint
+gst_mpp_h265_enc_effective_level (GstVideoEncoder * encoder, gint tier,
+    gint declared, const GstMppEncRateInfo * rate)
+{
+  gboolean conforming;
+  guint declared_index;
+  guint required_index;
+  gint required;
+
+  if (rate->width <= 0 || rate->height <= 0 || rate->fps <= 0)
+    return declared;
+
+  declared_index = gst_mpp_h265_enc_level_index (declared);
+  required_index =
+      gst_mpp_h265_enc_required_level_index (tier, rate, &conforming);
+  required = gst_mpp_h265_enc_level_limits[required_index].level;
+
+  if (!conforming) {
+    GST_WARNING_OBJECT (encoder, "%dx%d@%dfps at %u bps exceeds every H.265 "
+        "level; encoding at the highest (%d), which the stream may still "
+        "exceed", rate->width, rate->height, rate->fps, rate->bitrate,
+        required);
+  } else if (required_index <= declared_index) {
+    return declared;
+  } else {
+    GST_WARNING_OBJECT (encoder, "declared H.265 level_idc %d cannot carry "
+        "%dx%d@%dfps at %u bps; raising to level_idc %d so the bitstream and "
+        "its VPS agree", declared, rate->width, rate->height, rate->fps,
+        rate->bitrate, required);
+  }
+
+  return required;
+}
+
 static void
 gst_mpp_h265_enc_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec)
@@ -357,6 +486,9 @@ gst_mpp_h265_enc_snapshot_properties (GstVideoEncoder * encoder,
   GstMppH265Enc *self = GST_MPP_H265_ENC (encoder);
   GstMppEnc *mppenc = GST_MPP_ENC (encoder);
   GstMppH265EncPropertiesSnapshot *properties = snapshot;
+  GstMppEncRateInfo rate;
+
+  gst_mpp_enc_snapshot_rate_info (encoder, &rate);
 
   properties->qp_init = self->qp_init;
   properties->qp_min = self->qp_min;
@@ -366,7 +498,10 @@ gst_mpp_h265_enc_snapshot_properties (GstVideoEncoder * encoder,
   properties->qp_ip = self->qp_ip;
   properties->profile = self->profile;
   properties->tier = self->tier;
-  properties->level = self->level;
+  /* Declared level stays on the property; the effective one is what MPP is
+   * configured with and what the caps publish. */
+  properties->level = gst_mpp_h265_enc_effective_level (encoder, self->tier,
+      self->level, &rate);
   properties->sao = self->sao;
   properties->rc_mode = mppenc->rc_mode;
 }
