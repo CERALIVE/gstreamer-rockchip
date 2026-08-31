@@ -78,13 +78,29 @@ EOF
 installed_size="$(du -ks "${stage_dir}" | cut -f1)"
 mkdir -p "${stage_dir}/DEBIAN"
 
-# Depends notes, because two of these are easy to "fix" wrongly:
-#   * libgstreamer1.0-0 is UNVERSIONED. The plugin builds against >= 1.14 and
-#     must keep resolving on both the bookworm 1.22 and trixie 1.26 runtimes;
-#     pinning a minor would tie the package to a runtime it does not require.
-#   * librockchip-mpp1/librga2 are the RK3588 libraries the plugin dlopens
-#     through the linker; they are not in Debian and come from the image's own
-#     pinned userspace row.
+# Depends is the ELF NEEDED closure of all THREE shipped plugins, not the build
+# flag list. Under-declaring here fails silently: a build container already has
+# the missing library, so the install smoke passes and only a device breaks.
+# package-contract.sh re-derives this closure from the staged .so files.
+#
+#   libgstreamer1.0-0               libgstreamer-1.0.so.0, libgstbase-1.0.so.0
+#   libgstreamer-plugins-base1.0-0  libgstvideo/allocators/pbutils-1.0.so.0
+#   libglib2.0-0                    libglib-2.0.so.0, libgobject-2.0.so.0
+#   libdrm2                         libdrm.so.2          (kmssrc, rkximage)
+#   libx11-6                        libX11.so.6          (rkximage)
+#   librockchip-mpp1 / librga2      librockchip_mpp.so.1, librga.so.2
+#
+# Only libc6 is versioned, and that floor IS the target-suite contract
+# (GLIBC_FLOOR in ci/target-suite.env, gated by ci/check-glibc-floor.sh). The
+# GStreamer names stay unversioned so the package keeps resolving on both the
+# bookworm 1.22 and the trixie 1.26 runtime.
+#
+# libglib2.0-0 is the subtle one: on trixie that name does not exist as a real
+# package — the time64 transition renamed it to libglib2.0-0t64, which carries
+# `Provides: libglib2.0-0`. Depending on the OLD name unversioned resolves on
+# BOTH suites. Naming the t64 package directly would break bookworm, where it
+# does not exist at all.
+#
 # Provides is UNVERSIONED too: nothing in the image Depends on
 # gstreamer1.0-rockchip1 at a version, so a version here would only invent a
 # constraint to get wrong later.
@@ -94,7 +110,7 @@ Version: ${version}
 Architecture: ${arch}
 Maintainer: CERALIVE <contact@ceralive.tv>
 Installed-Size: ${installed_size}
-Depends: libgstreamer1.0-0, libc6 (>= 2.36), librockchip-mpp1, librga2
+Depends: libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, libglib2.0-0, libc6 (>= 2.36), libdrm2, libx11-6, librockchip-mpp1, librga2
 Provides: gstreamer1.0-rockchip1
 Conflicts: gstreamer1.0-rockchip1, belabox-gstreamer1.0-rockchip
 Replaces: gstreamer1.0-rockchip1, belabox-gstreamer1.0-rockchip

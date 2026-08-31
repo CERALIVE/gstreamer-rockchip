@@ -37,6 +37,25 @@ readonly EXPECT_TRIPLET="aarch64-linux-gnu"
 readonly EXPECT_PLUGIN_PATH="/usr/lib/${EXPECT_TRIPLET}/gstreamer-1.0/${EXPECT_PLUGIN_SO}"
 readonly DEP5_FORMAT="https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/"
 readonly SOURCE_URL="https://github.com/CERALIVE/gstreamer-rockchip"
+readonly EXPECT_DEPENDS="libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, libglib2.0-0, libc6 (>= 2.36), libdrm2, libx11-6, librockchip-mpp1, librga2"
+# Every SONAME the three shipped plugins link, mapped to the Debian package that
+# supplies it. Resolved with `dpkg -S` on the arm64 build container, not guessed.
+# The staged check below re-derives the plugins' NEEDED set and refuses anything
+# this table does not cover, so a new link-time dependency cannot reach a release
+# without a matching Depends entry.
+readonly SONAME_PACKAGES="\
+libc.so.6=libc6
+libdrm.so.2=libdrm2
+libX11.so.6=libx11-6
+libglib-2.0.so.0=libglib2.0-0
+libgobject-2.0.so.0=libglib2.0-0
+libgstreamer-1.0.so.0=libgstreamer1.0-0
+libgstbase-1.0.so.0=libgstreamer1.0-0
+libgstvideo-1.0.so.0=libgstreamer-plugins-base1.0-0
+libgstallocators-1.0.so.0=libgstreamer-plugins-base1.0-0
+libgstpbutils-1.0.so.0=libgstreamer-plugins-base1.0-0
+librockchip_mpp.so.1=librockchip-mpp1
+librga.so.2=librga2"
 # Every distinct copyright holder in the compiled sources under gst/. Derived
 # from the tree, not assumed: the scan below fails if gst/ grows a holder that
 # is not in this list, so a new upstream contributor cannot reach a release
@@ -66,8 +85,8 @@ grep -qF 'Architecture: ${arch}' "${builder}" \
 	|| fail "control must declare Architecture from the resolved \${arch}"
 grep -qF 'Maintainer: CERALIVE <contact@ceralive.tv>' "${builder}" \
 	|| fail "control Maintainer must be CERALIVE <contact@ceralive.tv>"
-grep -qF 'Depends: libgstreamer1.0-0, libc6 (>= 2.36), librockchip-mpp1, librga2' "${builder}" \
-	|| fail "control Depends must be libgstreamer1.0-0, libc6 (>= 2.36), librockchip-mpp1, librga2"
+grep -qF "Depends: ${EXPECT_DEPENDS}" "${builder}" \
+	|| fail "control Depends must be: ${EXPECT_DEPENDS}"
 grep -qF 'Provides: gstreamer1.0-rockchip1' "${builder}" \
 	|| fail "control must Provides: gstreamer1.0-rockchip1"
 grep -qF 'Conflicts: gstreamer1.0-rockchip1, belabox-gstreamer1.0-rockchip' "${builder}" \
@@ -90,9 +109,30 @@ fi
 # libgstreamer1.0-0 is unversioned because the plugin must keep resolving on
 # both the bookworm 1.22 and the trixie 1.26 runtime. A minor pinned here turns
 # a package that works on both into one that installs on neither by accident.
-if grep -E '^Depends:' "${builder}" | grep -q 'libgstreamer1.0-0 ('; then
-	fail "Depends must NOT pin a GStreamer version on libgstreamer1.0-0"
+for gst_dep in 'libgstreamer1.0-0' 'libgstreamer-plugins-base1.0-0'; do
+	if grep -E '^Depends:' "${builder}" | grep -q "${gst_dep} ("; then
+		fail "Depends must NOT pin a GStreamer version on ${gst_dep}"
+	fi
+done
+# libglib2.0-0 is unversioned for a second, independent reason: on trixie the
+# real package is libglib2.0-0t64 and only its `Provides: libglib2.0-0` satisfies
+# this name. Naming the t64 package here would fail to install on bookworm.
+grep -qE '^Depends:.*libglib2\.0-0,' "${builder}" \
+	|| fail "Depends must name libglib2.0-0 (NOT libglib2.0-0t64, which bookworm lacks)"
+if grep -E '^Depends:' "${builder}" | grep -q 'libglib2.0-0t64'; then
+	fail "Depends must not name libglib2.0-0t64 — it does not exist on bookworm"
 fi
+
+# Every package the SONAME table maps to must actually be declared. This is the
+# half of the closure a static run can prove; the staged half below proves the
+# other direction.
+while IFS='=' read -r _soname pkg; do
+	[ -n "${pkg}" ] || continue
+	case ", ${EXPECT_DEPENDS}," in
+		*", ${pkg},"*|*", ${pkg} ("*) ;;
+		*) fail "Depends omits ${pkg}, which supplies a linked SONAME" ;;
+	esac
+done <<<"${SONAME_PACKAGES}"
 
 # --- Exactly one .deb ---------------------------------------------------------
 # reindex.sh downloads every .deb in a release tag and hard-fails if any package
@@ -199,6 +239,19 @@ for doc in copyright COPYING changelog.Debian.gz; do
 done
 gzip -t "${staged_doc}/changelog.Debian.gz" \
 	|| fail "changelog.Debian.gz is not valid gzip"
+
+# The direction a static run cannot prove: read what the built plugins ACTUALLY
+# link and refuse any SONAME the Depends closure does not cover. Under-declaring
+# a runtime dependency is invisible in a build container — the library is already
+# installed there, so the package installs cleanly and only a device fails.
+command -v objdump >/dev/null \
+	|| fail "objdump is required for the staged dependency-closure check (install binutils)"
+while IFS= read -r soname; do
+	[ -n "${soname}" ] || continue
+	grep -qF "${soname}=" <<<"${SONAME_PACKAGES}" \
+		|| fail "a shipped plugin links ${soname}, which no declared dependency supplies"
+done < <(objdump -p "${stage}${EXPECT_PLUGIN_PATH%/*}"/*.so \
+	| awk '/NEEDED/{print $2}' | sort -u)
 
 leaked="$(find "${stage}" -type f \( -name '*.pc' -o -name '*.a' -o -name '*.la' -o -name '*.h' \) -print)"
 [ -z "${leaked}" ] || fail "development artifacts leaked into the stage: ${leaked}"
