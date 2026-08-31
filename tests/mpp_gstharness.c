@@ -1157,7 +1157,13 @@ assert_src_template_formats (GstElement * element,
 
 GST_START_TEST(test_jpeg_caps_with_harness) {
   static const gchar * const expected_formats[] = {
-    "NV12", "NV16", "NV12_10LE40", "NV16_10LE40",
+    "NV12", "NV16",
+#ifdef HAVE_NV12_10LE40
+    "NV12_10LE40",
+#endif
+#ifdef HAVE_NV16_10LE40
+    "NV16_10LE40",
+#endif
 #ifdef HAVE_RGA
     "NV21", "I420", "YV12", "NV61", "BGR16", "RGB16", "RGB", "BGR",
     "RGBA", "BGRA", "RGBx", "BGRx", "ABGR", "ARGB", "xBGR", "xRGB",
@@ -1187,8 +1193,23 @@ GST_START_TEST(test_jpeg_caps_with_harness) {
 }
 GST_END_TEST
 GST_START_TEST(test_video_decoder_caps_truth) {
+  static const gchar * const expected_formats[] = {
+    "NV12", "NV16",
+#ifdef HAVE_NV12_10LE40
+    "NV12_10LE40",
+#endif
+#ifdef HAVE_NV16_10LE40
+    "NV16_10LE40",
+#endif
+#ifdef HAVE_RGA
+    "NV21", "I420", "YV12", "NV61", "BGR16", "RGB", "BGR", "RGBA",
+    "BGRA", "RGBx", "BGRx",
+#endif
+  };
   GstElementFactory *factory = gst_element_factory_find("mppvideodec");
   fail_unless(factory != NULL);
+  GstElement *element = gst_element_factory_create(factory, NULL);
+  fail_unless(element != NULL);
   const GList *templates =
       gst_element_factory_get_static_pad_templates(factory);
   GstCaps *sink_caps = NULL;
@@ -1213,12 +1234,15 @@ GST_START_TEST(test_video_decoder_caps_truth) {
   fail_unless(gst_caps_can_intersect(sink_caps, h265));
   fail_unless(gst_caps_can_intersect(sink_caps, av1));
   fail_unless(gst_caps_can_intersect(src_caps, nv12));
+  assert_src_template_formats(element, expected_formats,
+      G_N_ELEMENTS(expected_formats));
   gst_caps_unref(h264);
   gst_caps_unref(h265);
   gst_caps_unref(av1);
   gst_caps_unref(nv12);
   gst_caps_unref(sink_caps);
   gst_caps_unref(src_caps);
+  gst_object_unref(element);
   gst_object_unref(factory);
 }
 GST_END_TEST

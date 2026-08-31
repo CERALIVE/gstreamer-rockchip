@@ -2179,3 +2179,20 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
 5. **Reviewer verdict** — `needs-human-review`. Self-mutation coverage is not an
    independent F27 review; this row remains for orchestrator-dispatched review and is not
    self-approved or self-merged.
+
+### Gate decoder 10-bit caps on available GStreamer formats
+
+1. **Provenance SHA** — first-party correction against task baseline
+   `ee2df5dd13d5a5c5774a0fd35a123779b9f64dbc`.
+2. **Red/green outputs** — before the conditional format list, arm64/bookworm's exact
+   template test fails RED: `mppjpegdec0 caps NV16_10LE40 advertise but build
+   deliverability requires it to be omitted`. Both GStreamer 1.22 and 1.26 Meson
+   configurations detect `HAVE_NV12_10LE40` but not `HAVE_NV16_10LE40`; GREEN makes
+   `mppjpegdec` and `mppvideodec` advertise exactly that deliverable set on both legs.
+3. **Hardware gate** — `hardware-independent`. Meson's header-symbol checks write the
+   same generated config macros that the template assertion consumes, so the test covers
+   the selected headers rather than a version guess.
+4. **MPP ABI closure** — unchanged: the correction selects existing string literals and
+   adds no MPP API call; the closure remains empty against pinned MPP 1.5.0-1.
+5. **Reviewer verdict** — `needs-human-review`. The result requires an
+   orchestrator-dispatched independent review; no self-review is claimed.
