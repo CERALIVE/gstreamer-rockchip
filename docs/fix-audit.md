@@ -1603,3 +1603,210 @@ against the immutable board-captured Radxa decoder golden. The parent and this b
 produce byte-identical output in both containers, so neither fix introduces parity
 drift. No property, rank or caps surface was touched, and no frozen property was
 altered — `rotation` is only *set* by a test, never redefined.
+
+### FIX-10 — a refused temporal reference cfg fails the apply and stays outstanding
+
+1. **Provenance SHA** — `eb9e3dca77c4e2d6cc71f371dd4913c322a3a143`. First-party fix (no
+   upstream pick), against task baseline `5f09ef41cb12b4de59528b23cc718554c5835e65`.
+   Ledger origin O1-B5 ≡ H5-B6, corroborated across two independent lanes.
+2. **Red/green outputs** — focused command:
+   `GST_CHECKS=test_refused_temporal_ref_cfg_fails_the_apply_and_retries .../mpp-gstharness`
+   in the arm64 bookworm container, with the mock arming an `MPP_ENC_SET_REF_CFG` refusal.
+
+   RED at the parent:
+
+   ```
+   test_refused_temporal_ref_cfg_fails_the_apply_and_retries:0:
+     'push_encoder_frame(h, 1)' (0) is not equal to 'GST_FLOW_NOT_NEGOTIATED' (-4)
+   ```
+
+   `GST_FLOW_OK` is the defect: MPP refused the reference structure and the element
+   went on to configure and commit the whole rate-control config as if it had not.
+
+   GREEN at the fix: `Checks: 1, Failures: 0, Errors: 0`; full suite `Checks: 40,
+   Failures: 0` and `meson test` `Ok: 3, Fail: 0` on both bookworm/1.22 and
+   trixie/1.26.
+
+   The test asserts four things, not just the flow return: the refusal reaches the
+   caller (`GST_FLOW_NOT_NEGOTIATED`), `MPP_ENC_SET_CFG` is NOT issued for the
+   rejected config, the request is retried on the next pass with no further property
+   write, and it then lands once MPP accepts it. The NULL-cfg branch (returning to
+   flat IPPP) is covered by the same contract.
+
+   Mutation check (three mutants, all killed):
+
+   | mutant | result |
+   |---|---|
+   | discard the return, as the parent did | **KILLED** — first push returns OK |
+   | propagate the failure but leave `ref_dirty` cleared | **KILLED** — the retry push returns OK; the request was abandoned |
+   | propagate the failure but leave `prop_dirty` cleared | **KILLED** — same assertion; the next apply short-circuits before reaching the retry |
+
+   The second and third mutants are the point of the fix rather than a bonus: both
+   produce a *visible* first failure and then silently give up, which is the sticky
+   transition H5-B6 describes.
+3. **Hardware gate** — `hardware-independent`. The refusal is injected at the MPP
+   control-command boundary, which is the same call the board makes.
+4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh build-ci/gst/rockchipmpp/libgstrockchipmpp.so`:
+   `MPP symbols referenced and present: 68`, empty diff against the pinned
+   `librockchip-mpp1_1.5.0-1_arm64.deb`, on both suites. The fix adds no MPP call.
+5. **Reviewer verdict** — `needs-human-review`. Reviewer would be the author, which the
+   F27 diversity rule does not accept, and todo 15 established that a self-directed
+   sub-agent review does not satisfy it either. An orchestrator-dispatched independent
+   review still owes this row a verdict.
+
+### FIX-14 — the declared level is validated against frame rate and bitrate, not resolution alone
+
+1. **Provenance SHA** — `9300c2488dccfec9928e45ae15c44823ee6cc816`. First-party fix,
+   against the same baseline. Ledger origin H5-B4, WAVE-2 falsification verdict REAL
+   with the mechanism corrected to "MPP corrects resolution-under-leveling but NOT
+   framerate/bitrate under-leveling".
+2. **Red/green outputs** — the falsifier's premise was re-verified against the pinned
+   MPP source before any code was written, per the todo-12 lesson that a lane's cited
+   mechanism can be wrong. Both correction sites read only the frame-size column:
+
+   ```
+   mpp/codec/enc/h264/h264e_sps.c:145-152   if (level_infos[i].max_MBs >= mbs) { ... }
+   mpp/codec/enc/h265/h265e_ps.c:142-148    if (levels[i].maxLumaSamples >= maxlumas) { ... }
+   ```
+
+   `max_MBPS` / `max_BR` and `maxLumaSamplesPerSecond` / `maxBitrateMain|High` sit in
+   the same two tables and are never read. Premise CONFIRMED, both codecs.
+
+   Focused command: the nine level tests in `.../mpp-gstharness`. RED at the parent,
+   identically on bookworm/1.22 and trixie/1.26:
+
+   ```
+   test_h264_level_is_raised_for_an_out_of_level_frame_rate:0:
+     'mpp_mock_last_cfg_s32("h264:level")' (40) is not equal to '42' (42)
+   test_h264_level_is_raised_for_an_out_of_level_bitrate:0:
+     'mpp_mock_last_cfg_s32("h264:level")' (40) is not equal to '41' (41)
+   test_h265_level_is_raised_for_an_out_of_level_frame_rate:0:
+     'mpp_mock_last_cfg_s32("h265:level")' (120) is not equal to '123' (123)
+   test_h265_level_follows_the_tier_bitrate_ceiling:0:
+     'mpp_mock_last_cfg_s32("h265:level")' (120) is not equal to '123' (123)
+   ```
+
+   The cited 1080p60-at-level-4 case was checked against the spec rather than taken
+   from the plan: 1920x1080 aligns to 1920x1088, i.e. 8160 macroblocks, which is
+   INSIDE level 4's 8192 frame-size limit — so MPP's own correction leaves it alone —
+   while 60 fps of them is 489600 MB/s against level 4's 245760 ceiling. Level 4.1
+   shares that 245760 ceiling, so 4.2 (522240) is the first conforming level, which
+   is also what the element's own `level` property documentation says 1080p60 needs.
+   For H.265 the same stream is 2073600 luma samples (inside level 4's 2228224) at
+   124416000 samples/s (outside its 66846720), so it raises to 4.1.
+
+   GREEN at the fix: `Checks: 40, Failures: 0, Errors: 0`; `meson test` `Ok: 3, Fail: 0`
+   on both suites.
+
+   Mutation check (seven mutants, all killed):
+
+   | mutant | result |
+   |---|---|
+   | use the declared level directly, as the parent did | **KILLED** by all four raise tests |
+   | drop the macroblock-rate axis | **KILLED** — 1080p60 stays at 40 |
+   | drop the bitrate axis | **KILLED** — 1080p30 at 30 Mbps stays at 40 |
+   | ignore the tier and always read the main-tier ceiling | **KILLED** — a high-tier 1080p30 at 16 Mbps is raised to 4.1 instead of staying at 4 |
+   | compare level values instead of table positions | **KILLED** — level 1b (value 99) is treated as stronger than 6.2 and never raised |
+   | count raw pixels instead of MPP_ALIGN(16) macroblocks | **KILLED** — 1920x1090 stays at 40 where MPP would itself raise past it |
+   | always take the required level (allowing a *lower* one) | **KILLED** — 320x240 drops the declared 4 to 1.3 |
+
+   **Enforcement is warn+raise, not reject, and that was decided by checking rather
+   than by preference.** The plan's QA scenario makes rejection conditional on no
+   existing cerastream fixture profile tripping it. cerastream sets neither `level`
+   nor `profile` on either element — `crates/cerastream-hal/src/profiles/rk3588.rs`
+   and `crates/cerastream-core/src/graph/templates/encoders.rs` emit only
+   `zero-copy-pkt`, `rc-mode`, `qp-max`, `gop` and optional `width`/`height` — so
+   every stream runs at the default level 4, while `Resolution`/`Framerate` in
+   `crates/cerastream-core/src/graph/spec.rs` offer 1080p, 1440p and 2160p at 50/60
+   fps. A hard rejection would therefore fail negotiation for every shipped 1080p50,
+   1080p60, 1440p and 2160p profile on both codecs. Raising matches what MPP already
+   does on the axis it checks, and leaves the property reporting what the operator
+   asked for while the caps and the SPS/VPS report what was encoded.
+3. **Hardware gate** — `hardware-independent`. Level selection is a header-arithmetic
+   decision made before any frame is submitted; the tests assert the value handed to
+   `mpp_enc_cfg_set_s32("h264:level"/"h265:level")` and the negotiated caps, both of
+   which are identical on and off board. The resulting bitstream conformance is not
+   claimed here and is not measured by this row.
+4. **MPP ABI closure** — 68 symbols, empty diff against the pinned MPP, on both suites.
+   The fix adds arithmetic and reuses the existing checked cfg setters.
+5. **Reviewer verdict** — `needs-human-review`, on the same F27 grounds as the row above.
+
+### FIX-15 — mpph265enc publishes profile, tier and level in its src caps
+
+1. **Provenance SHA** — `a01fce7db90e3291ef74ff5336ef8086a91cd21d`. First-party fix,
+   against the same baseline. Ledger origin H5-B5 (REAL, low/med). Depends on FIX-14:
+   the caps carry the EFFECTIVE level, so publishing them before the validation
+   existed would have advertised the declared level, which is the field FIX-14 exists
+   to correct.
+2. **Red/green outputs** — focused command:
+   `GST_CHECKS=test_h265_src_caps_publish_profile_tier_and_level .../mpp-gstharness`.
+
+   RED with the parent's caps content restored (all three fields absent):
+
+   ```
+   test_h265_src_caps_publish_profile_tier_and_level:0: src caps carry no 'profile'
+   field: video/x-h265, stream-format=(string)byte-stream, alignment=(string)au,
+   width=(int)1920, height=(int)1080, pixel-aspect-ratio=(fraction)1/1,
+   framerate=(fraction)30/1, interlace-mode=(string)progressive,
+   colorimetry=(string)bt709, chroma-site=(string)mpeg2
+   ```
+
+   GREEN at the fix, both the default and a Main-10/high-tier/1080p60 configuration:
+   `Checks: 1, Failures: 0, Errors: 0`.
+
+   Mutation check (three mutants, all killed):
+
+   | mutant | result |
+   |---|---|
+   | omit the profile and tier writes | **KILLED** — `src caps carry no 'profile' field` |
+   | publish the property nick (`main10`) instead of the GStreamer spelling | **KILLED** — `src caps profile is 'main10', expected 'main-10'` |
+   | publish general_level_idc (`120`) instead of the level name | **KILLED** — `src caps level is '120', expected '4'` |
+
+   The last two are the reason the values are not derived with `g_enum_to_string` the
+   way the H.264 path derives its own. `g_enum_to_string` returns the enum's
+   *value_name*, and this element's H.265 profile nicks (`main10`, `main-still`) are
+   not the video/x-h265 spellings (`main-10`, `main-still-picture`), while its level
+   property holds general_level_idc (120) where the caps field holds the level number
+   (4). Tier is published alongside because level 4 main tier and level 4 high tier
+   are different constraints and a level without its tier is only half an answer.
+3. **Hardware gate** — `hardware-independent`. Caps construction is CPU-side.
+4. **MPP ABI closure** — 68 symbols, empty diff against the pinned MPP, on both suites.
+   The fix touches no MPP call.
+5. **Reviewer verdict** — `needs-human-review`, on the same F27 grounds as the rows above.
+
+### Verification of the three rows above
+
+Both containers were configured with the flags CI and `debian/rules` use
+(`-Drkximage=enabled -Drockchipmpp=enabled -Dkmssrc=enabled -Drga=enabled`).
+
+| gate | bookworm / GStreamer 1.22 | trixie / GStreamer 1.26 |
+|---|---|---|
+| `meson test -C build-ci` | `Ok: 3, Fail: 0` (`Checks: 40, Failures: 0`) | `Ok: 3, Fail: 0` (`Checks: 40, Failures: 0`) |
+| red at parent reproduced | yes, all three fixes | yes — all three fix sites reverted to parent behaviour in one build gives `Checks: 40, Failures: 8`, covering every raise test, the ref-cfg propagation test and the H.265 caps test |
+| `ci/check-mpp-abi.sh` | 68 symbols, empty diff | 68 symbols, empty diff |
+| `ci/check-glibc-floor.sh` | `highest GLIBC import GLIBC_2.17; device floor GLIBC_2.36` | not gated (forward-compat leg) |
+| `ci/check-glibc-floor.test.sh` | all assertions passed | — |
+| `tests/parity-check.sh`, mock preloaded, parent vs branch | `diff` clean — **byte-identical** | `diff` clean — **byte-identical** |
+| `tests/parity-check.sh` `PARITY_SOURCE_ONLY=1` | exit 0 | exit 0 |
+
+`tests/parity-check.sh` was run in its differential form, per the documented mocked-host
+limitation: with the mock preloaded both source-derived contract checks pass,
+`mpph264enc` and `mpph265enc` pass, and the run then stops on the `mppvideodec` line
+against the immutable board-captured Radxa decoder golden. The parent
+(`5f09ef41`) and this branch produce byte-identical output in both containers.
+
+The parity gate deserves a specific note here, because FIX-15 adds caps fields. It adds
+them only to the **negotiated** src caps; the static pad template is untouched, and the
+template is what `gst-inspect-1.0` prints and what the `src_caps=` golden line pins. The
+golden line for `mpph265enc` therefore still reads exactly
+
+```
+src_caps=video/x-h265 width: [ 96, 2147483647 ] height: [ 64, 2147483647 ] stream-format: { (string)byte-stream } alignment: { (string)au }
+```
+
+and needed no edit. Constraining the template to a profile list instead would have been
+a caps SHRINK, not an additive change, so it was deliberately not done — the H.264
+element's own template likewise omits `level` while its negotiated caps have carried
+one since the fork point. No property was added, removed, renamed, retyped or given a
+different default by any of the three fixes; the only new symbol is the internal
+`gst_mpp_enc_snapshot_rate_info()` helper, which is not a GObject property.
