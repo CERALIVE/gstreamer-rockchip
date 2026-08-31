@@ -2005,6 +2005,41 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
 4. **MPP ABI closure** — bookworm resolved 68 referenced-and-present MPP symbols against
    26 sibling libraries; trixie resolved the same 68 against 23. Both reported an empty
    diff against pinned MPP 1.5.0-1. The correction adds no MPP API call.
-5. **Reviewer verdict** — `needs-human-review`. This correction responds to the first
-   independent `needs-fix` verdict but has not received the required follow-up independent
-   review. It remains open and must not be self-merged.
+5. **Reviewer verdict** — `needs-fix`. The second independent review fully confirmed the
+   production correction: NAL types and bounds, forbidden-bit/temporal-ID validation,
+   Annex-B and length-prefixed framing, codec scoping, sweep removal, real fixtures, UAF
+   repair, mutation results, and scope/CI were all correct. It found one test-only gap:
+   replacing the original eight-input ordered-stream guard with the stronger four-input
+   reordered scenario lost the full-length normal-stream regression. Production required
+   no change; the missing ordered guard is restored in the row below.
+
+### Eight-frame ordered decoder identity — review correction
+
+1. **Provenance SHA** — `5668febfca238fde8f7835c80116031e65521d0a`,
+   first-party test-only correction to the second independent review. It restores
+   `NORMAL_INPUTS = 8` alongside, rather than instead of, the existing four-frame
+   reordered/mixed-PTS identity scenario. No production source or mock API changed.
+2. **Red/green outputs** — RED by review inspection at `35360289`: only four unique
+   planned identities remained, covering three downstream buffers plus one retained tail,
+   so the original eight-input ordered-stream A/B no longer existed. GREEN at `5668febf`:
+   eight ordered H.264 VCL inputs plan unique identities `0x51` through `0x58`; seven
+   downstream buffers assert the exact PTS sequence
+   `10000000000,10033333333,10066666666,10099999999,10133333332,10166666665,10199999998`
+   and identities `0x51` through `0x57`. The eighth frame is explicitly present in the
+   decoder's retained queue as frame 7, PTS `10233333331`, identity `0x58`. Mock output,
+   accounted-output, and queued-input totals are exactly `8/8/0`, and an immediate harness
+   pull after the seven expected downstream buffers proves there is no unexpected extra
+   delivery. The four-frame reordered test remains green and unchanged. Fresh isolated
+   mutations are all killed: size proxy (11 accounting/identity failures), broad sweep
+   (untimestamped `1 -> 0` plus two identity failures), and `last_frame` reuse (stale
+   burst/sequential pending `64/1`). Full Meson passed `4/4` in bookworm/GStreamer 1.22
+   and trixie/GStreamer 1.26; both source-contract goldens passed in both suites.
+3. **Hardware gate** — `hardware-independent`. The ordered guard observes eight distinct
+   fd-backed mock-MPP buffers through the real GstVideoDecoder finish path, including the
+   plugin's deliberate one-frame ready queue. It needs no board behavior.
+4. **MPP ABI closure** — bookworm resolved 68 referenced-and-present MPP symbols against
+   26 sibling libraries; trixie resolved the same 68 against 23. Both reported an empty
+   diff against pinned MPP 1.5.0-1. The test-only correction adds no MPP API call.
+5. **Reviewer verdict** — `needs-human-review`. This closes the sole test-coverage gap
+   from the second independent `needs-fix` verdict. The branch remains open for final
+   independent confirmation and must not be self-merged.
