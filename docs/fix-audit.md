@@ -1902,3 +1902,27 @@ element's own template likewise omits `level` while its negotiated caps have car
 one since the fork point. No property was added, removed, renamed, retyped or given a
 different default by any of the three fixes; the only new symbol is the internal
 `gst_mpp_enc_snapshot_rate_info()` helper, which is not a GObject property.
+
+### FIX-2 — allocator import failures leave MppBuffer ownership unchanged
+
+1. **Provenance SHA** — `380bc5ca2a9250909440629b9cbaef9d72e07ff6`, first-party
+   correction for the verified H1-B3/H2-B6 allocator mechanism. H1-B4 remains
+   falsified and is deliberately untouched.
+2. **Red/green outputs** — `mpp-allocator-seam` creates real mock-backed dmafds and
+   runs two deterministic failures: an external-group `mpp_buffer_import_with_tag()`
+   refusal, and a same-group `dup()` refusal. GREEN: both return `NULL`, make no
+   `mpp_buffer_inc_ref()` call, retain the original one-reference count, and the
+   dup failure never reaches `gst_fd_allocator_alloc()`. Mutation check: removing the
+   common `!mem` return is **KILLED** by GStreamer's `gst_mini_object_set_qdata: assertion
+   'object != NULL' failed`; removing the explicit `dup_fd < 0` return is **KILLED**
+   because the same-group test receives a non-NULL memory from `fd=-1` instead of NULL.
+   LeakSanitizer cannot start under qemu-user (documented workspace limitation), so the
+   mock's deterministic ref-count and increment counter are the portable leak proof.
+3. **Hardware gate** — `hardware-independent`. Both paths are allocator ownership and
+   fd-error handling before any hardware MPP operation.
+4. **MPP ABI closure** — `ci/check-mpp-abi.sh` reports 68 referenced-and-present MPP
+   symbols with an empty closure diff against pinned MPP 1.5.0-1 in both bookworm and
+   trixie. The fix adds no MPP API call and the mock retains the pinned five-argument
+   `mpp_buffer_import_with_tag()` declaration.
+5. **Reviewer verdict** — `needs-human-review`. The author performed the required
+   self-mutation check only; this row does not claim independent F27 review.
