@@ -1751,6 +1751,10 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
 
   /* This encoded frame must be the oldest one */
   frame = gst_video_encoder_get_oldest_frame (encoder);
+  if (!frame) {
+    GST_WARNING_OBJECT (self, "dropping packet without an oldest frame");
+    goto out;
+  }
 
   if (GST_MPP_ENC_FLUSHING (encoder) && !self->draining)
     goto drop;

@@ -29,7 +29,26 @@ Every fix row appended by later todos must contain exactly these five fields:
 3. **Hardware gate** — `hardware-independent`.
 4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so`
    reported 68 referenced-and-present MPP symbols and an empty closure diff in both suites.
-5. **Reviewer verdict** — `needs-human-review`.
+5. **Reviewer verdict** — `confirmed` by independent concurrency review after the
+   no-progress deadline and watchdog-cleanup mutation paths were exercised.
+
+### aa7c308d2a4b74de91c4e07677a09f705a71c23f — missing oldest-frame hardening
+
+1. **Provenance SHA** — defensive first-party hardening against flush fix parent
+   `aa7c308d2a4b74de91c4e07677a09f705a71c23f`; the hardening commit is the commit
+   containing this row.
+2. **Red/green outputs** — the mock withheld one encoded packet while the test deliberately
+   retired the corresponding `GstVideoCodecFrame`, then released the packet into both the normal
+   finish path and the zero-length rate-controller drop path. At the parent,
+   `test_missing_oldest_frame_drops_normal_packet_safely` terminated with
+   `Received signal 11 (Segmentation fault)`. With the guard, both focused cases passed:
+   `Checks: 2, Failures: 0, Errors: 0`; packet deinit was exactly once with zero live packets or
+   buffers.
+3. **Hardware gate** — `hardware-independent`.
+4. **MPP ABI closure** — bookworm and trixie `ci/check-mpp-abi.sh` runs each reported 68
+   referenced-and-present MPP symbols and an empty diff against pinned MPP 1.5.0-1.
+5. **Reviewer verdict** — `confirmed` by the same independent review; both normal
+   and rate-controller-drop orphan packet paths converge on one packet deinit.
 
 All three rows below were produced in a native-headers `debian:bookworm-slim`
 aarch64 container with the pinned MPP 1.5.0-1 / RGA 2.2.0-1 packages, built with

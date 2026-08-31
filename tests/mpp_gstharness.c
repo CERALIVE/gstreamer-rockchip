@@ -378,6 +378,51 @@ GST_START_TEST(test_zero_length_rc_drop_is_not_pushed_downstream) {
 }
 GST_END_TEST
 
+static void check_missing_oldest_frame_is_safe(gboolean rc_drop) {
+  mpp_mock_reset();
+  mpp_mock_enc_arm_reset_drain();
+  if (rc_drop)
+    mpp_mock_enc_set_packet_length(0, 0);
+
+  GstHarness *h = gst_harness_new("mpph264enc");
+  fail_unless(h != NULL);
+  g_object_set(h->element, "bitrate", 500, "rc-mode", 1, "zero-copy-pkt",
+               FALSE, NULL);
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=320,height=240,framerate=30/1");
+  gst_harness_set_drop_buffers(h, TRUE);
+  gst_harness_play(h);
+  push_reset_frame(h, 0);
+  fail_unless(wait_for_uint(mpp_mock_enc_queued_packets, 1),
+              "mock MPP did not accept the frame");
+
+  GstVideoEncoder *encoder = GST_VIDEO_ENCODER(h->element);
+  GST_VIDEO_ENCODER_STREAM_LOCK(encoder);
+  GstVideoCodecFrame *frame = gst_video_encoder_get_oldest_frame(encoder);
+  fail_unless(frame != NULL);
+  gst_buffer_replace(&frame->output_buffer, NULL);
+  gst_video_encoder_finish_frame(encoder, frame);
+  GST_VIDEO_ENCODER_STREAM_UNLOCK(encoder);
+
+  mpp_mock_enc_release_packets(1);
+  fail_unless(wait_for_uint(mpp_mock_enc_packet_deinits, 1),
+              "orphan packet was not released");
+  fail_unless_equals_int(mpp_mock_enc_packet_double_deinits(), 0);
+  fail_unless_equals_int(mpp_mock_enc_live_packets(), 0);
+  gst_harness_teardown(h);
+  fail_unless_equals_int(mpp_mock_enc_live_buffers(), 0);
+}
+
+GST_START_TEST(test_missing_oldest_frame_drops_normal_packet_safely) {
+  check_missing_oldest_frame_is_safe(FALSE);
+}
+GST_END_TEST
+
+GST_START_TEST(test_missing_oldest_frame_drops_rc_packet_safely) {
+  check_missing_oldest_frame_is_safe(TRUE);
+}
+GST_END_TEST
+
 GST_START_TEST(test_flush_wakes_pending_full_frame) {
   const guint max_pending = 4;
   const gint64 wake_deadline_us = G_USEC_PER_SEC;
@@ -1358,6 +1403,8 @@ Suite *mpp_gstharness_suite(void) {
       tc, test_runtime_property_snapshot_is_coherent_and_eventually_applied);
   tcase_add_test(tc, test_encoder_reset_drains_old_packets_before_new_session);
   tcase_add_test(tc, test_flush_wakes_pending_full_frame);
+  tcase_add_test(tc, test_missing_oldest_frame_drops_normal_packet_safely);
+  tcase_add_test(tc, test_missing_oldest_frame_drops_rc_packet_safely);
   suite_add_tcase(s, tc);
   return s;
 }
