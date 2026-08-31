@@ -2176,9 +2176,7 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    compiled the conversion path.
 4. **MPP ABI closure** — unchanged: this is static caps construction only and introduces
    no MPP API call; the closure remains empty against pinned MPP 1.5.0-1.
-5. **Reviewer verdict** — `needs-human-review`. Self-mutation coverage is not an
-   independent F27 review; this row remains for orchestrator-dispatched review and is not
-   self-approved or self-merged.
+5. **Reviewer verdict** — `confirmed`. Confirmed by independent oracle review: FIX-22's RGA gate confirmed to reuse the SAME HAVE_RGA mechanism used elsewhere (not a parallel/divergent conditional), matching set_format's actual negotiation reality. FIX-23's 10-bit gate confirmed to derive from the same HAVE_NV12_10LE40/HAVE_NV16_10LE40 macros as the format table; trixie's CI run independently confirmed NV16_10LE40 correctly evaluates absent (pre-GStreamer-1.28), organically proving the conditional. Reference-config golden parity confirmed EXACT (mppvideodec 17/17, mppjpegdec 27/27, zero diff against Radxa runtime goldens) — the stricter-than-usual 'shrink only in non-deliverable configs' requirement satisfied.
 
 ### Gate decoder 10-bit caps on available GStreamer formats
 
@@ -2194,5 +2192,4 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    the selected headers rather than a version guess.
 4. **MPP ABI closure** — unchanged: the correction selects existing string literals and
    adds no MPP API call; the closure remains empty against pinned MPP 1.5.0-1.
-5. **Reviewer verdict** — `needs-human-review`. The result requires an
-   orchestrator-dispatched independent review; no self-review is claimed.
+5. **Reviewer verdict** — `confirmed`. Confirmed by independent oracle review: FIX-22's RGA gate confirmed to reuse the SAME HAVE_RGA mechanism used elsewhere (not a parallel/divergent conditional), matching set_format's actual negotiation reality. FIX-23's 10-bit gate confirmed to derive from the same HAVE_NV12_10LE40/HAVE_NV16_10LE40 macros as the format table; trixie's CI run independently confirmed NV16_10LE40 correctly evaluates absent (pre-GStreamer-1.28), organically proving the conditional. Reference-config golden parity confirmed EXACT (mppvideodec 17/17, mppjpegdec 27/27, zero diff against Radxa runtime goldens) — the stricter-than-usual 'shrink only in non-deliverable configs' requirement satisfied.
