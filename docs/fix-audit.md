@@ -29,8 +29,13 @@ Every fix row appended by later todos must contain exactly these five fields:
    live-reconfiguration assumption and measures the boundary on RK3588 hardware.
 4. **MPP ABI closure** — bookworm and trixie `ci/check-mpp-abi.sh` runs each reported 68
    referenced-and-present MPP symbols and an empty diff against pinned MPP 1.5.0-1.
-5. **Reviewer verdict** — `needs-human-review`. No self-directed review is claimed; the branch and
-   PR remain open for the orchestrator-dispatched independent F27 review.
+5. **Reviewer verdict** — `confirmed`. Confirmed by independent orchestrator-dispatched oracle review:
+   drain ordering traced correct (res_dirty setter → drain self->frames + pending_frames to zero → mutate
+   geometry state → renegotiate caps → resume), pending_frames atomicity consistent with todo 11/15's
+   conventions, mutation-tested (swap-before-drain mutant correctly mistags frame geometry), 20.075ms/4-frame
+   measured drain gap confirmed genuine and well within the 1-GOP bound, live resolution ladder intent
+   preserved (in-place bounded drain, not a pipeline restart). Board-drill id d7-runtime-resolution-drain
+   assigned for todo 26's real-hardware validation.
 
 ### ab2e7d1f2985167a3a242726c001ae47452ae0e4 — flush cancellation and bounded encoder drain
 
