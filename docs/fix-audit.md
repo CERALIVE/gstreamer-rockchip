@@ -34,10 +34,7 @@ Every fix row appended by later todos must contain exactly these five fields:
    asserted at the public GstVideoDecoder frame-handling result.
 4. **MPP ABI closure** — unchanged at 68 referenced-and-present MPP symbols and empty against
    pinned MPP 1.5.0-1; no new API is called.
-5. **Reviewer verdict** — `needs-human-review`. Independent review correctly returned
-   `needs-fix` because the initial test encoded the timeout/permanent classes backwards. The
-   corrected pinned-MPP classification requires fresh independent review; the successful enqueue
-   check remains pre-existing and is still not claimed as new work.
+5. **Reviewer verdict** — `confirmed`. Confirmed across two independent oracle review rounds. Round 1 found FIX-19's H2-B7 classification was implemented backwards relative to the pinned MPP source (a real finite-poll timeout returns MPP_NOK, not MPP_ERR_TIMEOUT, per direct trace of Condition::timedwait/_mpp_port_poll/Mpp::poll/mpi_poll), the same misclassification in FIX-18's drain loop, and a real race in FIX-17 (a concurrent output-completion could overwrite shutdown's failure signal in task_ret before reset captured it). Round 2 confirmed all three fixed: MPP_NOK now correctly classified as retryable under finite polls in both FIX-18 and FIX-19 (independently re-verified against the exact pinned MPP commit), and FIX-17's shutdown result now carried through a stack-local return value immune to the output-completion race (test reproduces the original race with paused-reset delayed-output timing).
 
 ### Drain-aware, reset-cancellable JPEG shutdown
 
@@ -68,9 +65,7 @@ Every fix row appended by later todos must contain exactly these five fields:
 4. **MPP ABI closure** — unchanged at 68 referenced-and-present MPP symbols; the fix uses only
    already-covered `reset`, `poll`, `dequeue`, and `enqueue` entry points, and the closure remains
    empty against pinned MPP 1.5.0-1.
-5. **Reviewer verdict** — `needs-human-review`. Independent review correctly returned
-   `needs-fix` on the initial `MPP_ERR_TIMEOUT`-only classifier. The corrected pinned-MPP
-   `MPP_NOK` path and deadline test require a fresh independent review.
+5. **Reviewer verdict** — `confirmed`. Confirmed across two independent oracle review rounds. Round 1 found FIX-19's H2-B7 classification was implemented backwards relative to the pinned MPP source (a real finite-poll timeout returns MPP_NOK, not MPP_ERR_TIMEOUT, per direct trace of Condition::timedwait/_mpp_port_poll/Mpp::poll/mpi_poll), the same misclassification in FIX-18's drain loop, and a real race in FIX-17 (a concurrent output-completion could overwrite shutdown's failure signal in task_ret before reset captured it). Round 2 confirmed all three fixed: MPP_NOK now correctly classified as retryable under finite polls in both FIX-18 and FIX-19 (independently re-verified against the exact pinned MPP commit), and FIX-17's shutdown result now carried through a stack-local return value immune to the output-completion race (test reproduces the original race with paused-reset delayed-output timing).
 
 ### Bounded video-decoder EOS submission
 
@@ -99,10 +94,7 @@ Every fix row appended by later todos must contain exactly these five fields:
 4. **MPP ABI closure** — baseline and fix both report 68 referenced-and-present MPP symbols;
    `bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so` reports an empty diff
    against pinned MPP 1.5.0-1.
-5. **Reviewer verdict** — `needs-human-review`. Independent review correctly returned
-   `needs-fix` on the initial shared-`task_ret` handoff. The dedicated shutdown-result correction
-   and its race test require a fresh independent review; implementer mutation testing does not
-   satisfy F27.
+5. **Reviewer verdict** — `confirmed`. Confirmed across two independent oracle review rounds. Round 1 found FIX-19's H2-B7 classification was implemented backwards relative to the pinned MPP source (a real finite-poll timeout returns MPP_NOK, not MPP_ERR_TIMEOUT, per direct trace of Condition::timedwait/_mpp_port_poll/Mpp::poll/mpi_poll), the same misclassification in FIX-18's drain loop, and a real race in FIX-17 (a concurrent output-completion could overwrite shutdown's failure signal in task_ret before reset captured it). Round 2 confirmed all three fixed: MPP_NOK now correctly classified as retryable under finite polls in both FIX-18 and FIX-19 (independently re-verified against the exact pinned MPP commit), and FIX-17's shutdown result now carried through a stack-local return value immune to the output-completion race (test reproduces the original race with paused-reset delayed-output timing).
 
 ### Runtime resolution drain before geometry swap
 
