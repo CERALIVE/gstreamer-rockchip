@@ -17,6 +17,9 @@ void mpp_mock_dec_disarm (void);
 void mpp_mock_dec_release_packets (void);
 unsigned mpp_mock_dec_live_packets (void);
 unsigned mpp_mock_dec_outputs (void);
+void mpp_mock_dec_set_output_suppressed (int suppressed);
+void mpp_mock_dec_set_output_pts (RK_S64 pts);
+void mpp_mock_dec_set_output_buffers (int enabled);
 void mpp_mock_dec_set_frame_format (MppFrameFormat format);
 void mpp_mock_dec_set_put_result (unsigned buffer_full_count, MPP_RET terminal);
 unsigned mpp_mock_dec_put_calls (void);
@@ -38,25 +41,44 @@ unsigned mpp_mock_jpeg_input_poll_calls (void);
   "alignment=(string)au,width=(int)" G_STRINGIFY (DEC_WIDTH) ","        \
   "height=(int)" G_STRINGIFY (DEC_HEIGHT) ",framerate=(fraction)30/1"
 
-/* gstmppdec.c's own GST_MPP_DEC_MAX_PENDING_FRAMES. Restated rather than
- * included because it is private to the plugin. */
-#define PENDING_BOUND 64
 #define PENDING_INPUTS 300
-#define PENDING_SLACK 8
+#define HEADER_INPUTS 300
+#define NORMAL_INPUTS 8
 #define DRAIN_TIMEOUT_US (20 * G_USEC_PER_SEC)
+#define ACCOUNTING_TIMEOUT_US (2 * G_USEC_PER_SEC)
+
+static guint accounting_failures;
+
+static GstClockTime
+input_pts (guint index)
+{
+  return 10 * GST_SECOND + index * (GST_SECOND / 30);
+}
+
+static GstBuffer *
+make_sized_input_buffer (gsize size, GstClockTime pts)
+{
+  GstBuffer *buf = gst_buffer_new_allocate (NULL, size, NULL);
+
+  gst_buffer_memset (buf, 0, 0, size);
+  GST_BUFFER_PTS (buf) = pts;
+  GST_BUFFER_DTS (buf) = pts;
+  GST_BUFFER_DURATION (buf) = GST_SECOND / 30;
+  return buf;
+}
 
 static GstBuffer *
 make_input_buffer (guint index)
 {
-  GstBuffer *buf = gst_buffer_new_allocate (NULL, 64, NULL);
-
-  gst_buffer_memset (buf, 0, 0, 64);
   /* Far above the mock's stale output PTS so the decoder's display-order
    * matcher can never pair an output with a pending frame. */
-  GST_BUFFER_PTS (buf) = 10 * GST_SECOND + index * (GST_SECOND / 30);
-  GST_BUFFER_DTS (buf) = GST_BUFFER_PTS (buf);
-  GST_BUFFER_DURATION (buf) = GST_SECOND / 30;
-  return buf;
+  return make_sized_input_buffer (64, input_pts (index));
+}
+
+static GstBuffer *
+make_untimestamped_input_buffer (gsize size)
+{
+  return make_sized_input_buffer (size, GST_CLOCK_TIME_NONE);
 }
 
 static gboolean
@@ -109,6 +131,33 @@ pending_frame_count (GstHarness * h)
 
   g_list_free_full (frames, (GDestroyNotify) gst_video_codec_frame_unref);
   return n;
+}
+
+static gboolean
+wait_for_pending_count (GstHarness * h, guint want, gint64 timeout_us)
+{
+  gint64 deadline = g_get_monotonic_time () + timeout_us;
+
+  while (pending_frame_count (h) != want) {
+    if (g_get_monotonic_time () > deadline)
+      return FALSE;
+    g_usleep (1000);
+  }
+  return TRUE;
+}
+
+static GstBuffer *
+wait_for_output_buffer (GstHarness * h)
+{
+  gint64 deadline = g_get_monotonic_time () + DRAIN_TIMEOUT_US;
+  GstBuffer *buffer;
+
+  while (!(buffer = gst_harness_try_pull (h))) {
+    if (g_get_monotonic_time () > deadline)
+      return NULL;
+    g_usleep (1000);
+  }
+  return buffer;
 }
 
 static GstHarness *
@@ -421,10 +470,12 @@ static void
 test_unmatched_pts_pending_list_is_bounded (void)
 {
   GstHarness *h = start_decoder (FALSE);
-  guint pending;
+  guint burst_pending;
+  guint sequential_pending = 0;
   guint i;
+  gboolean constant_search_domain = TRUE;
 
-  g_print ("== unmatched-PTS pending bound ==\n");
+  g_print ("== stale-PTS orphan accounting ==\n");
 
   for (i = 0; i < PENDING_INPUTS; i++)
     g_assert_cmpint (gst_harness_push (h, make_input_buffer (i)), ==,
@@ -434,32 +485,165 @@ test_unmatched_pts_pending_list_is_bounded (void)
     g_error ("decoder produced %u/%u outputs before the drain timeout",
         mpp_mock_dec_outputs (), PENDING_INPUTS);
 
-  g_usleep (200 * 1000);
-  pending = pending_frame_count (h);
+  wait_for_pending_count (h, 0, ACCOUNTING_TIMEOUT_US);
+  burst_pending = pending_frame_count (h);
 
-  g_print ("pushed %u inputs, %u MPP outputs, pending frames settled at %u "
-      "(bound %u + slack %u)\n", PENDING_INPUTS, mpp_mock_dec_outputs (),
-      pending, PENDING_BOUND, PENDING_SLACK);
+  g_print ("burst: %u inputs, %u stale-PTS outputs, %u pending frames\n",
+      PENDING_INPUTS, mpp_mock_dec_outputs (), burst_pending);
+  stop_decoder (h);
 
-  if (pending > PENDING_BOUND + PENDING_SLACK)
-    g_error ("pending frame list grew to %u after %u unmatched-PTS outputs; "
-        "expected it to stay at or below %u", pending, PENDING_INPUTS,
-        PENDING_BOUND + PENDING_SLACK);
+  h = start_decoder (FALSE);
+  for (i = 0; i < PENDING_INPUTS; i++) {
+    g_assert_cmpint (gst_harness_push (h, make_input_buffer (i)), ==,
+        GST_FLOW_OK);
+    g_assert_true (wait_for_outputs (i + 1));
+    if (!wait_for_pending_count (h, 0, ACCOUNTING_TIMEOUT_US)) {
+      constant_search_domain = FALSE;
+      sequential_pending = pending_frame_count (h);
+      break;
+    }
+  }
 
-  /* Sampled before the reclaim so the emptiness assertion below cannot pass
-   * vacuously: this run really did leave an arena behind. */
-  g_assert_cmpuint (mpp_mock_dec_live_packets (), >, 0);
-  g_print ("mock packet arena before final reclaim: %u\n",
-      mpp_mock_dec_live_packets ());
+  g_print ("sequential: %u/%u stale-PTS outputs completed with a one-frame "
+      "matching domain; pending=%u\n", mpp_mock_dec_outputs (),
+      PENDING_INPUTS, sequential_pending);
 
   stop_decoder (h);
-  g_print ("unmatched-PTS pending bound: OK\n");
+
+  if (burst_pending != 0 || !constant_search_domain) {
+    g_printerr ("ERROR: stale-PTS outputs left pending frames (burst=%u, "
+        "sequential=%u); "
+        "each output must consume one oldest pending orphan\n", burst_pending,
+        sequential_pending);
+    accounting_failures++;
+  } else {
+    g_print ("stale-PTS orphan accounting: OK\n");
+  }
+}
+
+static void
+test_header_only_inputs_are_released_without_output (void)
+{
+  GstHarness *h = start_decoder (FALSE);
+  guint pending;
+  guint i;
+
+  g_print ("== header-only input accounting ==\n");
+  mpp_mock_dec_set_output_suppressed (TRUE);
+
+  for (i = 0; i < HEADER_INPUTS; i++)
+    g_assert_cmpint (gst_harness_push (h,
+            make_untimestamped_input_buffer (32)), ==, GST_FLOW_OK);
+
+  pending = pending_frame_count (h);
+  g_print ("SPS/PPS-only: %u accepted packets, %u outputs, %u pending frames\n",
+      mpp_mock_dec_put_calls (), mpp_mock_dec_outputs (), pending);
+  stop_decoder (h);
+
+  if (pending != 0) {
+    g_printerr ("ERROR: header-only stream retained %u/%u codec frames despite "
+        "producing "
+        "no output\n", pending, HEADER_INPUTS);
+    accounting_failures++;
+  } else {
+    g_print ("header-only input accounting: OK\n");
+  }
+}
+
+static void
+test_later_match_sweeps_untimestamped_stray (void)
+{
+  GstHarness *h = start_decoder (FALSE);
+  guint before_match;
+  guint after_match;
+
+  g_print ("== untimestamped stray sweep ==\n");
+
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (0)), ==, GST_FLOW_OK);
+  g_assert_true (wait_for_outputs (1));
+  g_assert_true (wait_for_pending_count (h, 0, ACCOUNTING_TIMEOUT_US));
+
+  mpp_mock_dec_set_output_suppressed (TRUE);
+  g_assert_cmpint (gst_harness_push (h,
+          make_untimestamped_input_buffer (256)), ==, GST_FLOW_OK);
+  before_match = pending_frame_count (h);
+
+  mpp_mock_dec_set_output_suppressed (FALSE);
+  mpp_mock_dec_set_output_pts ((RK_S64) input_pts (1));
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (1)), ==, GST_FLOW_OK);
+  g_assert_true (wait_for_outputs (2));
+  wait_for_pending_count (h, 0, ACCOUNTING_TIMEOUT_US);
+  after_match = pending_frame_count (h);
+
+  g_print ("older untimestamped pending frame: %u before later match, %u after\n",
+      before_match, after_match);
+  stop_decoder (h);
+
+  if (before_match != 1 || after_match != 0) {
+    g_printerr ("ERROR: later timestamped match did not sweep the older "
+        "untimestamped "
+        "stray (%u -> %u)\n", before_match, after_match);
+    accounting_failures++;
+  } else {
+    g_print ("untimestamped stray sweep: OK\n");
+  }
+}
+
+static void
+test_normal_stream_output_sequence (void)
+{
+  GstHarness *h = start_decoder (FALSE);
+  GstClockTime actual[NORMAL_INPUTS - 1];
+  guint i;
+
+  g_print ("== normal ordered output sequence ==\n");
+  mpp_mock_dec_set_output_buffers (TRUE);
+
+  for (i = 0; i < NORMAL_INPUTS; i++) {
+    GstBuffer *output;
+
+    mpp_mock_dec_set_output_pts ((RK_S64) input_pts (i));
+    g_assert_cmpint (gst_harness_push (h, make_input_buffer (i)), ==,
+        GST_FLOW_OK);
+    g_assert_true (wait_for_outputs (i + 1));
+
+    if (i == 0)
+      continue;
+
+    output = wait_for_output_buffer (h);
+    g_assert_nonnull (output);
+    actual[i - 1] = GST_BUFFER_PTS (output);
+    g_assert_cmpuint (actual[i - 1], ==, input_pts (i - 1));
+    gst_buffer_unref (output);
+  }
+
+  g_print ("normal output sequence:");
+  for (i = 0; i < G_N_ELEMENTS (actual); i++)
+    g_print (" %" G_GUINT64_FORMAT, actual[i]);
+  g_print ("\n");
+
+  stop_decoder (h);
+  g_print ("normal ordered output sequence: OK\n");
+}
+
+static void
+run_accounting_tests (void)
+{
+  test_unmatched_pts_pending_list_is_bounded ();
+  test_header_only_inputs_are_released_without_output ();
+  test_later_match_sweeps_untimestamped_stray ();
+  test_normal_stream_output_sequence ();
 }
 
 int
 main (int argc, char **argv)
 {
   gst_init (&argc, &argv);
+
+  if (g_getenv ("MPP_DECODER_SEAM_ACCOUNTING_ONLY")) {
+    run_accounting_tests ();
+    goto done;
+  }
 
   test_reset_releases_cached_mpp_frame ();
   test_packet_ownership_is_decided_before_send ();
@@ -473,12 +657,16 @@ main (int argc, char **argv)
   g_print ("DMA_DRM peer caps negotiation: SKIP (requires GStreamer >= 1.24)\n");
 #endif
   test_decoder_allocator_requests_dma32 ();
-  test_unmatched_pts_pending_list_is_bounded ();
+  run_accounting_tests ();
 
+done:
   /* Nothing arms after the last test, so the catch-all reclaim has to be here
    * or its arena outlives the suite. */
   reclaim_mock_packets ();
   g_print ("mock packet arena at exit: %u\n", mpp_mock_dec_live_packets ());
+
+  if (accounting_failures)
+    g_error ("%u decoder accounting scenario(s) failed", accounting_failures);
 
   g_print ("mpp-decoder-seam: OK\n");
   return 0;

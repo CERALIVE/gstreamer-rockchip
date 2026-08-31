@@ -166,6 +166,8 @@ static atomic_uint dec_packet_deinits;
 static atomic_uint dec_wrong_owner_deinits;
 static atomic_uint dec_double_deinits;
 static atomic_uint dec_frame_deinits;
+static atomic_int dec_output_suppressed;
+static atomic_int dec_output_buffers_enabled;
 static atomic_uint internal_group_types;
 static atomic_uint jpeg_input_timeouts_remaining;
 static atomic_uint jpeg_input_poll_calls;
@@ -173,6 +175,7 @@ static atomic_int jpeg_last_input_poll_timed_out;
 static MockTask jpeg_task;
 static MockPacket *packet_allocs;
 static atomic_uint dec_arena_packets;
+static MppBuffer dec_output_buffer;
 static RK_U32 dec_width = 320;
 static RK_U32 dec_height = 240;
 static atomic_int dec_frame_format;
@@ -180,7 +183,7 @@ static atomic_int dec_frame_format;
  * each pending frame out as "future" and settles on no match. Nonzero is
  * load-bearing: gstmppdec.c remaps a zero PTS to GST_CLOCK_TIME_NONE, which
  * matches the oldest frame instead of missing. */
-static RK_S64 dec_stale_pts = 1;
+static atomic_llong dec_stale_pts = 1;
 static MockCfg *cfg_of(MppEncCfg c) { return (MockCfg *)c; }
 static void pause_if_armed(atomic_int *armed, atomic_int *entered,
                            atomic_int *release) {
@@ -305,6 +308,8 @@ static MockFrame *dec_new_frame(RK_S64 pts, RK_U32 info_change) {
   f->vertical_stride = dec_height;
   f->pts = pts;
   f->info_change = info_change;
+  if (!info_change && atomic_load(&dec_output_buffers_enabled))
+    f->buffer = dec_output_buffer;
   return f;
 }
 static MPP_RET get_frame_ok(MppCtx c, MppFrame *p) {
@@ -334,9 +339,12 @@ static MPP_RET get_frame_ok(MppCtx c, MppFrame *p) {
 
   /* First data output carries an invalid PTS so the decoder abandons MPP
    * timestamps and matches on the input PTS the test controls. */
-  RK_S64 pts = atomic_fetch_add(&dec_outputs, 1) ? dec_stale_pts : -1;
-  /* No MppBuffer: the decode loop rejects the frame and takes its drop path,
-   * which is what releases the pending frame this output was matched to. */
+  RK_S64 pts = atomic_fetch_add(&dec_outputs, 1)
+                   ? (RK_S64)atomic_load(&dec_stale_pts)
+                   : -1;
+  /* Decoder accounting tests use bufferless outputs by default so the decode
+   * loop takes its drop path. Normal-stream tests opt into a shared fd-backed
+   * buffer and exercise the real downstream finish path. */
   *p = (MppFrame)dec_new_frame(pts, 0);
   return *p ? MPP_OK : MPP_NOK;
 }
@@ -365,7 +373,7 @@ static MPP_RET put_packet_ok(MppCtx c, MppPacket p) {
 
   if (packet->eos)
     atomic_store(&dec_eos_seen, 1);
-  else if (!packet->extra_data)
+  else if (!packet->extra_data && !atomic_load(&dec_output_suppressed))
     atomic_fetch_add(&dec_queued, 1);
   return MPP_OK;
 }
@@ -1195,6 +1203,11 @@ unsigned mpp_mock_buffer_ref_count(MppBuffer buffer) {
  * been torn down. Callers reclaim explicitly; arming reclaims again so a test
  * that forgets cannot carry an arena into the next one. */
 void mpp_mock_dec_release_packets(void) {
+  atomic_store(&dec_output_buffers_enabled, 0);
+  if (dec_output_buffer) {
+    mpp_buffer_put_with_caller(dec_output_buffer, __func__);
+    dec_output_buffer = NULL;
+  }
   while (packet_allocs) {
     MockPacket *packet = packet_allocs;
     packet_allocs = packet->next;
@@ -1226,6 +1239,9 @@ void mpp_mock_dec_arm(unsigned width, unsigned height) {
   atomic_store(&dec_wrong_owner_deinits, 0);
   atomic_store(&dec_double_deinits, 0);
   atomic_store(&dec_frame_deinits, 0);
+  atomic_store(&dec_output_suppressed, 0);
+  atomic_store(&dec_output_buffers_enabled, 0);
+  atomic_store(&dec_stale_pts, 1);
   atomic_store(&internal_group_types, 0);
   atomic_store(&jpeg_input_timeouts_remaining, 0);
   atomic_store(&jpeg_input_poll_calls, 0);
@@ -1237,6 +1253,22 @@ void mpp_mock_dec_arm(unsigned width, unsigned height) {
 void mpp_mock_dec_disarm(void) { atomic_store(&dec_enabled, 0); }
 unsigned mpp_mock_dec_queued(void) { return atomic_load(&dec_queued); }
 unsigned mpp_mock_dec_outputs(void) { return atomic_load(&dec_outputs); }
+void mpp_mock_dec_set_output_suppressed(int suppressed) {
+  atomic_store(&dec_output_suppressed, !!suppressed);
+}
+void mpp_mock_dec_set_output_pts(RK_S64 pts) {
+  atomic_store(&dec_stale_pts, pts);
+}
+void mpp_mock_dec_set_output_buffers(int enabled) {
+  if (enabled && !dec_output_buffer) {
+    size_t size = (size_t)dec_width * dec_height * 3 / 2;
+    size = (size + 4095) & ~(size_t)4095;
+    if (mpp_buffer_get_with_tag(NULL, &dec_output_buffer, size, NULL,
+                                __func__) != MPP_OK)
+      abort();
+  }
+  atomic_store(&dec_output_buffers_enabled, !!enabled);
+}
 void mpp_mock_dec_set_frame_format(MppFrameFormat format) {
   atomic_store(&dec_frame_format, format);
 }

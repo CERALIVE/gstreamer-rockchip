@@ -52,6 +52,11 @@ G_DEFINE_ABSTRACT_TYPE (GstMppDec, gst_mpp_dec, GST_TYPE_VIDEO_DECODER);
  * per-output gst_video_decoder_get_frames() walk cannot degrade to O(N^2). */
 #define GST_MPP_DEC_MAX_PENDING_FRAMES 64
 
+/* Split SPS/PPS NALs are tiny and untimestamped; coded pictures are larger or
+ * carry a PTS. Requiring both properties avoids classifying skip frames as
+ * header-only input. */
+#define GST_MPP_DEC_HEADER_ONLY_MAX_SIZE 128
+
 #define MPP_TO_GST_PTS(pts) ((pts) * GST_MSECOND)
 
 #define GST_MPP_DEC_TASK_STARTED(decoder) \
@@ -832,11 +837,14 @@ gst_mpp_dec_get_frame (GstVideoDecoder * decoder, GstClockTime pts)
         GST_DEBUG_OBJECT (self, "using matched frame (#%d)",
             frame->system_frame_number);
 
-        /* Discard out-dated frames for some broken videos */
+        /* Invalid-PTS inputs cannot be ordered by time. A later matched frame
+         * proves an older one did not produce output, so order it by input. */
         for (l = frames; l != NULL; l = l->next) {
           GstVideoCodecFrame *f = l->data;
 
-          if (GST_CLOCK_TIME_IS_VALID (f->pts) && f->pts < frame->pts) {
+          if ((GST_CLOCK_TIME_IS_VALID (f->pts) && f->pts < frame->pts) ||
+              (!GST_CLOCK_TIME_IS_VALID (f->pts) &&
+                  f->system_frame_number < frame->system_frame_number)) {
             GST_WARNING_OBJECT (self, "discarding out-dated frame (#%d)",
                 f->system_frame_number);
 
@@ -1336,6 +1344,19 @@ gst_mpp_dec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
     mpkt = NULL;
   else
     mpp_packet_deinit (&mpkt);
+
+  if (!GST_CLOCK_TIME_IS_VALID (frame->pts) &&
+      mapinfo.size <= GST_MPP_DEC_HEADER_ONLY_MAX_SIZE) {
+    GST_DEBUG_OBJECT (self, "releasing header-only frame (#%d, %"
+        G_GSIZE_FORMAT " bytes, no pts)", frame->system_frame_number,
+        mapinfo.size);
+
+    gst_buffer_unmap (frame->input_buffer, &mapinfo);
+    gst_video_decoder_release_frame (decoder, frame);
+    GST_MPP_DEC_UNLOCK (decoder);
+    return self->task_ret;
+  }
+
   gst_buffer_unmap (frame->input_buffer, &mapinfo);
 
   /* No need to keep input arround */
