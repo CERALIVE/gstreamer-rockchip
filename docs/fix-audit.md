@@ -12,6 +12,28 @@ Every fix row appended by later todos must contain exactly these five fields:
 
 ## Rows
 
+### Bounded video-decoder EOS submission
+
+1. **Provenance SHA** — first-party correction against task baseline
+   `0a8de6751ffd16c340a4f7683b3115ad35b0a891`; the fix commit is the commit containing this row.
+2. **Red/green outputs** — focused arm64/bookworm command:
+   `timeout 10s .../mpp-decoder-seam`. RED at the baseline after the mock accepted an EOS only
+   after three `MPP_ERR_BUFFER_FULL` responses, then returned persistent `MPP_NOK`: the process
+   printed `drain retried three queue-full results and accepted EOS on call 5` and timed out in
+   the permanent-error drain. GREEN at the fix:
+   `permanent drain error failed after one call and triggered reset`, followed by
+   `mpp-decoder-seam: OK`. The queue-full path made exactly four EOS submission calls; the
+   permanent path made one and returned `GST_FLOW_ERROR` inside the one-second semantic bound.
+   Mutation check: retrying every MPP error failed with `96 == 2`, proving the test rejects a
+   bounded loop that still misclassifies permanent errors as backpressure.
+3. **Hardware gate** — `hardware-independent`. The mock drives the subclass shutdown vfunc and
+   base-class finish result through the same MPP API and GstVideoDecoder call chain as hardware.
+4. **MPP ABI closure** — baseline and fix both report 68 referenced-and-present MPP symbols;
+   `bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so` reports an empty diff
+   against pinned MPP 1.5.0-1.
+5. **Reviewer verdict** — `needs-human-review`. Reviewer == author; no self-review is counted
+   toward F27.
+
 ### Runtime resolution drain before geometry swap
 
 1. **Provenance SHA** — first-party correction against task baseline

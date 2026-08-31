@@ -28,6 +28,7 @@ unsigned mpp_mock_dec_live_output_buffers (void);
 void mpp_mock_dec_set_frame_format (MppFrameFormat format);
 void mpp_mock_dec_set_put_result (unsigned buffer_full_count, MPP_RET terminal);
 unsigned mpp_mock_dec_put_calls (void);
+unsigned mpp_mock_dec_reset_calls (void);
 void mpp_mock_dec_set_next_packet_has_buffer (int has_buffer);
 unsigned mpp_mock_dec_packet_buffer_queries (void);
 unsigned mpp_mock_dec_packet_post_send_accesses (void);
@@ -632,6 +633,52 @@ test_put_packet_result_drives_fullness (void)
   g_print ("put_packet fullness detection: OK\n");
 }
 
+static GstFlowReturn
+finish_decoder (GstHarness * h)
+{
+  GstVideoDecoder *decoder = GST_VIDEO_DECODER (h->element);
+  GstVideoDecoderClass *klass = GST_VIDEO_DECODER_GET_CLASS (decoder);
+  GstFlowReturn ret;
+
+  GST_VIDEO_DECODER_STREAM_LOCK (decoder);
+  ret = klass->finish (decoder);
+  GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
+  return ret;
+}
+
+static void
+test_video_drain_classifies_put_packet_errors (void)
+{
+  GstHarness *h;
+  guint calls_before;
+  gint64 started;
+
+  g_print ("== video drain put-packet error classification ==\n");
+  h = start_decoder (FALSE);
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (0)), ==, GST_FLOW_OK);
+  g_assert_true (wait_for_outputs (1));
+  calls_before = mpp_mock_dec_put_calls ();
+  mpp_mock_dec_set_put_result (3, MPP_OK);
+  g_assert_cmpint (finish_decoder (h), ==, GST_FLOW_OK);
+  g_assert_cmpuint (mpp_mock_dec_put_calls (), ==, calls_before + 4);
+  g_print ("drain retried three queue-full results and accepted EOS on call %u\n",
+      mpp_mock_dec_put_calls ());
+  stop_decoder (h);
+
+  h = start_decoder (FALSE);
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (1)), ==, GST_FLOW_OK);
+  g_assert_true (wait_for_outputs (1));
+  calls_before = mpp_mock_dec_put_calls ();
+  mpp_mock_dec_set_put_result (0, MPP_NOK);
+  started = g_get_monotonic_time ();
+  g_assert_cmpint (finish_decoder (h), ==, GST_FLOW_ERROR);
+  g_assert_cmpint (g_get_monotonic_time () - started, <, G_USEC_PER_SEC);
+  g_assert_cmpuint (mpp_mock_dec_put_calls (), ==, calls_before + 1);
+  g_assert_cmpuint (mpp_mock_dec_reset_calls (), >, 0);
+  g_print ("permanent drain error failed after one call and triggered reset\n");
+  stop_decoder (h);
+}
+
 static void
 test_jpeg_input_timeout_is_retried (void)
 {
@@ -1145,6 +1192,7 @@ main (int argc, char **argv)
   test_reset_releases_cached_mpp_frame ();
   test_packet_ownership_is_decided_before_send ();
   test_put_packet_result_drives_fullness ();
+  test_video_drain_classifies_put_packet_errors ();
   test_jpeg_input_timeout_is_retried ();
   test_dma_feature_reaches_negotiated_caps ();
 #if GST_CHECK_VERSION(1, 24, 0)

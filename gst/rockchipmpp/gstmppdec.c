@@ -228,10 +228,11 @@ gst_mpp_dec_stop_task (GstVideoDecoder * decoder, gboolean drain)
   GST_VIDEO_DECODER_STREAM_LOCK (decoder);
 }
 
-static void
+static GstFlowReturn
 gst_mpp_dec_reset (GstVideoDecoder * decoder, gboolean drain, gboolean final)
 {
   GstMppDec *self = GST_MPP_DEC (decoder);
+  GstFlowReturn result;
   GList *frames;
 
   GST_MPP_DEC_LOCK (decoder);
@@ -243,6 +244,7 @@ gst_mpp_dec_reset (GstVideoDecoder * decoder, gboolean drain, gboolean final)
 
   gst_mpp_dec_stop_task (decoder, drain);
 
+  result = self->task_ret == GST_FLOW_EOS ? GST_FLOW_OK : self->task_ret;
   self->flushing = final;
   self->draining = FALSE;
 
@@ -274,6 +276,7 @@ gst_mpp_dec_reset (GstVideoDecoder * decoder, gboolean drain, gboolean final)
   }
 
   GST_MPP_DEC_UNLOCK (decoder);
+  return result;
 }
 
 static gboolean
@@ -373,20 +376,21 @@ static GstFlowReturn
 gst_mpp_dec_drain (GstVideoDecoder * decoder)
 {
   GST_DEBUG_OBJECT (decoder, "draining");
-  gst_mpp_dec_reset (decoder, TRUE, FALSE);
-  return GST_FLOW_OK;
+  return gst_mpp_dec_reset (decoder, TRUE, FALSE);
 }
 
 static GstFlowReturn
 gst_mpp_dec_finish (GstVideoDecoder * decoder)
 {
+  GstFlowReturn ret;
+
   GST_DEBUG_OBJECT (decoder, "finishing");
-  gst_mpp_dec_reset (decoder, TRUE, FALSE);
+  ret = gst_mpp_dec_reset (decoder, TRUE, FALSE);
 
   /* No need to caching buffers after finished */
   gst_mpp_dec_clear_allocator (decoder);
 
-  return GST_FLOW_OK;
+  return ret;
 }
 
 static guint

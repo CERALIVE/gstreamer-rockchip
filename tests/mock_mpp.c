@@ -94,6 +94,7 @@ typedef struct {
   MppPacket packet;
   int data_output;
   int accounted;
+  int eos;
 } MockFrame;
 typedef struct {
   RK_U32 width;
@@ -160,6 +161,7 @@ static atomic_int dec_info_change_sent;
 static atomic_uint dec_queued;
 static atomic_uint dec_outputs;
 static atomic_uint dec_eos_seen;
+static atomic_uint dec_reset_calls;
 static atomic_uint dec_put_calls;
 static atomic_uint dec_buffer_full_remaining;
 static atomic_int dec_put_terminal;
@@ -369,8 +371,21 @@ static MPP_RET get_frame_ok(MppCtx c, MppFrame *p) {
   while (queued &&
          !atomic_compare_exchange_weak(&dec_queued, &queued, queued - 1))
     ;
-  if (!queued)
+  if (!queued) {
+    unsigned eos_seen = atomic_load(&dec_eos_seen);
+
+    if (eos_seen && atomic_compare_exchange_strong(&dec_eos_seen,
+            &eos_seen, 0)) {
+      MockFrame *frame = dec_new_frame(-1, 0, 0);
+
+      if (!frame)
+        return MPP_NOK;
+      frame->data_output = 0;
+      frame->eos = 1;
+      *p = (MppFrame)frame;
+    }
     return MPP_OK;
+  }
 
   unsigned ordinal = atomic_fetch_add(&dec_outputs, 1);
   RK_S64 pts = ordinal ? (RK_S64)atomic_load(&dec_stale_pts) : -1;
@@ -562,6 +577,7 @@ static MPP_RET encode_get(MppCtx c, MppPacket *p) {
 }
 static MPP_RET mock_reset(MppCtx c) {
   (void)c;
+  atomic_fetch_add(&dec_reset_calls, 1);
   atomic_fetch_add(&enc_reset_generation, 1);
   atomic_store(&enc_reset_seen, 1);
   atomic_store(&enc_release_limit, UINT32_MAX);
@@ -777,8 +793,7 @@ RK_U32 mpp_frame_get_info_change(const MppFrame frame) {
   return ((MockFrame *)frame)->info_change;
 }
 RK_U32 mpp_frame_get_eos(const MppFrame frame) {
-  (void)frame;
-  return 0;
+  return ((MockFrame *)frame)->eos;
 }
 RK_U32 mpp_frame_get_discard(const MppFrame frame) {
   (void)frame;
@@ -1277,6 +1292,7 @@ void mpp_mock_dec_arm(unsigned width, unsigned height) {
   atomic_store(&dec_queued, 0);
   atomic_store(&dec_outputs, 0);
   atomic_store(&dec_eos_seen, 0);
+  atomic_store(&dec_reset_calls, 0);
   atomic_store(&dec_put_calls, 0);
   atomic_store(&dec_buffer_full_remaining, 0);
   atomic_store(&dec_put_terminal, MPP_OK);
@@ -1343,6 +1359,9 @@ void mpp_mock_dec_set_put_result(unsigned buffer_full_count,
   atomic_store(&dec_put_terminal, terminal);
 }
 unsigned mpp_mock_dec_put_calls(void) { return atomic_load(&dec_put_calls); }
+unsigned mpp_mock_dec_reset_calls(void) {
+  return atomic_load(&dec_reset_calls);
+}
 void mpp_mock_dec_set_next_packet_has_buffer(int has_buffer) {
   atomic_store(&dec_next_packet_has_buffer, !!has_buffer);
 }
