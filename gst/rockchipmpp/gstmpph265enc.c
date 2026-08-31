@@ -196,6 +196,7 @@ static GstStaticPadTemplate gst_mpp_h265_enc_sink_template =
 typedef struct
 {
   gint level;
+  const gchar *name;
   guint max_luma_ps;
   guint64 max_luma_sr;
   guint max_br_main;
@@ -203,19 +204,19 @@ typedef struct
 } GstMppH265LevelLimits;
 
 static const GstMppH265LevelLimits gst_mpp_h265_enc_level_limits[] = {
-  {30, 36864, 552960, 128, G_MAXUINT},
-  {60, 122880, 3686400, 1500, G_MAXUINT},
-  {63, 245760, 7372800, 3000, G_MAXUINT},
-  {90, 552960, 16588800, 6000, G_MAXUINT},
-  {93, 983040, 33177600, 10000, G_MAXUINT},
-  {120, 2228224, 66846720, 12000, 30000},
-  {123, 2228224, 133693440, 20000, 50000},
-  {150, 8912896, 267386880, 25000, 100000},
-  {153, 8912896, 534773760, 40000, 160000},
-  {156, 8912896, 1069547520, 60000, 240000},
-  {180, 35651584, 1069547520, 60000, 240000},
-  {183, 35651584, 2139095040, 120000, 480000},
-  {186, 35651584, 4278190080ULL, 240000, 800000},
+  {30, "1", 36864, 552960, 128, G_MAXUINT},
+  {60, "2", 122880, 3686400, 1500, G_MAXUINT},
+  {63, "2.1", 245760, 7372800, 3000, G_MAXUINT},
+  {90, "3", 552960, 16588800, 6000, G_MAXUINT},
+  {93, "3.1", 983040, 33177600, 10000, G_MAXUINT},
+  {120, "4", 2228224, 66846720, 12000, 30000},
+  {123, "4.1", 2228224, 133693440, 20000, 50000},
+  {150, "5", 8912896, 267386880, 25000, 100000},
+  {153, "5.1", 8912896, 534773760, 40000, 160000},
+  {156, "5.2", 8912896, 1069547520, 60000, 240000},
+  {180, "6", 35651584, 1069547520, 60000, 240000},
+  {183, "6.1", 35651584, 2139095040, 120000, 480000},
+  {186, "6.2", 35651584, 4278190080ULL, 240000, 800000},
 };
 
 #define GST_MPP_H265_CPB_BR_VCL_FACTOR 1000
@@ -463,11 +464,45 @@ gst_mpp_h265_enc_get_property (GObject * object,
     G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
 }
 
+/*
+ * The GStreamer spellings, which are not the property nicks: `main10` is
+ * `main-10` and `main-still` is `main-still-picture` in video/x-h265 caps, and
+ * the level field carries the level number rather than general_level_idc.
+ * Publishing the nick or the idc would put a value downstream cannot parse into
+ * a field h265parse and the muxers read.
+ */
+static const gchar *
+gst_mpp_h265_enc_profile_string (gint profile)
+{
+  switch (profile) {
+    case 2:
+      return "main-10";
+    case 3:
+      return "main-still-picture";
+    default:
+      return "main";
+  }
+}
+
+static const gchar *
+gst_mpp_h265_enc_level_string (gint level)
+{
+  guint i;
+
+  for (i = 0; i < G_N_ELEMENTS (gst_mpp_h265_enc_level_limits); i++) {
+    if (gst_mpp_h265_enc_level_limits[i].level == level)
+      return gst_mpp_h265_enc_level_limits[i].name;
+  }
+  return NULL;
+}
+
 static gboolean
-gst_mpp_h265_enc_set_src_caps (GstVideoEncoder * encoder)
+gst_mpp_h265_enc_set_src_caps (GstVideoEncoder * encoder, gint profile,
+    gint tier, gint level)
 {
   GstStructure *structure;
   GstCaps *caps;
+  const gchar *level_string;
 
   caps = gst_caps_new_empty_simple ("video/x-h265");
 
@@ -475,6 +510,19 @@ gst_mpp_h265_enc_set_src_caps (GstVideoEncoder * encoder)
   gst_structure_set (structure, "stream-format",
       G_TYPE_STRING, "byte-stream", NULL);
   gst_structure_set (structure, "alignment", G_TYPE_STRING, "au", NULL);
+
+  gst_structure_set (structure, "profile", G_TYPE_STRING,
+      gst_mpp_h265_enc_profile_string (profile), NULL);
+  gst_structure_set (structure, "tier", G_TYPE_STRING,
+      tier ? "high" : "main", NULL);
+
+  /* Tier and level are one constraint, so an unnameable level leaves both out
+   * rather than publishing a tier for a level nobody can read. */
+  level_string = gst_mpp_h265_enc_level_string (level);
+  if (level_string)
+    gst_structure_set (structure, "level", G_TYPE_STRING, level_string, NULL);
+  else
+    gst_structure_remove_field (structure, "tier");
 
   return gst_mpp_enc_set_src_caps (encoder, caps);
 }
@@ -557,7 +605,8 @@ gst_mpp_h265_enc_apply_properties (GstVideoEncoder * encoder)
   if (!applied)
     return TRUE;
 
-  return gst_mpp_h265_enc_set_src_caps (encoder);
+  return gst_mpp_h265_enc_set_src_caps (encoder, properties.profile,
+      properties.tier, properties.level);
 }
 
 static gboolean

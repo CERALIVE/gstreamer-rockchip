@@ -1308,10 +1308,15 @@ static void assert_src_caps_string(GstHarness *h, const char *field,
   fail_unless(caps != NULL, "the encoder never negotiated src caps");
   const GstStructure *s = gst_caps_get_structure(caps, 0);
   const char *got = gst_structure_get_string(s, field);
-  fail_unless(got != NULL, "src caps carry no '%s' field: %" GST_PTR_FORMAT,
-              field, caps);
-  fail_unless(g_str_equal(got, want), "src caps %s is '%s', expected '%s'",
-              field, got, want);
+  /* GST_PTR_FORMAT is a GLib printf extension and Check formats through plain
+   * vsnprintf, so the caps have to be serialised before they are reported. */
+  gchar *described = gst_caps_to_string(caps);
+  if (!got)
+    fail("src caps carry no '%s' field: %s", field, described);
+  if (!g_str_equal(got, want))
+    fail("src caps %s is '%s', expected '%s' (%s)", field, got, want,
+         described);
+  g_free(described);
   gst_caps_unref(caps);
 }
 
@@ -1457,6 +1462,34 @@ GST_START_TEST(test_h265_level_follows_the_tier_bitrate_ceiling) {
   gst_harness_set_src_caps_str(
       h, "video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1");
   fail_unless_equals_int(mpp_mock_last_cfg_s32("h265:level"), 120);
+  gst_harness_teardown(h);
+}
+GST_END_TEST
+
+/* H.264 has published profile and level since the fork point; H.265 published
+ * neither, so everything downstream of it -- h265parse, the muxers, an SDP
+ * writer -- had to guess or re-parse the bitstream to learn what it was handed.
+ * The caps carry the EFFECTIVE level, so the raise above is visible here too. */
+GST_START_TEST(test_h265_src_caps_publish_profile_tier_and_level) {
+  mpp_mock_reset();
+  GstHarness *h = start_level_harness(
+      "mpph265enc",
+      "video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1", 8000000);
+  assert_src_caps_string(h, "profile", "main");
+  assert_src_caps_string(h, "tier", "main");
+  assert_src_caps_string(h, "level", "4");
+  gst_harness_teardown(h);
+
+  mpp_mock_reset();
+  h = gst_harness_new("mpph265enc");
+  fail_unless(h != NULL);
+  g_object_set(h->element, "rc-mode", 1, "zero-copy-pkt", FALSE, "bitrate",
+               8000000, "profile", 2, "tier", 1, NULL);
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=1920,height=1080,framerate=60/1");
+  assert_src_caps_string(h, "profile", "main-10");
+  assert_src_caps_string(h, "tier", "high");
+  assert_src_caps_string(h, "level", "4.1");
   gst_harness_teardown(h);
 }
 GST_END_TEST
@@ -1812,6 +1845,7 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_h265_level_is_raised_for_an_out_of_level_frame_rate);
   tcase_add_test(tc, test_h265_level_follows_the_tier_bitrate_ceiling);
   tcase_add_test(tc, test_level_ignores_bitrate_under_fixed_qp);
+  tcase_add_test(tc, test_h265_src_caps_publish_profile_tier_and_level);
   tcase_add_test(tc, test_zero_valued_tuning_resets_reach_mpp);
   tcase_add_test(tc, test_super_frame_thresholds_reset_to_unreachable_not_zero);
   tcase_add_test(tc, test_auto_bitrate_recomputes_for_new_output_geometry);
