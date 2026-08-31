@@ -43,6 +43,9 @@ unsigned mpp_mock_jpeg_input_poll_calls (void);
 void mpp_mock_jpeg_block_input_poll (void);
 unsigned mpp_mock_jpeg_input_poll_entered (void);
 unsigned mpp_mock_jpeg_input_enqueues (void);
+void mpp_mock_jpeg_set_input_poll_result (MPP_RET result);
+void mpp_mock_jpeg_set_input_dequeue_timeouts (unsigned count);
+unsigned mpp_mock_jpeg_input_dequeue_calls (void);
 
 #define DEC_WIDTH 320
 #define DEC_HEIGHT 240
@@ -709,6 +712,39 @@ test_jpeg_input_timeout_is_retried (void)
   g_print ("one MPP_ERR_TIMEOUT retried; accepted on poll 2\n");
 }
 
+static void
+test_jpeg_input_poll_and_dequeue_results_are_preserved (void)
+{
+  GstHarness *h;
+
+  g_print ("== jpeg input poll/dequeue result preservation ==\n");
+  mpp_mock_dec_arm (DEC_WIDTH, DEC_HEIGHT);
+  mpp_mock_jpeg_set_input_dequeue_timeouts (1);
+  h = gst_harness_new ("mppjpegdec");
+  g_assert_nonnull (h);
+  gst_harness_set_src_caps_str (h, JPEG_CAPS);
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (0)), ==, GST_FLOW_OK);
+  g_assert_cmpuint (mpp_mock_jpeg_input_dequeue_calls (), ==, 2);
+  g_print ("dequeue timeout preserved and retried before successful enqueue\n");
+  mpp_mock_dec_disarm ();
+  gst_harness_teardown (h);
+  reclaim_mock_packets ();
+
+  mpp_mock_dec_arm (DEC_WIDTH, DEC_HEIGHT);
+  mpp_mock_jpeg_set_input_poll_result (MPP_NOK);
+  h = gst_harness_new ("mppjpegdec");
+  g_assert_nonnull (h);
+  gst_harness_set_src_caps_str (h, JPEG_CAPS);
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (1)), ==,
+      GST_FLOW_ERROR);
+  g_assert_cmpuint (mpp_mock_jpeg_input_poll_calls (), ==, 1);
+  g_assert_cmpuint (mpp_mock_jpeg_input_dequeue_calls (), ==, 0);
+  g_print ("permanent poll error preserved as GST_FLOW_ERROR without dequeue\n");
+  mpp_mock_dec_disarm ();
+  gst_harness_teardown (h);
+  reclaim_mock_packets ();
+}
+
 typedef struct
 {
   GstHarness *h;
@@ -1264,6 +1300,7 @@ main (int argc, char **argv)
   test_put_packet_result_drives_fullness ();
   test_video_drain_classifies_put_packet_errors ();
   test_jpeg_input_timeout_is_retried ();
+  test_jpeg_input_poll_and_dequeue_results_are_preserved ();
   test_jpeg_blocked_drain_is_cancelled_by_flush ();
   test_dma_feature_reaches_negotiated_caps ();
 #if GST_CHECK_VERSION(1, 24, 0)

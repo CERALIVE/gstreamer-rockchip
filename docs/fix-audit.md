@@ -12,6 +12,27 @@ Every fix row appended by later todos must contain exactly these five fields:
 
 ## Rows
 
+### Preserve JPEG input poll and dequeue statuses
+
+1. **Provenance SHA** — first-party correction against task baseline
+   `548944c857177e4983bc7a30e2055d776282c4b0`; the fix commit is the commit containing this row.
+   This implements corrected H2-B7 only: successful input enqueue was already checked and that
+   branch remains unchanged.
+2. **Red/green outputs** — arm64/bookworm `mpp-decoder-seam` injects one dequeue
+   `MPP_ERR_TIMEOUT`, then separately injects one permanent poll `MPP_NOK`. RED at the parent:
+   the ignored dequeue status fell through to a NULL task and became fatal `GST_FLOW_ERROR`
+   (`-5 == 0`). GREEN at the fix: `dequeue timeout preserved and retried before successful
+   enqueue`; the call chain made two dequeue attempts and returned `GST_FLOW_OK`. The permanent
+   poll case prints `permanent poll error preserved as GST_FLOW_ERROR without dequeue`, with one
+   poll and zero dequeues. Mutations independently replacing the dequeue status with `MPP_NOK`
+   and replacing the poll status with `MPP_ERR_TIMEOUT` both fail at those exact assertions.
+3. **Hardware gate** — `hardware-independent`. Return values are injected at the MPP API seam and
+   asserted at the public GstVideoDecoder frame-handling result.
+4. **MPP ABI closure** — unchanged at 68 referenced-and-present MPP symbols and empty against
+   pinned MPP 1.5.0-1; no new API is called.
+5. **Reviewer verdict** — `needs-human-review`. Reviewer == author; specifically, this row does
+   not claim the corrected mechanism's pre-existing enqueue check as new work.
+
 ### Drain-aware, reset-cancellable JPEG shutdown
 
 1. **Provenance SHA** — first-party correction against task baseline
