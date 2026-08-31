@@ -175,7 +175,7 @@ gst_mpp_jpeg_enc_snapshot_properties (GstVideoEncoder * encoder,
   properties->qf_max = self->qf_max;
 }
 
-static void
+static gboolean
 gst_mpp_jpeg_enc_configure_properties (GstVideoEncoder * encoder,
     gconstpointer snapshot)
 {
@@ -185,6 +185,8 @@ gst_mpp_jpeg_enc_configure_properties (GstVideoEncoder * encoder,
   gst_mpp_enc_cfg_set_s32 (mppenc, "jpeg:q_factor", properties->q_factor);
   gst_mpp_enc_cfg_set_s32 (mppenc, "jpeg:qf_min", properties->qf_min);
   gst_mpp_enc_cfg_set_s32 (mppenc, "jpeg:qf_max", properties->qf_max);
+
+  return TRUE;
 }
 
 static gboolean

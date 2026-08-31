@@ -66,6 +66,7 @@ typedef struct
   gint level;
   gboolean sao;
   MppEncRcMode rc_mode;
+  gboolean level_ok;
 } GstMppH265EncPropertiesSnapshot;
 
 #define parent_class gst_mpp_h265_enc_parent_class
@@ -278,22 +279,29 @@ gst_mpp_h265_enc_required_level_index (gint tier,
  * tests maxLumaSamples), so a 1080p60 stream declared at level 4 keeps emitting
  * a VPS claiming level 4 while exceeding its luma sample rate by 2x.
  *
- * Raising rather than rejecting is deliberate: `level` defaults to 4 and
- * cerastream never sets it, so every shipped 1080p50/60, 1440p and 2160p
- * profile would fail negotiation under a hard rejection.
+ * Raising rather than rejecting is deliberate where a higher conforming level
+ * EXISTS: `level` defaults to 4 and cerastream never sets it, so every shipped
+ * 1080p50/60, 1440p and 2160p profile would fail negotiation under a blanket
+ * rejection.
+ *
+ * When no level and tier in the table can carry the stream there is nothing to
+ * raise to, and clamping to the top level would publish a level the bitstream
+ * is known to exceed. That case returns FALSE and the apply is refused.
  */
-static gint
+static gboolean
 gst_mpp_h265_enc_effective_level (GstVideoEncoder * encoder, gint tier,
-    gint declared, const GstMppEncRateInfo * rate)
+    gint declared, const GstMppEncRateInfo * rate, gint * effective)
 {
   gboolean conforming;
   guint declared_index;
   guint required_index;
   gint required;
 
+  *effective = declared;
+
   if (rate->width <= 0 || rate->height <= 0 || rate->fps_n <= 0
       || rate->fps_d <= 0)
-    return declared;
+    return TRUE;
 
   declared_index = gst_mpp_h265_enc_level_index (declared);
   required_index =
@@ -301,20 +309,23 @@ gst_mpp_h265_enc_effective_level (GstVideoEncoder * encoder, gint tier,
   required = gst_mpp_h265_enc_level_limits[required_index].level;
 
   if (!conforming) {
-    GST_WARNING_OBJECT (encoder, "%dx%d@%d/%d fps at %u bps exceeds every H.265 "
-        "level; encoding at the highest (%d), which the stream may still "
-        "exceed", rate->width, rate->height, rate->fps_n, rate->fps_d,
-        rate->bitrate, required);
-  } else if (required_index <= declared_index) {
-    return declared;
-  } else {
-    GST_WARNING_OBJECT (encoder, "declared H.265 level_idc %d cannot carry "
-        "%dx%d@%d/%d fps at %u bps; raising to level_idc %d so the bitstream "
-        "and its VPS agree", declared, rate->width, rate->height, rate->fps_n,
-        rate->fps_d, rate->bitrate, required);
+    GST_ERROR_OBJECT (encoder, "%dx%d@%d/%d fps at %u bps exceeds every H.265 "
+        "%s-tier level, including level_idc %d; refusing to encode a stream no "
+        "level can describe", rate->width, rate->height, rate->fps_n,
+        rate->fps_d, rate->bitrate, tier ? "high" : "main", required);
+    return FALSE;
   }
 
-  return required;
+  if (required_index <= declared_index)
+    return TRUE;
+
+  GST_WARNING_OBJECT (encoder, "declared H.265 level_idc %d cannot carry "
+      "%dx%d@%d/%d fps at %u bps; raising to level_idc %d so the bitstream and "
+      "its VPS agree", declared, rate->width, rate->height, rate->fps_n,
+      rate->fps_d, rate->bitrate, required);
+
+  *effective = required;
+  return TRUE;
 }
 
 static void
@@ -555,18 +566,23 @@ gst_mpp_h265_enc_snapshot_properties (GstVideoEncoder * encoder,
   properties->tier = self->tier;
   /* Declared level stays on the property; the effective one is what MPP is
    * configured with and what the caps publish. */
-  properties->level = gst_mpp_h265_enc_effective_level (encoder, self->tier,
-      self->level, &rate);
+  properties->level_ok = gst_mpp_h265_enc_effective_level (encoder, self->tier,
+      self->level, &rate, &properties->level);
   properties->sao = self->sao;
   properties->rc_mode = mppenc->rc_mode;
 }
 
-static void
+static gboolean
 gst_mpp_h265_enc_configure_properties (GstVideoEncoder * encoder,
     gconstpointer snapshot)
 {
   GstMppEnc *mppenc = GST_MPP_ENC (encoder);
   const GstMppH265EncPropertiesSnapshot *properties = snapshot;
+
+  /* Nothing is written for a stream no level can describe, so the level MPP
+   * holds stays the last one that was actually valid. */
+  if (!properties->level_ok)
+    return FALSE;
 
   gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_init", properties->qp_init);
 
@@ -597,6 +613,8 @@ gst_mpp_h265_enc_configure_properties (GstVideoEncoder * encoder,
       properties->sao ? 0 : 1);
   gst_mpp_enc_cfg_set_s32 (mppenc, "h265:sao_chroma_disable",
       properties->sao ? 0 : 1);
+
+  return TRUE;
 }
 
 static gboolean

@@ -72,6 +72,7 @@ typedef struct
   guint qp_max_i;
   gint qp_ip;
   MppEncRcMode rc_mode;
+  gboolean level_ok;
 } GstMppH264EncPropertiesSnapshot;
 
 #define parent_class gst_mpp_h264_enc_parent_class
@@ -294,24 +295,32 @@ gst_mpp_h264_enc_required_level_index (GstMppH264Profile profile,
  * is what MPP already does on the one axis it checks, extended to the two it
  * does not.
  *
- * Raising rather than rejecting is deliberate and load-bearing: `level`
- * defaults to 4 and cerastream never sets it, so every shipped 1080p50/60,
- * 1440p and 2160p profile would fail negotiation under a hard rejection. A
- * warning plus a conforming stream is the honest outcome; a refusal to encode
- * is not.
+ * Raising rather than rejecting is deliberate and load-bearing where a higher
+ * conforming level EXISTS: `level` defaults to 4 and cerastream never sets it,
+ * so every shipped 1080p50/60, 1440p and 2160p profile would fail negotiation
+ * under a blanket rejection. A warning plus a conforming stream is the honest
+ * outcome there; a refusal to encode is not.
+ *
+ * When no level in the table can carry the stream there is nothing to raise to,
+ * and clamping to the top level would publish a level the bitstream is known to
+ * exceed -- the exact lie this fix exists to remove. That case returns FALSE and
+ * the apply is refused.
  */
-static gint
+static gboolean
 gst_mpp_h264_enc_effective_level (GstVideoEncoder * encoder,
-    GstMppH264Profile profile, gint declared, const GstMppEncRateInfo * rate)
+    GstMppH264Profile profile, gint declared, const GstMppEncRateInfo * rate,
+    gint * effective)
 {
   gboolean conforming;
   guint declared_index;
   guint required_index;
   gint required;
 
+  *effective = declared;
+
   if (rate->width <= 0 || rate->height <= 0 || rate->fps_n <= 0
       || rate->fps_d <= 0)
-    return declared;
+    return TRUE;
 
   declared_index = gst_mpp_h264_enc_level_index (declared);
   required_index =
@@ -319,20 +328,23 @@ gst_mpp_h264_enc_effective_level (GstVideoEncoder * encoder,
   required = gst_mpp_h264_enc_level_limits[required_index].level;
 
   if (!conforming) {
-    GST_WARNING_OBJECT (encoder, "%dx%d@%d/%d fps at %u bps exceeds every H.264 "
-        "level; encoding at the highest (%d), which the stream may still "
-        "exceed", rate->width, rate->height, rate->fps_n, rate->fps_d,
+    GST_ERROR_OBJECT (encoder, "%dx%d@%d/%d fps at %u bps exceeds every H.264 "
+        "level, including %d; refusing to encode a stream no level can "
+        "describe", rate->width, rate->height, rate->fps_n, rate->fps_d,
         rate->bitrate, required);
-  } else if (required_index <= declared_index) {
-    return declared;
-  } else {
-    GST_WARNING_OBJECT (encoder, "declared H.264 level %d cannot carry "
-        "%dx%d@%d/%d fps at %u bps; raising to level %d so the bitstream and "
-        "its SPS agree", declared, rate->width, rate->height, rate->fps_n,
-        rate->fps_d, rate->bitrate, required);
+    return FALSE;
   }
 
-  return required;
+  if (required_index <= declared_index)
+    return TRUE;
+
+  GST_WARNING_OBJECT (encoder, "declared H.264 level %d cannot carry "
+      "%dx%d@%d/%d fps at %u bps; raising to level %d so the bitstream and its "
+      "SPS agree", declared, rate->width, rate->height, rate->fps_n,
+      rate->fps_d, rate->bitrate, required);
+
+  *effective = required;
+  return TRUE;
 }
 
 static void
@@ -508,8 +520,8 @@ gst_mpp_h264_enc_snapshot_properties (GstVideoEncoder * encoder,
   /* The declared level is what the operator asked for; the effective one is
    * what MPP is configured with and what the caps publish. They differ when the
    * declared level cannot carry the negotiated rate. */
-  properties->level = gst_mpp_h264_enc_effective_level (encoder, self->profile,
-      self->level, &rate);
+  properties->level_ok = gst_mpp_h264_enc_effective_level (encoder,
+      self->profile, self->level, &rate, &properties->level);
   properties->qp_init = self->qp_init;
   properties->qp_min = self->qp_min;
   properties->qp_max = self->qp_max;
@@ -519,12 +531,17 @@ gst_mpp_h264_enc_snapshot_properties (GstVideoEncoder * encoder,
   properties->rc_mode = mppenc->rc_mode;
 }
 
-static void
+static gboolean
 gst_mpp_h264_enc_configure_properties (GstVideoEncoder * encoder,
     gconstpointer snapshot)
 {
   GstMppEnc *mppenc = GST_MPP_ENC (encoder);
   const GstMppH264EncPropertiesSnapshot *properties = snapshot;
+
+  /* Nothing is written for a stream no level can describe, so the level MPP
+   * holds stays the last one that was actually valid. */
+  if (!properties->level_ok)
+    return FALSE;
 
   gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_init", properties->qp_init);
 
@@ -556,6 +573,8 @@ gst_mpp_h264_enc_configure_properties (GstVideoEncoder * encoder,
   gst_mpp_enc_cfg_set_s32 (mppenc, "h264:cabac_en",
       properties->profile != GST_MPP_H264_PROFILE_BASELINE);
   gst_mpp_enc_cfg_set_s32 (mppenc, "h264:cabac_idc", 0);
+
+  return TRUE;
 }
 
 static gboolean

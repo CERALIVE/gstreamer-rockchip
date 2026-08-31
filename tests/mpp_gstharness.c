@@ -1528,6 +1528,45 @@ GST_START_TEST(test_h265_level_uses_the_exact_fractional_frame_rate) {
 }
 GST_END_TEST
 
+/* There is nothing to raise to when the stream is outside every level, and
+ * clamping to the highest would publish a level the bitstream is known to
+ * exceed -- the exact lie this validation exists to remove. Level 6.2 tops out
+ * at 800000 x 1250 bits/s for High profile, so a 2 Gbit/s request is outside
+ * H.264 entirely and must fail negotiation rather than encode. */
+static void check_over_maximum_level_is_rejected(const char *factory,
+                                                 const char *level_key) {
+  mpp_mock_reset();
+  GstHarness *h = gst_harness_new(factory);
+  fail_unless(h != NULL, "could not create %s", factory);
+  g_object_set(h->element, "rc-mode", 1, "zero-copy-pkt", FALSE, "bitrate",
+               2000000000u, NULL);
+  gst_harness_set_src_caps_str(
+      h, "video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1");
+  gst_harness_set_drop_buffers(h, TRUE);
+  gst_harness_play(h);
+
+  fail_unless_equals_int(push_encoder_frame(h, 0), GST_FLOW_NOT_NEGOTIATED);
+  /* Not merely uncommitted -- never written, so MPP keeps the last level that
+   * was actually valid. */
+  fail_unless_equals_int(mpp_mock_last_cfg_s32(level_key), INT32_MIN);
+  fail_unless_equals_int(mpp_mock_control_count(MPP_ENC_SET_CFG), 0);
+
+  GstCaps *caps = gst_pad_get_current_caps(h->sinkpad);
+  fail_unless(caps == NULL, "a stream outside every level still published caps");
+
+  gst_harness_teardown(h);
+}
+
+GST_START_TEST(test_h264_stream_outside_every_level_is_rejected) {
+  check_over_maximum_level_is_rejected("mpph264enc", "h264:level");
+}
+GST_END_TEST
+
+GST_START_TEST(test_h265_stream_outside_every_level_is_rejected) {
+  check_over_maximum_level_is_rejected("mpph265enc", "h265:level");
+}
+GST_END_TEST
+
 /* Fixed-QP hands MPP no rate target at all, so no level bitrate limit applies
  * and the frame/rate axes decide alone. */
 GST_START_TEST(test_level_ignores_bitrate_under_fixed_qp) {
@@ -1880,6 +1919,8 @@ Suite *mpp_gstharness_suite(void) {
   tcase_add_test(tc, test_h265_level_follows_the_tier_bitrate_ceiling);
   tcase_add_test(tc, test_h264_level_uses_the_exact_fractional_frame_rate);
   tcase_add_test(tc, test_h265_level_uses_the_exact_fractional_frame_rate);
+  tcase_add_test(tc, test_h264_stream_outside_every_level_is_rejected);
+  tcase_add_test(tc, test_h265_stream_outside_every_level_is_rejected);
   tcase_add_test(tc, test_level_ignores_bitrate_under_fixed_qp);
   tcase_add_test(tc, test_h265_src_caps_publish_profile_tier_and_level);
   tcase_add_test(tc, test_zero_valued_tuning_resets_reach_mpp);

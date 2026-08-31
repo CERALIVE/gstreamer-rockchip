@@ -834,6 +834,7 @@ gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
 {
   GstMppEnc *self = GST_MPP_ENC (encoder);
   GstMppEncPropertiesSnapshot properties;
+  gboolean codec_error = FALSE;
   gint fps_out;
 
   if (applied)
@@ -894,8 +895,13 @@ gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
     properties.bps = gst_mpp_enc_auto_bitrate (properties.width,
         properties.height, fps_out);
 
-  if (configure_codec_properties)
-    configure_codec_properties (encoder, codec_snapshot);
+  /* Latched rather than returned on the spot, for the same reason cfg_error is:
+   * the remaining writes are into this element's own MppEncCfg, and refusing at
+   * the one boundary where that struct is handed to MPP keeps a single, obvious
+   * place where a rejected configuration can never reach the encoder. */
+  if (configure_codec_properties
+      && !configure_codec_properties (encoder, codec_snapshot))
+    codec_error = TRUE;
 
   /* Apply a pending temporal-layer reference-structure change before the rest
    * of the config; the ref cfg governs the GOP structure the RC then sizes to.
@@ -1006,6 +1012,12 @@ gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
 
   if (self->cfg_error) {
     GST_ERROR_OBJECT (self, "refusing to apply a config MPP partly rejected");
+    return FALSE;
+  }
+
+  if (codec_error) {
+    GST_ERROR_OBJECT (self, "refusing to apply a config the codec cannot "
+        "express");
     return FALSE;
   }
 

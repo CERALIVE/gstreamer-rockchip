@@ -154,7 +154,11 @@ struct _GstMppEnc
 
 typedef void (*GstMppEncSnapshotPropertiesFunc) (GstVideoEncoder * encoder,
     gpointer snapshot);
-typedef void (*GstMppEncConfigurePropertiesFunc) (GstVideoEncoder * encoder,
+
+/* FALSE means the codec cannot express this configuration at all. The apply is
+ * then refused at the MPP_ENC_SET_CFG boundary, the same place a rejected
+ * config key is refused, so nothing is handed to MPP and no caps are published. */
+typedef gboolean (*GstMppEncConfigurePropertiesFunc) (GstVideoEncoder * encoder,
     gconstpointer snapshot);
 
 /* The three axes an H.264/H.265 level constrains.

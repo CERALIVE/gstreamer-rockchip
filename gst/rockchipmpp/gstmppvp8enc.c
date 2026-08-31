@@ -222,7 +222,7 @@ gst_mpp_vp8_enc_snapshot_properties (GstVideoEncoder * encoder,
   properties->qp_ip = self->qp_ip;
 }
 
-static void
+static gboolean
 gst_mpp_vp8_enc_configure_properties (GstVideoEncoder * encoder,
     gconstpointer snapshot)
 {
@@ -236,6 +236,8 @@ gst_mpp_vp8_enc_configure_properties (GstVideoEncoder * encoder,
   gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max_i", properties->qp_max_i);
   gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_ip", properties->qp_ip);
   gst_mpp_enc_cfg_set_s32 (mppenc, "vp8:disable_ivf", 1);
+
+  return TRUE;
 }
 
 static gboolean
