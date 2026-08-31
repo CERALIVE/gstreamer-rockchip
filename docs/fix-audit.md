@@ -1656,10 +1656,24 @@ altered — `rotation` is only *set* by a test, never redefined.
 
 ### FIX-14 — the declared level is validated against frame rate and bitrate, not resolution alone
 
-1. **Provenance SHA** — `9300c2488dccfec9928e45ae15c44823ee6cc816`. First-party fix,
-   against the same baseline. Ledger origin H5-B4, WAVE-2 falsification verdict REAL
-   with the mechanism corrected to "MPP corrects resolution-under-leveling but NOT
-   framerate/bitrate under-leveling".
+1. **Provenance SHA** — `9300c2488dccfec9928e45ae15c44823ee6cc816`, corrected by
+   `3f182454` and `e5efde90`. First-party fix, against the same baseline. Ledger
+   origin H5-B4, WAVE-2 falsification verdict REAL with the mechanism corrected to
+   "MPP corrects resolution-under-leveling but NOT framerate/bitrate under-leveling".
+
+   **Independent review round 1 found two defects in the first implementation.** Both
+   are fixed in the two follow-up commits and are covered below; the row is kept as one
+   FIX-14 row because they are corrections to this fix, not separate ledger entries.
+
+   - `3f182454` — the validator reduced the framerate to an integer before sizing the
+     rate axes against it, hiding every violation narrower than one frame per second.
+     MPP is handed the rational (`rc:fps_out_num` over `rc:fps_out_denorm`), so the
+     truncation was ours alone. `GstMppEncRateInfo` now carries the same pair and both
+     rate limits are compared by cross-multiplication.
+   - `e5efde90` — a stream outside EVERY level had its conformance flag set to FALSE
+     and then got the top table entry configured and published anyway, with a warning
+     saying it "may still exceed" that level. That is the same lie this fix exists to
+     remove. It is now a negotiation failure.
 2. **Red/green outputs** — the falsifier's premise was re-verified against the pinned
    MPP source before any code was written, per the todo-12 lesson that a lane's cited
    mechanism can be wrong. Both correction sites read only the frame-size column:
@@ -1695,10 +1709,72 @@ altered — `rotation` is only *set* by a test, never redefined.
    For H.265 the same stream is 2073600 luma samples (inside level 4's 2228224) at
    124416000 samples/s (outside its 66846720), so it raises to 4.1.
 
-   GREEN at the fix: `Checks: 40, Failures: 0, Errors: 0`; `meson test` `Ok: 3, Fail: 0`
+   GREEN at the fix: `Checks: 44, Failures: 0, Errors: 0`; `meson test` `Ok: 3, Fail: 0`
    on both suites.
 
-   Mutation check (seven mutants, all killed):
+   **Review round 1, defect A — truncated framerate.** A level's rate ceiling can fall
+   between two whole framerates, so the exact rational has to reach the comparison.
+   1080p is 8160 macroblocks; at `753/25` fps that is 245779.2 MB/s against H.264 level
+   4's 245760 ceiling, while truncating to 30 fps measures 244800 and accepts level 4.
+   The H.265 counterpart is 1080p at `806/25` fps: 66852864 samples/s against level 4's
+   66846720, truncating to 32 fps for 66355200. Both are now compared by
+   cross-multiplication (`mbs * fps_n` against `max_mbps * fps_d`, and the luma
+   equivalent), which is exact and stays well inside `guint64` for any geometry
+   `gst_video_info_from_caps` accepts. RED with the truncation restored:
+
+   ```
+   test_h264_level_uses_the_exact_fractional_frame_rate:0:
+     'mpp_mock_last_cfg_s32("h264:level")' (40) is not equal to '42' (42)
+   test_h265_level_uses_the_exact_fractional_frame_rate:0:
+     'mpp_mock_last_cfg_s32("h265:level")' (120) is not equal to '123' (123)
+   ```
+
+   The automatic bitrate deliberately keeps the integer framerate it has always used,
+   because that is the framerate the bitrate config is itself derived from; mixing the
+   two would make the bitrate axis disagree with what MPP is given.
+
+   **Review round 1, defect B — no rejection when nothing conforms.** Raising only makes
+   sense when a higher conforming level EXISTS. The first implementation returned the
+   top table entry when none did, and configured and published it with a warning. It is
+   now a negotiation failure: the codec's configure callback returns FALSE and writes
+   nothing, and the apply is refused at the `MPP_ENC_SET_CFG` boundary — the same seam
+   that already refuses a config MPP rejected a key from. RED with the clamp restored,
+   and note WHAT the assertion catches: the non-conforming level actually reaching MPP's
+   config.
+
+   ```
+   test_h264_stream_outside_every_level_is_rejected:0:
+     'mpp_mock_last_cfg_s32(level_key)' (62) is not equal to 'INT32_MIN' (-2147483648)
+   test_h265_stream_outside_every_level_is_rejected:0:
+     'mpp_mock_last_cfg_s32(level_key)' (186) is not equal to 'INT32_MIN' (-2147483648)
+   ```
+
+   The over-maximum tests assert four things together: the push returns
+   `GST_FLOW_NOT_NEGOTIATED`, the level key is still `INT32_MIN` (never written, not
+   merely uncommitted), `MPP_ENC_SET_CFG` was never issued, and no src caps were
+   published.
+
+   **The refusal is latched, not returned on the spot, and that is load-bearing.** The
+   remaining writes in the apply go into this element's own `MppEncCfg`; refusing at the
+   one boundary where that struct is handed to MPP keeps a single place where a rejected
+   configuration can be stopped, exactly as `cfg_error` already does. It also leaves the
+   parent's own config writes observable — which two PRE-EXISTING tests depend on.
+   `test_auto_bitrate_clamps_instead_of_overflowing` (8192x8192) and
+   `test_auto_bitrate_saturates_at_a_large_nv12_geometry` (32768x32768) both describe
+   geometries that this change now rejects, and both still pass **unchanged**, because
+   they assert on `rc:bps_target`/`bps_max`/`bps_min` rather than on negotiation
+   succeeding. Verified directly rather than assumed:
+
+   ```
+   mpph264enc: 8192x8192@256/1 fps at 2147483647 bps exceeds every H.264 level,
+   including 62; refusing to encode a stream no level can describe
+   100%: Checks: 1, Failures: 0, Errors: 0
+   ```
+
+   An early return at the configure callback would have skipped the parent's bitrate
+   writes and broken both of them, which is why the latch is not a stylistic choice.
+
+   Mutation check (seven mutants on the original implementation, all killed):
 
    | mutant | result |
    |---|---|
@@ -1709,6 +1785,18 @@ altered — `rotation` is only *set* by a test, never redefined.
    | compare level values instead of table positions | **KILLED** — level 1b (value 99) is treated as stronger than 6.2 and never raised |
    | count raw pixels instead of MPP_ALIGN(16) macroblocks | **KILLED** — 1920x1090 stays at 40 where MPP would itself raise past it |
    | always take the required level (allowing a *lower* one) | **KILLED** — 320x240 drops the declared 4 to 1.3 |
+
+   Mutation check on the two review-round corrections (four more mutants, all killed):
+
+   | mutant | result |
+   |---|---|
+   | restore the truncating framerate | **KILLED** — both fractional tests; H.264 accepts 40 not 42, H.265 accepts 120 not 123 |
+   | restore the clamp-and-warn on non-conformance | **KILLED** — both over-maximum tests; levels 62 and 186 reach MPP's config |
+   | exact rate on H.264 only, H.265 left truncating | **KILLED** — the H.265 fractional test alone |
+   | reject on H.264 only, H.265 left clamping | **KILLED** — the H.265 over-maximum test alone |
+
+   The last two exist because the two codecs carry independent copies of the level
+   logic; without them a half-applied correction would have passed.
 
    **Enforcement is warn+raise, not reject, and that was decided by checking rather
    than by preference.** The plan's QA scenario makes rejection conditional on no
@@ -1727,6 +1815,13 @@ altered — `rotation` is only *set* by a test, never redefined.
    `mpp_enc_cfg_set_s32("h264:level"/"h265:level")` and the negotiated caps, both of
    which are identical on and off board. The resulting bitstream conformance is not
    claimed here and is not measured by this row.
+
+   One behaviour note for the board drill that eventually exercises these elements: a
+   configuration outside every level now FAILS negotiation where it previously encoded.
+   No cerastream profile reaches that state — H.264 High level 6.2 tops out at 1 Gbit/s
+   and 139264 macroblocks, H.265 main tier 6.2 at 240 Mbit/s, and 2160p60 is 32400
+   macroblocks at 1.944 M MB/s — but an operator who types a bitrate two orders of
+   magnitude too large now gets a refusal instead of a silently mislabelled stream.
 4. **MPP ABI closure** — 68 symbols, empty diff against the pinned MPP, on both suites.
    The fix adds arithmetic and reuses the existing checked cfg setters.
 5. **Reviewer verdict** — `needs-human-review`, on the same F27 grounds as the row above.
@@ -1781,7 +1876,7 @@ Both containers were configured with the flags CI and `debian/rules` use
 
 | gate | bookworm / GStreamer 1.22 | trixie / GStreamer 1.26 |
 |---|---|---|
-| `meson test -C build-ci` | `Ok: 3, Fail: 0` (`Checks: 40, Failures: 0`) | `Ok: 3, Fail: 0` (`Checks: 40, Failures: 0`) |
+| `meson test -C build-ci` | `Ok: 3, Fail: 0` (`Checks: 44, Failures: 0`) | `Ok: 3, Fail: 0` (`Checks: 44, Failures: 0`) |
 | red at parent reproduced | yes, all three fixes | yes — all three fix sites reverted to parent behaviour in one build gives `Checks: 40, Failures: 8`, covering every raise test, the ref-cfg propagation test and the H.265 caps test |
 | `ci/check-mpp-abi.sh` | 68 symbols, empty diff | 68 symbols, empty diff |
 | `ci/check-glibc-floor.sh` | `highest GLIBC import GLIBC_2.17; device floor GLIBC_2.36` | not gated (forward-compat leg) |
