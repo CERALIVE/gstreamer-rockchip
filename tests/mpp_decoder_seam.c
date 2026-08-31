@@ -14,6 +14,8 @@
 
 void mpp_mock_dec_arm (unsigned width, unsigned height);
 void mpp_mock_dec_disarm (void);
+void mpp_mock_dec_release_packets (void);
+unsigned mpp_mock_dec_live_packets (void);
 unsigned mpp_mock_dec_outputs (void);
 void mpp_mock_dec_set_frame_format (MppFrameFormat format);
 void mpp_mock_dec_set_put_result (unsigned buffer_full_count, MPP_RET terminal);
@@ -121,11 +123,23 @@ start_decoder (gboolean dma_feature)
   return h;
 }
 
+/* Reclaim is only safe once the element has stopped, because it deinitializes
+ * its own packets on the way down. Asserting emptiness here rather than
+ * trusting a later arm/reset is what keeps the last test in the suite honest. */
+static void
+reclaim_mock_packets (void)
+{
+  mpp_mock_dec_release_packets ();
+  g_assert_cmpuint (mpp_mock_dec_live_packets (), ==, 0);
+}
+
+/* Disarm first so the element can drain, tear down, and only then reclaim. */
 static void
 stop_decoder (GstHarness * h)
 {
   mpp_mock_dec_disarm ();
   gst_harness_teardown (h);
+  reclaim_mock_packets ();
 }
 
 static gboolean
@@ -383,6 +397,7 @@ test_jpeg_input_timeout_is_retried (void)
 
   mpp_mock_dec_disarm ();
   gst_harness_teardown (h);
+  reclaim_mock_packets ();
   g_print ("one MPP_ERR_TIMEOUT retried; accepted on poll 2\n");
 }
 
@@ -431,6 +446,12 @@ test_unmatched_pts_pending_list_is_bounded (void)
         "expected it to stay at or below %u", pending, PENDING_INPUTS,
         PENDING_BOUND + PENDING_SLACK);
 
+  /* Sampled before the reclaim so the emptiness assertion below cannot pass
+   * vacuously: this run really did leave an arena behind. */
+  g_assert_cmpuint (mpp_mock_dec_live_packets (), >, 0);
+  g_print ("mock packet arena before final reclaim: %u\n",
+      mpp_mock_dec_live_packets ());
+
   stop_decoder (h);
   g_print ("unmatched-PTS pending bound: OK\n");
 }
@@ -453,6 +474,11 @@ main (int argc, char **argv)
 #endif
   test_decoder_allocator_requests_dma32 ();
   test_unmatched_pts_pending_list_is_bounded ();
+
+  /* Nothing arms after the last test, so the catch-all reclaim has to be here
+   * or its arena outlives the suite. */
+  reclaim_mock_packets ();
+  g_print ("mock packet arena at exit: %u\n", mpp_mock_dec_live_packets ());
 
   g_print ("mpp-decoder-seam: OK\n");
   return 0;

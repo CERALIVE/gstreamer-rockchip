@@ -98,8 +98,10 @@ typedef struct {
 #define ENC_PLAN_DEFAULT_LENGTH 1
 static size_t enc_plan_length[ENC_PLAN_CAPACITY];
 static int enc_plan_length_armed[ENC_PLAN_CAPACITY];
-/* Tri-state, mirroring what a real encoder packet can carry: absent meta
- * (unarmed), present and zero, or present and set. */
+/* Tri-state: unarmed (no KEY_OUTPUT_INTRA at all), present and zero, or
+ * present and set. The pinned MPP writes the key on every output packet
+ * (mpp/codec/mpp_enc_impl.cpp:2481), so the unarmed state is defensive
+ * coverage, not the shape MPP normally produces. */
 static int enc_plan_intra[ENC_PLAN_CAPACITY];
 static int enc_plan_intra_armed[ENC_PLAN_CAPACITY];
 /* Page-sized and mmap-backed so the plugin's zero-copy branch can import the
@@ -147,6 +149,7 @@ static atomic_uint jpeg_input_poll_calls;
 static atomic_int jpeg_last_input_poll_timed_out;
 static MockTask jpeg_task;
 static MockPacket *packet_allocs;
+static atomic_uint dec_arena_packets;
 static RK_U32 dec_width = 320;
 static RK_U32 dec_height = 240;
 static atomic_int dec_frame_format;
@@ -673,6 +676,7 @@ MPP_RET mpp_packet_init(MppPacket *packet, void *data, size_t size) {
     p->has_buffer = atomic_exchange(&dec_next_packet_has_buffer, 0);
   p->next = packet_allocs;
   packet_allocs = p;
+  atomic_fetch_add(&dec_arena_packets, 1);
   *packet = (MppPacket)p;
   return MPP_OK;
 }
@@ -994,8 +998,9 @@ void mpp_mock_enc_set_packet_length(unsigned ordinal, size_t length) {
   enc_plan_length[ordinal] = length;
   enc_plan_length_armed[ordinal] = 1;
 }
-/* Leaving an ordinal unarmed is the negative control: MPP attaches no
- * KEY_OUTPUT_INTRA at all, which must read differently from a zero. */
+/* An unarmed ordinal omits KEY_OUTPUT_INTRA entirely. The pinned MPP always
+ * writes it, so this models a malformed or future producer rather than MPP's
+ * own behaviour -- it exists so an absent key cannot silently read as a zero. */
 void mpp_mock_enc_set_packet_intra(unsigned ordinal, int intra) {
   if (ordinal >= ENC_PLAN_CAPACITY)
     return;
@@ -1034,18 +1039,24 @@ unsigned mpp_mock_enc_live_packets(void) {
 unsigned mpp_mock_enc_live_buffers(void) {
   return atomic_load(&enc_live_buffers);
 }
-static void dec_release_packets(void) {
+/* Safe only once no element can still own a packet, i.e. after the harness has
+ * been torn down. Callers reclaim explicitly; arming reclaims again so a test
+ * that forgets cannot carry an arena into the next one. */
+void mpp_mock_dec_release_packets(void) {
   while (packet_allocs) {
     MockPacket *packet = packet_allocs;
     packet_allocs = packet->next;
     free(packet);
+    atomic_fetch_sub(&dec_arena_packets, 1);
   }
 }
+/* Lets the seam assert the arena is empty without a leak checker, which is
+ * what CI can actually run: LeakSanitizer cannot start under qemu-user. */
+unsigned mpp_mock_dec_live_packets(void) {
+  return atomic_load(&dec_arena_packets);
+}
 void mpp_mock_dec_arm(unsigned width, unsigned height) {
-  /* The previous element is long gone by the time a test arms again, so this
-   * is the only point where reclaiming the arena cannot free a packet some
-   * element still owns and will deinitialize as it stops. */
-  dec_release_packets();
+  mpp_mock_dec_release_packets();
   dec_width = (RK_U32)width;
   dec_height = (RK_U32)height;
   atomic_store(&dec_frame_format, MPP_FMT_YUV420SP);
@@ -1154,5 +1165,5 @@ void mpp_mock_reset(void) {
   memset(enc_plan_intra, 0, sizeof(enc_plan_intra));
   memset(enc_plan_intra_armed, 0, sizeof(enc_plan_intra_armed));
   mpp_mock_dec_disarm();
-  dec_release_packets();
+  mpp_mock_dec_release_packets();
 }
