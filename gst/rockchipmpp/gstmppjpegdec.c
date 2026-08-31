@@ -411,6 +411,12 @@ error:
   return MPP_NOK;
 }
 
+static gboolean
+gst_mpp_jpeg_dec_is_poll_timeout (MPP_RET ret)
+{
+  return ret == MPP_NOK || ret == MPP_ERR_TIMEOUT;
+}
+
 static MppFrame
 gst_mpp_jpeg_dec_poll_mpp_frame (GstVideoDecoder * decoder, gint timeout_ms)
 {
@@ -445,7 +451,7 @@ gst_mpp_jpeg_dec_poll_mpp_frame (GstVideoDecoder * decoder, gint timeout_ms)
 
 static gboolean
 gst_mpp_jpeg_dec_shutdown (GstVideoDecoder * decoder, gboolean drain,
-    GstFlowReturn * shutdown_result UNUSED)
+    GstFlowReturn * shutdown_result)
 {
   GstMppJpegDec *self = GST_MPP_JPEG_DEC (decoder);
   GstMppDec *mppdec = GST_MPP_DEC (decoder);
@@ -467,11 +473,11 @@ gst_mpp_jpeg_dec_shutdown (GstVideoDecoder * decoder, gboolean drain,
         MPP_JPEG_DEC_DRAIN_POLL_MS);
     if (g_atomic_int_get (&mppdec->reset_generation) != reset_generation) {
       GST_DEBUG_OBJECT (self, "JPEG drain cancelled by reset");
-      goto error;
+      goto cancelled;
     }
     if (ret == MPP_OK)
       break;
-    if (ret != MPP_ERR_TIMEOUT)
+    if (!gst_mpp_jpeg_dec_is_poll_timeout (ret))
       goto error;
   } while (g_get_monotonic_time () < deadline);
 
@@ -500,8 +506,10 @@ gst_mpp_jpeg_dec_shutdown (GstVideoDecoder * decoder, gboolean drain,
   return TRUE;
 
 error:
+  *shutdown_result = GST_FLOW_ERROR;
   GST_WARNING_OBJECT (self, "failed to send EOS");
 
+cancelled:
   if (mtask) {
     mpp_task_meta_set_packet (mtask, KEY_INPUT_PACKET, NULL);
     mpp_task_meta_set_frame (mtask, KEY_OUTPUT_FRAME, NULL);

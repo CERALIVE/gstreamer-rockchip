@@ -42,6 +42,8 @@ unsigned mpp_mock_dec_double_deinits (void);
 unsigned mpp_mock_dec_frame_deinits (void);
 unsigned mpp_mock_internal_group_types (void);
 void mpp_mock_jpeg_set_input_timeouts (unsigned count);
+void mpp_mock_jpeg_set_input_timeouts_with_result (unsigned count,
+    MPP_RET result);
 unsigned mpp_mock_jpeg_input_poll_calls (void);
 void mpp_mock_jpeg_block_input_poll (void);
 unsigned mpp_mock_jpeg_input_poll_entered (void);
@@ -855,6 +857,36 @@ test_jpeg_blocked_drain_is_cancelled_by_flush (void)
 }
 
 static void
+test_jpeg_drain_retries_mpp_nok_until_deadline (void)
+{
+  GstHarness *h;
+  GstFlowReturn result;
+  gint64 elapsed;
+
+  g_print ("== jpeg drain MPP_NOK timeout deadline ==\n");
+  mpp_mock_dec_arm (DEC_WIDTH, DEC_HEIGHT);
+  h = gst_harness_new ("mppjpegdec");
+  g_assert_nonnull (h);
+  gst_harness_set_src_caps_str (h, JPEG_CAPS);
+  g_assert_cmpint (gst_harness_push (h, make_input_buffer (0)), ==, GST_FLOW_OK);
+
+  mpp_mock_jpeg_set_input_timeouts_with_result (100000, MPP_NOK);
+  elapsed = g_get_monotonic_time ();
+  result = finish_decoder (h);
+  elapsed = g_get_monotonic_time () - elapsed;
+  g_assert_cmpint (result, ==, GST_FLOW_ERROR);
+  g_assert_cmpint (elapsed, >=, 80 * 1000);
+  g_assert_cmpint (elapsed, <, G_USEC_PER_SEC);
+  g_assert_cmpuint (mpp_mock_jpeg_input_poll_calls (), >, 1);
+  g_print ("MPP_NOK drain retried %u times for %.1f ms before failure\n",
+      mpp_mock_jpeg_input_poll_calls (), elapsed / 1000.0);
+
+  mpp_mock_dec_disarm ();
+  gst_harness_teardown (h);
+  reclaim_mock_packets ();
+}
+
+static void
 test_dma_feature_reaches_negotiated_caps (void)
 {
   g_print ("== dmabuf caps negotiation ==\n");
@@ -1346,6 +1378,7 @@ main (int argc, char **argv)
   test_jpeg_input_timeout_is_retried ();
   test_jpeg_input_poll_and_dequeue_results_are_preserved ();
   test_jpeg_blocked_drain_is_cancelled_by_flush ();
+  test_jpeg_drain_retries_mpp_nok_until_deadline ();
   test_dma_feature_reaches_negotiated_caps ();
 #if GST_CHECK_VERSION(1, 24, 0)
   test_dma_drm_peer_selects_dma_drm_caps ();

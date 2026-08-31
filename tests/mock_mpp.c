@@ -186,6 +186,7 @@ static RK_S64 dec_output_plan_pts[DEC_OUTPUT_PLAN_CAPACITY];
 static uint8_t dec_output_plan_identity[DEC_OUTPUT_PLAN_CAPACITY];
 static atomic_uint internal_group_types;
 static atomic_uint jpeg_input_timeouts_remaining;
+static atomic_int jpeg_input_timeout_result;
 static atomic_uint jpeg_input_poll_calls;
 static atomic_int jpeg_last_input_poll_timed_out;
 static atomic_int jpeg_block_input_poll_armed;
@@ -285,7 +286,6 @@ static void record_enc_cfg(MppEncCfg cfg) {
 }
 static MPP_RET port_ok(MppCtx c, MppPortType t, MppPollType p) {
   (void)c;
-  (void)p;
   if (atomic_load(&dec_enabled) && t == MPP_PORT_INPUT) {
     atomic_fetch_add(&jpeg_input_poll_calls, 1);
     if (atomic_exchange(&jpeg_block_input_poll_armed, 0)) {
@@ -305,7 +305,9 @@ static MPP_RET port_ok(MppCtx c, MppPortType t, MppPollType p) {
       ;
     if (remaining) {
       atomic_store(&jpeg_last_input_poll_timed_out, 1);
-      return MPP_ERR_TIMEOUT;
+      if (p > 0)
+        usleep((useconds_t)p * 1000);
+      return (MPP_RET)atomic_load(&jpeg_input_timeout_result);
     }
     atomic_store(&jpeg_last_input_poll_timed_out, 0);
   }
@@ -1353,6 +1355,7 @@ void mpp_mock_dec_arm(unsigned width, unsigned height) {
   }
   atomic_store(&internal_group_types, 0);
   atomic_store(&jpeg_input_timeouts_remaining, 0);
+  atomic_store(&jpeg_input_timeout_result, MPP_ERR_TIMEOUT);
   atomic_store(&jpeg_input_poll_calls, 0);
   atomic_store(&jpeg_last_input_poll_timed_out, 0);
   atomic_store(&jpeg_block_input_poll_armed, 0);
@@ -1444,6 +1447,14 @@ unsigned mpp_mock_internal_group_types(void) {
 }
 void mpp_mock_jpeg_set_input_timeouts(unsigned count) {
   atomic_store(&jpeg_input_timeouts_remaining, count);
+  atomic_store(&jpeg_input_timeout_result, MPP_ERR_TIMEOUT);
+  atomic_store(&jpeg_input_poll_calls, 0);
+  atomic_store(&jpeg_last_input_poll_timed_out, 0);
+}
+void mpp_mock_jpeg_set_input_timeouts_with_result(unsigned count,
+                                                  MPP_RET result) {
+  atomic_store(&jpeg_input_timeouts_remaining, count);
+  atomic_store(&jpeg_input_timeout_result, result);
   atomic_store(&jpeg_input_poll_calls, 0);
   atomic_store(&jpeg_last_input_poll_timed_out, 0);
 }

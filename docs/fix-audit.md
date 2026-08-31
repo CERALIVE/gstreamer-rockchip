@@ -36,7 +36,8 @@ Every fix row appended by later todos must contain exactly these five fields:
 ### Drain-aware, reset-cancellable JPEG shutdown
 
 1. **Provenance SHA** — first-party correction against task baseline
-   `18bce5f5c8f64fe877c6e24fba13cbe012857967`; the fix commit is the commit containing this row.
+   `18bce5f5c8f64fe877c6e24fba13cbe012857967`; initial fix `548944c857177e4983bc7a30e2055d776282c4b0`,
+   with the independent-review timeout-classification correction in the commit containing this row.
 2. **Red/green outputs** — the arm64/bookworm `mpp-decoder-seam` arms an input poll that never
    returns until MPP reset is called, starts JPEG finish on a worker thread, waits until that
    thread is inside the poll, then invokes the non-draining decoder flush path. RED at the parent:
@@ -48,13 +49,22 @@ Every fix row appended by later todos must contain exactly these five fields:
    Mutation check: removing the reset-generation cancellation check reproduced the same watchdog
    hang after reset woke the first poll, because the mutant re-entered the drain and waited for an
    EOS completion that cancellation must not enqueue.
+   Independent source verification at pinned MPP commit
+   `194af181db3a02a095c01db84e176d972e19b216` found that `Condition::timedwait()` returns positive
+   pthread `ETIMEDOUT`, `_mpp_port_poll()` converts that positive result with an empty queue to
+   `MPP_NOK`, and `mpi_poll()` preserves the negative value. The initial loop retried only the
+   enum `MPP_ERR_TIMEOUT`, so a real pinned-MPP timeout escaped after one 10 ms poll. The added
+   normal-timeout test returns repeated `MPP_NOK` from finite polls: RED initial behavior completed
+   after 10.3 ms/one call; GREEN retries 10 times for 101.1 ms before bounded `GST_FLOW_ERROR`.
+   Removing `MPP_NOK` from the retry classifier restores the 10.3 ms failure.
 3. **Hardware gate** — `hardware-independent`. The synchronization proof uses real GLib threads,
    the production decoder mutex/stream-lock ordering, and the MPP `reset`/`poll` API boundary.
 4. **MPP ABI closure** — unchanged at 68 referenced-and-present MPP symbols; the fix uses only
    already-covered `reset`, `poll`, `dequeue`, and `enqueue` entry points, and the closure remains
    empty against pinned MPP 1.5.0-1.
-5. **Reviewer verdict** — `needs-human-review`. Reviewer == author; the branch remains open for
-   orchestrator-dispatched independent review.
+5. **Reviewer verdict** — `needs-human-review`. Independent review correctly returned
+   `needs-fix` on the initial `MPP_ERR_TIMEOUT`-only classifier. The corrected pinned-MPP
+   `MPP_NOK` path and deadline test require a fresh independent review.
 
 ### Bounded video-decoder EOS submission
 
