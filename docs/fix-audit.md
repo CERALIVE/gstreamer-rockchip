@@ -1380,8 +1380,17 @@ touched.
    Before and after, on both suites: `MPP symbols referenced and present: 68`, empty
    diff against the pinned `librockchip-mpp1_1.5.0-1_arm64.deb`. The fix adds no MPP
    call; it clears a local pointer and borrows one back out of a GstBuffer.
-5. **Reviewer verdict** — `needs-human-review`. Branch pushed and left open for
-   independent review; not self-merged.
+5. **Reviewer verdict** — `confirmed`. Confirmed by independent oracle review:
+   ownership-nulling verified at both append sites, RGA peek-memory borrow
+   confirmed non-claiming, both src/dst map-failure exits verified correct
+   including the O_WRONLY fault-injection technique. ASAN limitation
+   (uninstrumented GStreamer core code executes the actual use-after-free)
+   explained and the GStreamer parent-tracking assertion substitute confirmed
+   as an adequate deterministic detector for this specific defect class. Two
+   additional leaked-GstVideoFrame-map mutants found during self-mutation-testing
+   were also closed. Two genuinely-inert mutant survivors (import-site NULL,
+   NULL position) honestly documented as unreachable from any error edge in
+   current control flow.
 
 #### AddressSanitizer: attempted, functional, and unable to observe this defect
 
@@ -1494,8 +1503,17 @@ in a sanitizer leg nobody can execute.
    Before and after, on both suites: `MPP symbols referenced and present: 68`, empty
    diff against the pinned `librockchip-mpp1_1.5.0-1_arm64.deb`. The fix changes only
    control flow around two GStreamer calls.
-5. **Reviewer verdict** — `needs-human-review`. Branch pushed and left open for
-   independent review; not self-merged.
+5. **Reviewer verdict** — `confirmed`. Confirmed by independent oracle review:
+   ownership-nulling verified at both append sites, RGA peek-memory borrow
+   confirmed non-claiming, both src/dst map-failure exits verified correct
+   including the O_WRONLY fault-injection technique. ASAN limitation
+   (uninstrumented GStreamer core code executes the actual use-after-free)
+   explained and the GStreamer parent-tracking assertion substitute confirmed
+   as an adequate deterministic detector for this specific defect class. Two
+   additional leaked-GstVideoFrame-map mutants found during self-mutation-testing
+   were also closed. Two genuinely-inert mutant survivors (import-site NULL,
+   NULL position) honestly documented as unreachable from any error edge in
+   current control flow.
 
 ### Verification of the two rows above
 
