@@ -1307,3 +1307,214 @@ The second form is the one that can detect drift here, and it was used different
 the pristine parent and this branch produce **byte-identical** output (`diff` clean),
 so this change introduces no parity drift. No property, rank or caps surface was
 touched.
+
+### FIX-1 — appended memory is released once, not twice, on conversion failure
+
+1. **Provenance SHA** — `9d074c3b487d3ec3b4a6355eeb8a68b0ca9010e3`. First-party fix
+   (no upstream pick). Ledger origin H1-B2, whose falsification narrowed the claim to
+   the **post-append** conversion-failure paths specifically, not every append. That
+   narrowing is what this row proves: the import-path append at the top of
+   `gst_mpp_enc_convert()` is followed by `goto out` and is genuinely unreachable from
+   `err:`, while the `convert:` append is not.
+
+   The plan cites `gstmppenc.c:1296-1349` / `:1284` / `:1316-1332`. Those line numbers
+   are **stale** after todos 11-13; the function is `gst_mpp_enc_convert()` and the
+   relevant sites were at `:1563` (safe import append), `:1580` (unsafe convert
+   append) and `:1591` (the unconditional `goto err` that reaches the double release).
+   Find it by name.
+2. **Red/green outputs** — `meson test -C build-ci`, case
+   `rockchipmpp GstHarness factories and caps`, test
+   `test_failed_rotation_leaves_appended_memory_singly_owned` in
+   `tests/mpp_gstharness.c`.
+
+   RED at the parent (`6b71fcc8`), identically on bookworm/1.22 and trixie/1.26.2:
+
+   ```
+   ../libs/gst/check/gstcheck.c:286:F:caps:
+     test_failed_rotation_leaves_appended_memory_singly_owned:0:
+     Unexpected critical/warning: free_priv_data: object finalizing but still
+     has 1 parents (object:0x7fda674f3c50)
+   ```
+
+   GREEN at the fix: `Ok: 3, Fail: 0`, with `failed rotation: flow=not-negotiated`.
+
+   **The detector is GStreamer's own mini-object parent tracking, not a sanitizer.**
+   `gst_buffer_append_memory()` registers the buffer as a parent of the memory;
+   releasing the stale local reference drops the count to zero and finalises the
+   memory while that registration still stands, which raises the critical above and
+   which `gst_check` turns into a failure. It is deterministic and runs in both CI
+   suites on every build.
+
+   **Trigger derivation.** The plan's suggested trigger — "rotation without RGA
+   available" — is not reachable as literally stated: with RGA compiled out,
+   `gst_mpp_enc_set_format()` rejects a non-zero rotation outright
+   (`unable to convert without RGA`), so no frame ever reaches the conversion path.
+   The reachable form is **RGA compiled in but no RGA hardware present**, which is
+   exactly the CI container: `librga` 2.1.0 is installed so `HAVE_RGA` is set and
+   `set_format` accepts the property, then `c_RkRgaInit()` fails
+   (`failed to open RGA:No such file or directory`), the blit returns FALSE, and the
+   rotation check below it is an unconditional `goto err` with the append already
+   done. On a real RK3588 the same error path is reached by any conversion the blit
+   declines.
+
+   Mutation check (four mutants, two killed, two surviving and reported):
+
+   | mutant | result |
+   |---|---|
+   | drop `out_mem = NULL` after the `convert:` append | **KILLED** — RED, identical to the parent critical |
+   | `gst_buffer_peek_memory (outbuf, 1)` instead of `, 0)` | **KILLED** — RED in two *other* tests: `gst_buffer_peek_memory: assertion 'idx < GST_BUFFER_MEM_LEN (buffer)' failed`. The borrowed pointer is load-bearing on the RGA path. |
+   | drop `out_mem = NULL` after the **import** append | SURVIVED |
+   | move `out_mem = NULL` to after the `#endif` instead of immediately after the append | SURVIVED |
+
+   Both survivors are expected and are recorded rather than papered over with an
+   unreachable test. The import-path append is followed by `goto out` with no
+   intervening failure, and no `goto err` currently sits between the `convert:` append
+   and the end of the RGA block, so neither assignment is reachable-from-`err:` today.
+   They are kept because they make the variable mean one thing for the whole function
+   — a reference this function still owns — which is what stops the next edit in
+   either region from reopening the defect silently.
+3. **Hardware gate** — `hardware-independent`. The trigger is a failed RGA blit, which
+   the CI container produces natively by having the library without the device, so no
+   board drill is claimed or needed.
+4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh build-ci/gst/rockchipmpp/libgstrockchipmpp.so`.
+   Before and after, on both suites: `MPP symbols referenced and present: 68`, empty
+   diff against the pinned `librockchip-mpp1_1.5.0-1_arm64.deb`. The fix adds no MPP
+   call; it clears a local pointer and borrows one back out of a GstBuffer.
+5. **Reviewer verdict** — `needs-human-review`. Branch pushed and left open for
+   independent review; not self-merged.
+
+#### AddressSanitizer: attempted, functional, and unable to observe this defect
+
+The plan's acceptance criterion asks for an ASAN pair. **No ASAN red/green pair is
+claimed, and ASAN did not report this defect.** The reason is specific and was
+established rather than assumed, because the honest answer is not the one the
+earlier notepads would predict:
+
+- ASAN **works** in this container. A three-line `malloc`/`free`/read probe built with
+  `-fsanitize=address` reports `heap-use-after-free` with a full stack. This is *not*
+  the QEMU/ptrace limitation recorded for LeakSanitizer in todo 13 — that limitation is
+  real but applies to the stop-the-world leak pass, not to inline checks.
+- The sanitized plugin is instrumented: `nm -D libgstrockchipmpp.so | grep -c __asan`
+  is **23**.
+- `libgstreamer-1.0.so.0` is the distro build and is **not** instrumented: the same
+  count is **0**.
+- The offending access is the *second* release, which happens inside
+  `_gst_buffer_free()` / `gst_mini_object_remove_parent()` — that is, inside
+  uninstrumented libgstreamer. ASAN intercepts the `free`, so the memory is quarantined,
+  but the read that touches it is never shadow-checked. There is nothing to report.
+
+Separately, an ASAN run of the full suite under `qemu-user` did not finish within a
+900 s timeout, matching the "an ASAN run can still hang under qemu" note already in the
+notepads. That hang is a second, independent obstacle; even without it the point above
+would stand.
+
+Observing this defect with ASAN would require an instrumented GStreamer core, which is
+out of scope here. The parent-tracking critical is a better instrument for this bug
+class anyway: it is purpose-built for exactly "memory finalised while a buffer still
+owns it", it is deterministic, and it runs in both CI suites on every build rather than
+in a sanitizer leg nobody can execute.
+
+### FIX-13 — a failed frame map fails the conversion instead of passing as success
+
+1. **Provenance SHA** — `3db03d26bb5009acc2fd8cf76bb6a2f842da2830`. First-party fix
+   (no upstream pick). Ledger origin O1-B8 ≡ falsifier O-F2, corroborated across two
+   independent oracle lanes. Depends on FIX-1: making a map failure `goto err` adds two
+   more post-append error paths, which without FIX-1 would each be a double release.
+   That dependency is why the two land in this order.
+2. **Red/green outputs** — `meson test -C build-ci`, tests
+   `test_unreadable_source_frame_fails_the_conversion` and
+   `test_unwritable_destination_frame_fails_the_conversion`.
+
+   RED at the parent (`9d074c3b`, i.e. with FIX-1 already applied), identically on
+   bookworm/1.22 and trixie/1.26.2:
+
+   ```
+   test_unreadable_source_frame_fails_the_conversion:0:
+     'ret' (0) is not equal to 'GST_FLOW_NOT_NEGOTIATED' (-4)
+   test_unwritable_destination_frame_fails_the_conversion:0:
+     'ret' (0) is not equal to 'GST_FLOW_NOT_NEGOTIATED' (-4)
+   ```
+
+   `GST_FLOW_OK` is the defect: the parent reports success for a conversion that never
+   copied anything.
+
+   GREEN at the fix: `Ok: 3, Fail: 0`, with
+
+   ```
+   unreadable source: flow=not-negotiated mpp-frames=0
+   unwritable destination: flow=not-negotiated mpp-frames=0
+   completed conversion: flow=ok input memory remappable
+   ```
+
+   `mpp-frames` is `mpp_mock_enc_queued_packets()`, one increment per
+   `encode_put_frame`, read **after teardown** so the encoder task has drained and a
+   submitted frame cannot hide behind the race between the pushing thread and the task.
+   It is the harm assertion, not the flow return: O1-B8's damage is an uninitialised
+   MPP buffer reaching the encoder, and the parent submits one on both paths.
+   `mpp_frame_set_buffer_count()` is deliberately **not** used — `gst_mpp_enc_stop()`
+   calls `mpp_frame_set_buffer (self->mpp_frame, NULL)` at teardown, so that counter
+   reads 1 even when nothing was ever encoded.
+
+   Fault injection, both sides, and one trap worth recording:
+
+   - **Source**: a test `GstAllocator` whose `mem_map` returns NULL. It is not a
+     dmabuf, so `gst_mpp_allocator_import_gst_memory()` declines it and the frame
+     reaches the conversion path.
+   - **Destination**: a mock knob makes MPP publish a dmafd reopened `O_WRONLY` through
+     `/proc/self/fd`, which `mmap(MAP_SHARED)` refuses for both `PROT_WRITE` and
+     `PROT_READ`.
+   - **The trap**: a *read-only* destination fd does not work, and the first attempt
+     used one. `gst_memory_map(GST_MAP_WRITE)` on it correctly returns 0, but
+     `gst_buffer_map()` routes through `gst_memory_make_mapped()`, which silently falls
+     back to `gst_memory_copy()` when the direct map fails — and that copy only needs a
+     READ map. So a read-only destination write-maps successfully at buffer level and
+     proves nothing. Verified directly with a standalone GStreamer probe before the
+     injection was changed. Anyone writing a map-failure test against a GstBuffer needs
+     a genuinely unmappable memory, not a non-writable one.
+
+   Mutation check (four mutants, all killed):
+
+   | mutant | result |
+   |---|---|
+   | source map failure → `goto out` (treat as success) | **KILLED** by the source test |
+   | destination map failure → `goto out` (treat as success) | **KILLED** by the destination test |
+   | drop `gst_video_frame_unmap (&src_frame)` in the destination-failure branch | **KILLED** — `the conversion left a map on the input memory` |
+   | drop `gst_video_frame_unmap (&src_frame)` on the completed-copy path | **KILLED** — same assertion, from the completed-conversion test |
+
+   The last two mutants initially **survived**. They are leaked `GstVideoFrame` maps,
+   which nothing in the suite noticed, and this fix restructures exactly that unmap
+   region — so a detector was added rather than the survivors being reported and left:
+   a locked memory refuses a write map, so re-mapping the retained input memory for
+   writing after the push is a direct, deterministic check that every map taken was
+   released. The completed-conversion test exists solely because it is the only path
+   that reaches the unmap after the copy.
+3. **Hardware gate** — `hardware-independent`. Both failures are injected at the
+   GStreamer mapping seam, which is CPU-side and identical on and off board.
+4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh build-ci/gst/rockchipmpp/libgstrockchipmpp.so`.
+   Before and after, on both suites: `MPP symbols referenced and present: 68`, empty
+   diff against the pinned `librockchip-mpp1_1.5.0-1_arm64.deb`. The fix changes only
+   control flow around two GStreamer calls.
+5. **Reviewer verdict** — `needs-human-review`. Branch pushed and left open for
+   independent review; not self-merged.
+
+### Verification of the two rows above
+
+Both containers were configured with the flags CI and `debian/rules` use
+(`-Drkximage=enabled -Drockchipmpp=enabled -Dkmssrc=enabled -Drga=enabled`).
+
+| gate | bookworm / GStreamer 1.22 | trixie / GStreamer 1.26.2 |
+|---|---|---|
+| `meson test -C build-ci` | `Ok: 3, Fail: 0` (`Checks: 24, Failures: 0`) | `Ok: 3, Fail: 0` |
+| red at parent reproduced | yes, all three tests | yes, all three tests |
+| `ci/check-mpp-abi.sh` | 68 symbols, empty diff | 68 symbols, empty diff |
+| `ci/check-glibc-floor.sh` | `highest GLIBC import GLIBC_2.17; device floor GLIBC_2.36` | not gated (forward-compat leg) |
+| `ci/check-glibc-floor.test.sh` | all assertions passed | — |
+| `tests/parity-check.sh`, mock preloaded, parent vs branch | `diff` clean — **byte-identical** | `diff` clean — **byte-identical** |
+
+`tests/parity-check.sh` was run in its differential form, per the documented mocked-host
+limitation: with the mock preloaded both source-derived contract checks pass,
+`mpph264enc` and `mpph265enc` pass, and the run then stops on the `mppvideodec` line
+against the immutable board-captured Radxa decoder golden. The parent and this branch
+produce byte-identical output in both containers, so neither fix introduces parity
+drift. No property, rank or caps surface was touched, and no frozen property was
+altered — `rotation` is only *set* by a test, never redefined.
