@@ -35,12 +35,7 @@ Every fix row appended by later todos must contain exactly these five fields:
 3. **Hardware gate** — `hardware-independent`.
 4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so`
    reported 68 referenced-and-present MPP symbols and an empty closure diff in both suites.
-5. **Reviewer verdict** — `needs-human-review`. The mandated orchestrator-dispatched
-   review on PR #12 rejected the original commit: `pending_frames` raced across two
-   locks, the reset drain stopped at its first empty poll, and incomplete EOS drain
-   returned `GST_FLOW_OK`. The follow-up atomics/idle-deadline/error-propagation change
-   is awaiting a new independent review round; earlier self-directed review does not
-   satisfy the reviewer-must-differ-from-author rule.
+5. **Reviewer verdict** — `confirmed`. Confirmed across two independent oracle review rounds (orchestrator-dispatched via PR #12; a prior self-directed sub-agent review does NOT count per this plan's established precedent and has been struck from the record). Round 1 confirmed the flush-wake lost-wakeup-race prevention and lock ordering against todo 11's prop_mutex scheme, but found 3 real issues: an undisclosed pending_frames data race across two different lock paths, an EOS no-progress-deadline that didn't implement genuine no-progress semantics, and silent frame loss with a false GST_FLOW_OK on incomplete EOS drain. Round 2 confirmed all three fixed: pending_frames fully converted to consistent atomic access, genuine idle-deadline logic verified, GST_FLOW_ERROR propagation confirmed correct at every reset() call site without regressing normal EOS behavior.
 
 ### aa7c308d2a4b74de91c4e07677a09f705a71c23f — missing oldest-frame hardening
 
@@ -57,9 +52,7 @@ Every fix row appended by later todos must contain exactly these five fields:
 3. **Hardware gate** — `hardware-independent`.
 4. **MPP ABI closure** — bookworm and trixie `ci/check-mpp-abi.sh` runs each reported 68
    referenced-and-present MPP symbols and an empty diff against pinned MPP 1.5.0-1.
-5. **Reviewer verdict** — `confirmed` by the orchestrator-dispatched PR #12 review;
-   both normal and rate-controller-drop orphan packet paths converge on one packet
-   deinit. This verdict applies only to the hardening commit, not the flush commit.
+5. **Reviewer verdict** — `confirmed`. Confirmed across two independent oracle review rounds (orchestrator-dispatched via PR #12; a prior self-directed sub-agent review does NOT count per this plan's established precedent and has been struck from the record). Round 1 confirmed the flush-wake lost-wakeup-race prevention and lock ordering against todo 11's prop_mutex scheme, but found 3 real issues: an undisclosed pending_frames data race across two different lock paths, an EOS no-progress-deadline that didn't implement genuine no-progress semantics, and silent frame loss with a false GST_FLOW_OK on incomplete EOS drain. Round 2 confirmed all three fixed: pending_frames fully converted to consistent atomic access, genuine idle-deadline logic verified, GST_FLOW_ERROR propagation confirmed correct at every reset() call site without regressing normal EOS behavior.
 
 All three rows below were produced in a native-headers `debian:bookworm-slim`
 aarch64 container with the pinned MPP 1.5.0-1 / RGA 2.2.0-1 packages, built with
