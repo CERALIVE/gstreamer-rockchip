@@ -31,7 +31,7 @@ rockchipmpp = library('gstrockchipmpp',
 
 mock_mpp = shared_library('mppmock', '../../tests/mock_mpp.c',
   c_args : ['-fvisibility=default'],
-  dependencies : [mpp_dep], install : false)
+  dependencies : [glib_dep, mpp_dep], install : false)
 
 gstcheck_dep = dependency('gstreamer-check-1.0', version : gst_req)
 mpp_harness = executable('mpp-gstharness', '../../tests/mpp_gstharness.c',

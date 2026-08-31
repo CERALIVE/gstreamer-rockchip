@@ -26,6 +26,8 @@ void mpp_mock_dec_plan_output (unsigned ordinal, RK_S64 pts,
     unsigned identity);
 unsigned mpp_mock_dec_accounted_outputs (void);
 unsigned mpp_mock_dec_live_output_buffers (void);
+void mpp_mock_dec_track_glist_frees (int enabled);
+unsigned mpp_mock_dec_glist_free_calls (void);
 void mpp_mock_dec_set_frame_format (MppFrameFormat format);
 void mpp_mock_dec_set_put_result (unsigned buffer_full_count, MPP_RET terminal);
 unsigned mpp_mock_dec_put_calls (void);
@@ -742,6 +744,40 @@ test_drain_finishes_retained_tail_frame (void)
 }
 
 static void
+test_reset_frees_copied_frame_list (void)
+{
+  GstHarness *h = start_decoder (FALSE);
+  GstVideoDecoder *decoder = GST_VIDEO_DECODER (h->element);
+  GstVideoDecoderClass *klass = GST_VIDEO_DECODER_GET_CLASS (decoder);
+  guint cycle;
+
+  g_print ("== reset frees copied frame lists ==\n");
+  mpp_mock_dec_set_output_paused (TRUE);
+
+  for (cycle = 0; cycle < 4; cycle++) {
+    guint frees_before;
+
+    g_assert_cmpint (gst_harness_push (h, make_fixture_input_buffer (
+                h264_p_slice, sizeof (h264_p_slice), input_pts (cycle))), ==,
+        GST_FLOW_OK);
+    g_assert_true (wait_for_pending_count (h, 1, ACCOUNTING_TIMEOUT_US));
+
+    frees_before = mpp_mock_dec_glist_free_calls ();
+    mpp_mock_dec_track_glist_frees (TRUE);
+    GST_VIDEO_DECODER_STREAM_LOCK (decoder);
+    g_assert_true (klass->flush (decoder));
+    GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
+    mpp_mock_dec_track_glist_frees (FALSE);
+
+    g_assert_cmpuint (mpp_mock_dec_glist_free_calls (), ==, frees_before + 1);
+    g_assert_true (wait_for_pending_count (h, 0, ACCOUNTING_TIMEOUT_US));
+  }
+
+  stop_decoder (h);
+  g_print ("four reset cycles freed one copied GList each\n");
+}
+
+static void
 test_jpeg_input_timeout_is_retried (void)
 {
   GstHarness *h;
@@ -1425,6 +1461,7 @@ main (int argc, char **argv)
   test_put_packet_result_drives_fullness ();
   test_video_drain_classifies_put_packet_errors ();
   test_drain_finishes_retained_tail_frame ();
+  test_reset_frees_copied_frame_list ();
   test_video_drain_failure_survives_concurrent_output_completion ();
   test_jpeg_input_timeout_is_retried ();
   test_jpeg_input_poll_and_dequeue_results_are_preserved ();

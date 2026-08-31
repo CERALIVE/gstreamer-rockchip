@@ -264,6 +264,7 @@ gst_mpp_dec_reset (GstVideoDecoder * decoder, gboolean drain, gboolean final)
   GstFlowReturn result;
   GstFlowReturn ready_result;
   GList *frames;
+  GList *frame_list;
 
   if (!drain) {
     g_atomic_int_inc (&self->reset_generation);
@@ -301,10 +302,12 @@ gst_mpp_dec_reset (GstVideoDecoder * decoder, gboolean drain, gboolean final)
 
   /* Clear pending input frames */
   frames = gst_video_decoder_get_frames (decoder);
+  frame_list = frames;
   for (; frames; frames = frames->next) {
     GstVideoCodecFrame *f = frames->data;
     gst_video_decoder_release_frame (decoder, f);
   }
+  g_list_free (frame_list);
 
   GST_MPP_DEC_UNLOCK (decoder);
   return result;

@@ -3,6 +3,8 @@
 #include <rockchip/rk_mpi.h>
 #include <rockchip/rk_mpi_cmd.h>
 #include <rockchip/rk_venc_cfg.h>
+#include <glib.h>
+#include <dlfcn.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <fcntl.h>
@@ -180,6 +182,8 @@ static atomic_int dec_output_buffers_enabled;
 static atomic_int dec_output_paused;
 static atomic_uint dec_accounted_outputs;
 static atomic_uint dec_live_output_buffers;
+static atomic_int dec_track_glist_frees;
+static atomic_uint dec_glist_free_calls;
 #define DEC_OUTPUT_PLAN_CAPACITY 32
 static atomic_int dec_output_plan_armed[DEC_OUTPUT_PLAN_CAPACITY];
 static RK_S64 dec_output_plan_pts[DEC_OUTPUT_PLAN_CAPACITY];
@@ -208,6 +212,22 @@ static atomic_int dec_frame_format;
  * load-bearing: gstmppdec.c remaps a zero PTS to GST_CLOCK_TIME_NONE, which
  * matches the oldest frame instead of missing. */
 static atomic_llong dec_stale_pts = 1;
+
+void
+g_list_free (GList * list)
+{
+  static void (*real_g_list_free) (GList *);
+
+  if (!real_g_list_free) {
+    *(void **) &real_g_list_free = dlsym (RTLD_NEXT, "g_list_free");
+    if (!real_g_list_free)
+      abort ();
+  }
+
+  if (atomic_load (&dec_track_glist_frees))
+    atomic_fetch_add (&dec_glist_free_calls, 1);
+  real_g_list_free (list);
+}
 static MockCfg *cfg_of(MppEncCfg c) { return (MockCfg *)c; }
 static void pause_if_armed(atomic_int *armed, atomic_int *entered,
                            atomic_int *release) {
@@ -1347,6 +1367,8 @@ void mpp_mock_dec_arm(unsigned width, unsigned height) {
   atomic_store(&dec_output_buffers_enabled, 0);
   atomic_store(&dec_output_paused, 0);
   atomic_store(&dec_accounted_outputs, 0);
+  atomic_store(&dec_track_glist_frees, 0);
+  atomic_store(&dec_glist_free_calls, 0);
   atomic_store(&dec_stale_pts, 1);
   for (unsigned i = 0; i < DEC_OUTPUT_PLAN_CAPACITY; i++) {
     atomic_store(&dec_output_plan_armed[i], 0);
@@ -1377,6 +1399,12 @@ unsigned mpp_mock_dec_accounted_outputs(void) {
 }
 unsigned mpp_mock_dec_live_output_buffers(void) {
   return atomic_load(&dec_live_output_buffers);
+}
+void mpp_mock_dec_track_glist_frees(int enabled) {
+  atomic_store(&dec_track_glist_frees, !!enabled);
+}
+unsigned mpp_mock_dec_glist_free_calls(void) {
+  return atomic_load(&dec_glist_free_calls);
 }
 void mpp_mock_dec_set_output_suppressed(int suppressed) {
   atomic_store(&dec_output_suppressed, !!suppressed);

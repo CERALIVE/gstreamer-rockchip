@@ -2146,3 +2146,21 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    ready-frame/drain area as the confirmed orphan-frame accounting work; hosted CI and an
    orchestrator-dispatched independent review are still required, and this branch is not
    self-merged.
+
+### Free copied decoder frame lists on reset
+
+1. **Provenance SHA** — first-party correction against task baseline
+   `133cd9f5a67e726699d4ad51b785997b2c78771a`.
+2. **Red/green outputs** — LeakSanitizer cannot complete under the established arm64 QEMU
+   environment, so the mock interposes `g_list_free()` only while each reset executes. Four
+   cycles each retain one pending codec frame, invoke the real non-draining decoder flush,
+   and require one transfer-full list release. RED at the parent records zero releases per
+   cycle because the `GList` head is advanced to NULL and never freed. GREEN prints
+   `four reset cycles freed one copied GList each`. Mutation check: removing
+   `g_list_free(frame_list)` restores the zero-release assertion failure.
+3. **Hardware gate** — `hardware-independent`. The deterministic count covers the
+   `gst_video_decoder_get_frames()` ownership contract and real decoder reset path without
+   relying on an unavailable stop-the-world leak check.
+4. **MPP ABI closure** — unchanged: this is GLib list ownership only and adds no MPP API.
+5. **Reviewer verdict** — `needs-human-review`. Hosted CI and orchestrator-dispatched
+   independent review remain required; this branch is not self-merged.
