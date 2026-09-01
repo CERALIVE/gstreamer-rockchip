@@ -69,7 +69,9 @@ matches() {
 	local label=$1
 	[[ -s "$REPORT_DIR/results/$label.sha256" ]] &&
 		cmp -s "$REPORT_DIR/results/reference.sha256" "$REPORT_DIR/results/$label.sha256" &&
-		! grep -qE 'ERROR|CRITICAL|not-negotiated|RGA_BLIT fail|rga_api version' "$REPORT_DIR/results/$label.log"
+		! grep -qE 'ERROR|CRITICAL|not-negotiated' "$REPORT_DIR/results/$label.log" &&
+		! grep -qiE 'RGA_BLIT fail|rga_api version|mpp.*(fail|error)|failed.*mpp' \
+			"$REPORT_DIR/results/$label.log"
 }
 
 current_ok=0 alternative_ok=0

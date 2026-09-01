@@ -57,8 +57,9 @@ journal_count() {
 }
 
 new_report_dir() {
-	local drill=$1 root=${BOARD_REPORT_DIR:-./test-results/board}
-	REPORT_DIR="$root/$drill-$(date -u +%Y%m%dT%H%M%SZ)"
+	local drill=$1 repo_root
+	repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+	REPORT_DIR="$repo_root/test-results/board/$drill-$(date -u +%Y%m%dT%H%M%SZ)"
 	mkdir -p "$REPORT_DIR"
 	readonly REPORT_DIR
 	printf 'report_dir=%s\n' "$REPORT_DIR"
