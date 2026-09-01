@@ -60,16 +60,42 @@ suite="$(sed -n 's/^VERSION_CODENAME=//p' /etc/os-release)"
 printf 'dpkg architecture: %s\n' "$(dpkg --print-architecture)"
 printf 'package under test: %s\n' "${deb}"
 
-# `grep -c` exits 1 for a legitimate count of zero and >1 for a real error, so a
-# bare `|| true` would report a BROKEN package query as a clean container --
-# turning the assertion below into a rubber stamp. Discriminate the two.
+# This assertion is only worth anything if it can distinguish "nothing is
+# installed" from "nothing could be READ". Three outcomes, three answers:
+#
+#   dpkg-query non-zero   -- the query itself broke. NOT a count of zero. A bare
+#                            `|| true` here yields an empty list, grep then counts
+#                            0, and an unqueryable container reports a clean
+#                            baseline: fail-open, in the one check whose whole
+#                            job is to prove the container is bare.
+#   dpkg-query empty      -- exit 0 with no packages at all is not a real Debian
+#                            container either; treat it as an unusable answer
+#                            rather than as evidence of cleanliness.
+#   grep -c exit 1        -- a legitimate count of zero. Expected, and fine.
+#   grep -c exit >1       -- a real scan error.
 assert_no_gstreamer() {
-	local when="$1" list count rc
-	list="$(dpkg-query -W -f='${binary:Package}\n' 2>/dev/null || true)"
+	local when="$1" list count rc query_rc errors
+	errors="$(mktemp)"
+
+	list="$(dpkg-query -W -f='${binary:Package}\n' 2>"${errors}")" || query_rc=$?
+	query_rc="${query_rc:-0}"
+	if [ "${query_rc}" -ne 0 ]; then
+		printf 'dpkg-query exited %s; stderr follows:\n' "${query_rc}" >&2
+		cat "${errors}" >&2
+		rm -f "${errors}"
+		fail "could not enumerate installed packages ${when} -- an unreadable package database is not a clean container"
+	fi
+	rm -f "${errors}"
+
+	[ -n "${list}" ] \
+		|| fail "dpkg-query returned an EMPTY package list ${when} -- that is an unusable answer, not a clean container"
+
 	count="$(printf '%s\n' "${list}" | grep -c gstreamer)" || rc=$?
 	rc="${rc:-0}"
-	[ "${rc}" -le 1 ] || fail "could not enumerate installed packages ${when} (grep exit ${rc})"
-	printf 'gstreamer packages installed %s: %s\n' "${when}" "${count}"
+	[ "${rc}" -le 1 ] || fail "could not scan the package list ${when} (grep exit ${rc})"
+
+	printf 'gstreamer packages installed %s: %s (of %s total)\n' \
+		"${when}" "${count}" "$(printf '%s\n' "${list}" | wc -l)"
 	[ "${count}" = "0" ] \
 		|| fail "${count} gstreamer package(s) present ${when}; the closure check below would be vacuous"
 }
