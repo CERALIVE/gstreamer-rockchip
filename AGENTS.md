@@ -61,11 +61,12 @@ attached. If a source comparison is required, add a descriptively named,
 temporary remote, fetch an explicit ref, verify the expected SHA, and remove the
 remote before pushing or opening a PR.
 
-Open the PR explicitly against the CERALIVE repository and integration branch:
+Open the PR explicitly against the CERALIVE repository's canonical `main`
+branch:
 
 ```bash
 gh pr create --repo CERALIVE/gstreamer-rockchip \
-  --base integration/verified-fix-ledger
+  --base main
 ```
 
 Before handoff, verify the PR URL starts with
@@ -139,6 +140,11 @@ The board suite is deliberately outside Meson:
 | `d2-radxa-fork-ab.sh` | Radxa/fork 60 s encode A/B, 300/300 AUs, SPS geometry/profile/level, no RGA entry. |
 | `d3-main10-stride-ab.sh` | Report-only Main10 current-vs-`*8/pixel_stride0` frame-checksum experiment. |
 | `d4-allocation-soak.sh` | 136 s DMA allocation soak with live bitrate, resolution, and temporal-SVC changes. |
+
+The latest executed verdicts and their hardware scope are recorded in
+[`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md). That tracked
+summary preserves failed and inconclusive outcomes; it is not a substitute for
+the retained raw transcripts.
 
 Every script requires `CERALIVE_BOARD_TEST=1` and otherwise exits 77. Board
 identity is supplied only through `BOARD_IP`, `BOARD_SSH_USER`, and
