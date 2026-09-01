@@ -139,8 +139,15 @@ printf '%s\n' "${inspect_out}"
 # ("Filename    /usr/lib/..."), so field-extract and compare literally rather
 # than pattern-matching a punctuation shape that does not exist.
 loaded_from="$(awk '$1 == "Filename" { print $2; exit }' <<<"${inspect_out}")"
-[ "${loaded_from}" = "${PLUGIN_SO}" ] \
-	|| fail "gst-inspect loaded rockchipmpp from '${loaded_from}', not ${PLUGIN_SO}"
+# Compare CANONICAL paths. Under merged-/usr the two suites disagree on the
+# spelling and not on the file: bookworm reports the plugin under /lib/<triplet>
+# and trixie under /usr/lib/<triplet>, and both are the same inode. A literal
+# string compare fails the target suite for a symlink.
+loaded_real="$(readlink -f "${loaded_from}")"
+expect_real="$(readlink -f "${PLUGIN_SO}")"
+printf 'gst-inspect loaded: %s -> %s\n' "${loaded_from}" "${loaded_real}"
+[ "${loaded_real}" = "${expect_real}" ] \
+	|| fail "gst-inspect loaded rockchipmpp from '${loaded_from}' (${loaded_real}), not ${PLUGIN_SO} (${expect_real})"
 
 # Close the loop: the plugin GStreamer just loaded is the one THIS package owns.
 owner="$(dpkg -S "${PLUGIN_SO}" | cut -d: -f1)"
