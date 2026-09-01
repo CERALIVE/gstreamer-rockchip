@@ -258,6 +258,36 @@ check_source_contract() {
   echo "PASS source-derived contract ($label)"
 }
 
+compare_expected_lines() {
+  local element=$1 actual=$2 expected=$3
+  local line key current actual_line key_count
+
+  while IFS= read -r line; do
+    if [[ "$line" == sink_caps=* || "$line" == src_caps=* ]]; then
+      key=${line%%=*}
+      current=
+      key_count=0
+      while IFS= read -r actual_line; do
+        if [[ "$actual_line" == "$key="* ]]; then
+          current=$actual_line
+          ((key_count += 1))
+        fi
+      done < "$actual"
+      if (( key_count != 1 )) || [[ "$current" != "$line" ]]; then
+        echo "parity: $element removed, duplicated, or changed baseline caps:" >&2
+        echo "  $line" >&2
+        return 1
+      fi
+      continue
+    fi
+    if ! grep -Fqx "$line" "$actual"; then
+      echo "parity: $element removed or changed baseline line:" >&2
+      echo "  $line" >&2
+      return 1
+    fi
+  done < "$expected"
+}
+
 compare_element() {
   local element=$1 raw actual expected golden line rank
   raw=$(mktemp)
@@ -285,20 +315,37 @@ compare_element() {
     return 1
   fi
   check_decoder_capabilities "$element" "$actual"
-
-  while IFS= read -r line; do
-    if ! grep -Fqx "$line" "$actual"; then
-      echo "parity: $element removed or changed baseline line:" >&2
-      echo "  $line" >&2
-      return 1
-    fi
-  done < "$expected"
+  compare_expected_lines "$element" "$actual" "$expected"
   echo "PASS $element (additive properties allowed)"
 }
 
 if [[ "${1:-}" == "--normalize" ]]; then
   [[ $# -eq 2 ]] || { echo "usage: $0 --normalize ELEMENT" >&2; exit 2; }
   normalize "$2"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--compare-normalized" ]]; then
+  [[ $# -eq 4 ]] || {
+    echo "usage: $0 --compare-normalized ELEMENT ACTUAL EXPECTED" >&2
+    exit 2
+  }
+  compare_expected_lines "$2" "$3" "$4"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--check-capabilities" ]]; then
+  [[ $# -eq 5 ]] || {
+    echo "usage: $0 --check-capabilities ELEMENT ACTUAL GOLDEN CONFIG_H" >&2
+    exit 2
+  }
+  PARITY_CONFIG_H=$5
+  [[ -r "$PARITY_CONFIG_H" ]] || {
+    echo "parity: config is not readable: $PARITY_CONFIG_H" >&2
+    exit 1
+  }
+  check_golden_capabilities "$2" "$4"
+  check_decoder_capabilities "$2" "$3"
   exit 0
 fi
 
