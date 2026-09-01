@@ -14,25 +14,45 @@ Every fix row appended by later todos must contain exactly these five fields:
 used, it has been replaced with `needs-human-review` — the vocabulary term that
 actually describes "reviewer == author" — and the gap called out in the row.
 
-### Reviewer traceability, and the limits of it
+### Reviewer traceability
 
 The governing plan asks that each independently reviewed row record the reviewer's
-session id. That was not done while the work ran, and it is **not retroactively
-recoverable** for these rows: the review dispatches happened in orchestrator
-sessions whose ids were not written into the notepads at the time. Rather than
-invent identifiers, each reviewed row below names the concrete artifacts that *are*
-verifiable — the PR whose thread carries the review, and the `docs:` commit in which
-that review's outcome was recorded. Those two together are the review-trail record.
+session id. That was not done while the work ran. An earlier revision of this section
+went on to assert the ids were "not retroactively recoverable" and that the PR thread
+was "the place the review itself sits" — **both statements were false, and independent
+review of this ledger disproved them.** They are corrected here rather than quietly
+dropped, because a ledger that invents a reason it cannot produce evidence is the exact
+failure this file exists to prevent.
 
-**What those two artifacts do and do not prove.** A cited `docs:` commit is the ledger's
-*record of a reported review outcome*. It is written by the same account that authored the
-fix, so on its own it proves that a review result was recorded — not, circularly, that the
-review happened. It is cited as the timestamped record, and the PR thread it names is the
-place the review itself sits. Read the pair together; neither half is independent proof
-alone. Rows that need a stronger claim than that must say what was independently verified
-and how, rather than leaning on the citation.
+The ids *are* recoverable from stored session history, and the reviews are agent
+sessions rather than GitHub artifacts. The rows below now carry the real ids:
 
-Exactly one session id survives anywhere in this effort's notepads,
+| Row(s) | PR | Reviewer session | Agent |
+|---|---|---|---|
+| `1ceaf42`, `d27ae92`, `3ccc1e3` | #3 | `ses_fad874b29ffeCLDo8MEP0GJ0hq` | oracle |
+| `7ffd7f4`, `5f45bd4` | #4 | `ses_fad5ca97dffeOG6lezkGOPGT2L` | oracle |
+| Decoder no-output accounting (`7d12668d`) | #16 r1 | `ses_fa791efc4ffepNERweuFQxMc0A` | oracle |
+| Parameter-set recognition (`35360289`) | #16 r2 | `ses_fa737dd5dffe45aPH2qsaA3YWd` | oracle |
+| Eight-frame ordered identity (`5668febf`) | #16 r3 | `ses_fa6f7a787ffe2bRf4WwbDXf6pf` | oracle |
+
+Each transcript opens with an explicit "You are an INDEPENDENT REVIEWER … reviewer must
+differ from author … read-only" brief and closes with the verdict the corresponding row
+records, which is what makes it evidence of the review rather than of its retelling.
+
+**Do not cite the PR thread as the review record.** PRs #3, #4 and #16 each carry
+`comments=[]` and `reviews=[]`; there is nothing there. The review lives in the session
+transcript, and the `docs:` commit named alongside it is only the ledger's *record of a
+reported outcome* — written by the same account that authored the fix, so on its own it
+proves a result was recorded, not, circularly, that a review happened. The session id is
+the primary evidence; the commit is its timestamp.
+
+**Where an id is absent, the row says which of two things is true**, and never blurs
+them: either no independent review was dispatched at all (the `31ee8bd` and packet-arena
+rows — a genuine gap), or a review is believed to have run but no session id was located
+by the session-history lookup that recovered the five above (the crop-meta row). Neither
+is described as unrecoverable-in-principle.
+
+Exactly one further session id survives in this effort's notepads,
 `ses_fac74f97affeefZQ5y2zbRJ4vZ`, and it is recorded here only so it is not later
 mistaken for a valid one. It belongs to a **self-directed** explore-agent review of
 the frozen JeffyCN-extras audit, which the effort subsequently ruled does **not**
@@ -251,9 +271,10 @@ the same feature flags CI and `debian/rules` use
    Author-side pre-review, superseded by the above and retained as context: diff is
    5 insertions / 8 deletions confined to `gst_mpp_dec_update_video_info`, touching
    no frozen property and no encoder file.
-   *Reviewer session ID not recoverable — the PR review trail at
-   <https://github.com/CERALIVE/gstreamer-rockchip/pull/3> plus commit
-   `e991775b0a80a4b36722d202a95c99b0d19e0446` are the review-trail record.*
+   *Reviewer session `ses_fad874b29ffeCLDo8MEP0GJ0hq` (oracle, PR #3,
+   2026-08-30T11:40:37Z–11:51:14Z) — the review itself. Commit
+   `e991775b0a80a4b36722d202a95c99b0d19e0446` is the ledger's record of its outcome.
+   PR #3's GitHub thread carries no comments or reviews and is not the review record.*
 
 ### d27ae92 — unmatched-PTS pending-frame bound
 
@@ -303,9 +324,10 @@ the same feature flags CI and `debian/rules` use
    after releasing, and the rewritten no-match branch refs the frame it stores into
    `self->last_frame`, so the ref accounting stays balanced against the caller's
    drop path.
-   *Reviewer session ID not recoverable — the PR review trail at
-   <https://github.com/CERALIVE/gstreamer-rockchip/pull/3> plus commit
-   `e991775b0a80a4b36722d202a95c99b0d19e0446` are the review-trail record.*
+   *Reviewer session `ses_fad874b29ffeCLDo8MEP0GJ0hq` (oracle, PR #3,
+   2026-08-30T11:40:37Z–11:51:14Z) — the review itself. Commit
+   `e991775b0a80a4b36722d202a95c99b0d19e0446` is the ledger's record of its outcome.
+   PR #3's GitHub thread carries no comments or reviews and is not the review record.*
 
 ### 3ccc1e3 — NOT PORTED (rejected with evidence)
 
@@ -354,9 +376,10 @@ the same feature flags CI and `debian/rules` use
    `git range-diff` against the fetched upstream source. The review record landed
    in `e991775b0a80a4b36722d202a95c99b0d19e0446` ("docs: record independent review
    confirmation on cherry-pick evidence rows").
-   *Reviewer session ID not recoverable — the PR review trail at
-   <https://github.com/CERALIVE/gstreamer-rockchip/pull/3> plus commit
-   `e991775b0a80a4b36722d202a95c99b0d19e0446` are the review-trail record.*
+   *Reviewer session `ses_fad874b29ffeCLDo8MEP0GJ0hq` (oracle, PR #3,
+   2026-08-30T11:40:37Z–11:51:14Z) — the review itself. Commit
+   `e991775b0a80a4b36722d202a95c99b0d19e0446` is the ledger's record of its outcome.
+   PR #3's GitHub thread carries no comments or reviews and is not the review record.*
 
 ### 31ee8bd — SKIP-ALREADY-PRESENT (verify-delta adjudication)
 
@@ -402,7 +425,11 @@ the same feature flags CI and `debian/rules` use
    Nothing shipped on this row's authority: no code landed, the stride area stays
    frozen behind board drill `d3-hevc10bit-stride`, and the MPP ABI closure is
    unchanged. The gap is therefore recorded, not blocking.
-   *Reviewer session ID not applicable — no independent review was dispatched.*
+   *No reviewer session exists — no independent review was dispatched. This
+   adjudication was authored in worker session `ses_fad78aa9effeZflEe7WXK6prAr`
+   (Sisyphus-Junior, 2026-08-30T11:56:36Z–12:00:37Z), and that is an AUTHORING
+   session, not a review one; it is named so the gap is attributable rather than
+   merely asserted. Session-history lookup found no oracle session covering this row.*
 
 ### 7ffd7f4 — put_packet-result fullness detection (already present; regression locked)
 
@@ -462,9 +489,10 @@ the same feature flags CI and `debian/rules` use
    test has both controls (three buffer-full responses followed by success, and a
    persistent non-full error), and the source diff contains no frame-cap, encoder,
    property, or production-code change.
-   *Reviewer session ID not recoverable — the PR review trail at
-   <https://github.com/CERALIVE/gstreamer-rockchip/pull/4> plus commit
-   `de535020b116f78919c1c5060d95fca622b4ad75` are the review-trail record.*
+   *Reviewer session `ses_fad5ca97dffeOG6lezkGOPGT2L` (oracle, PR #4,
+   2026-08-30T12:27:11Z–12:35:10Z) — the review itself. Commit
+   `de535020b116f78919c1c5060d95fca622b4ad75` is the ledger's record of its outcome.
+   PR #4's GitHub thread carries no comments or reviews and is not the review record.*
 
 ### 5f45bd4 — decoder input-packet ownership snapshot and reset cleanup
 
@@ -533,9 +561,10 @@ the same feature flags CI and `debian/rules` use
    callback implementations were checked — video copy packets have exactly one base
    deinit, buffered JPEG packets are transferred, and every error path retains the
    existing base-level `mpp_packet_deinit()` cleanup.
-   *Reviewer session ID not recoverable — the PR review trail at
-   <https://github.com/CERALIVE/gstreamer-rockchip/pull/4> plus commit
-   `de535020b116f78919c1c5060d95fca622b4ad75` are the review-trail record.*
+   *Reviewer session `ses_fad5ca97dffeOG6lezkGOPGT2L` (oracle, PR #4,
+   2026-08-30T12:27:11Z–12:35:10Z) — the review itself. Commit
+   `de535020b116f78919c1c5060d95fca622b4ad75` is the ledger's record of its outcome.
+   PR #4's GitHub thread carries no comments or reviews and is not the review record.*
 
 ### 892f662 — selective DMA_DRM caps negotiation
 
@@ -957,21 +986,32 @@ produce a false green. Detailed native output is retained by Meson in
 
 ### F27 — crop meta removal pointer type
 
-1. **Provenance SHA** — `13c95235b1ad35b25b2d20167c1b69620f54d058`, first-party,
-   author `Andres Cera <Andres.cera@hotmail.com>`; the sole commit of PR #8
-   (<https://github.com/CERALIVE/gstreamer-rockchip/pull/8>, merged
-   2026-08-30T20:03:47Z), squash-merged onto `main` as
-   `b1c6844eddfe2c416ab7bb0904c7878b2e8427db`.
+1. **Provenance SHA** — `b1c6844eddfe2c416ab7bb0904c7878b2e8427db`, first-party,
+   author `Andres Cera <Andres.cera@hotmail.com>`. This is the **landed** commit: it
+   is the squash-merge PR #8 produced (<https://github.com/CERALIVE/gstreamer-rockchip/pull/8>,
+   merged 2026-08-30T20:03:47Z) and it is on `origin/main`
+   (`git merge-base --is-ancestor b1c6844… origin/main` succeeds).
 
-   **Provenance correction.** This field previously read `fe23e6e (full SHA recorded
-   in repository history)`, which was wrong twice over: it was a 7-character short
-   SHA where the F27 schema requires the full 40, and it named an object that is
-   *not* the landed fix. `fe23e6e` resolves to `fe23e6ef385279c39864491fa02f7851a6ab0ebb`,
-   a pre-amend copy of the same change that is reachable from no branch and no PR
-   (`git branch -a --contains fe23e6e` is empty; `git merge-base --is-ancestor
-   fe23e6e origin/main` fails). The commit PR #8 actually carried and merged is
-   `13c95235…`, which is also the SHA recorded in the task evidence file
-   `task-trixie-crop-meta-fix.txt`.
+   Secondary reference — **PR-head/source commit**, not the provenance value:
+   `13c95235b1ad35b25b2d20167c1b69620f54d058`, the sole commit of PR #8's branch and
+   the SHA recorded in the task evidence file `task-trixie-crop-meta-fix.txt`. It is
+   **not** on `origin/main` (squash-merge discarded it), though its tree is identical
+   to the landed commit's — both are `53b2ad0cd8c14a1f567102d81e0f4d489fb1981c`, and
+   `git diff 13c95235… b1c6844…` is empty. It is kept because the evidence file names
+   it, not because it is citable as provenance.
+
+   **Provenance correction history — two rounds, because the first was also wrong.**
+   Originally this field read `fe23e6e (full SHA recorded in repository history)`,
+   wrong twice over: a 7-character short SHA where the schema requires 40, naming an
+   object that is not the landed fix at all. `fe23e6e` resolves to
+   `fe23e6ef385279c39864491fa02f7851a6ab0ebb`, a pre-amend copy reachable from no
+   branch and no PR (`git branch -a --contains fe23e6e` is empty). The first
+   correction replaced it with `13c95235…` — full-length and genuinely PR #8's
+   commit, but **still not on `origin/main`**, so it repeated the original defect in
+   milder form: a provenance field pointing at an object the shipped history does not
+   contain. Independent review caught that, and the field now names the landed
+   commit. The rule this row exists to illustrate: a provenance SHA must be an
+   ancestor of `origin/main`, and "full-length" is not the same as "landed".
 2. **Red/green outputs** — the parent fails in the trixie/GCC-14 compile at
    `gst_buffer_remove_meta (buffer, crop)` with `-Wincompatible-pointer-types`; the fix
    compiles both bookworm/GCC-12 and trixie/GCC-14 suites cleanly. PR #8 passed both
@@ -983,10 +1023,12 @@ produce a false green. Detailed native output is retained by Meson in
 5. **Reviewer verdict** — `confirmed`. The proof is the compiler itself: the parent
    fails the blocking trixie/GCC-14 leg and the fix passes both blocking legs, so
    the verdict rests on a reproducible CI gate rather than on a reviewer's judgement.
-   *Reviewer session ID not recoverable — the PR review trail at
-   <https://github.com/CERALIVE/gstreamer-rockchip/pull/8> is the review-trail
-   record. No separate independent-agent review of this row is claimed; it is a
-   one-line pointer-type correction whose acceptance criterion is the matrix gate.*
+   *No reviewer session id was located for this row. No separate independent-agent
+   review of it is claimed in the first place — it is a one-line pointer-type
+   correction whose acceptance criterion is the blocking matrix gate, and the gate is
+   reproducible evidence in a way a reviewer's opinion would not be. The
+   session-history lookup that recovered the PR #3, #4 and #16 reviewer ids surfaced
+   none for PR #8; PR #8's GitHub thread carries no comments or reviews either.*
 
 ### FIX-6 — MPP config key correctness and checked setters
 
@@ -1510,9 +1552,11 @@ without it, so it is recorded with the same five fields.
    untouched. No sanitizer-verified leak-freedom is claimed here — LeakSanitizer needs
    `ptrace` and cannot run under this workspace's user-mode QEMU — so the deterministic
    arena counter and its kill-mutant are the evidence, and they are author-produced.
-   *Reviewer session ID not applicable — no independent review of this row was
-   dispatched. Related review context: the PR thread at
-   <https://github.com/CERALIVE/gstreamer-rockchip/pull/10>.*
+   *No reviewer session is recorded for this row — no independent review of it was
+   dispatched, which is why the verdict stays `needs-human-review`. PR #10's oracle
+   rounds are related context only; they reviewed the FIX-8/FIX-11 rows, and
+   session-history lookup located no id for them. PR #10's GitHub thread carries no
+   comments or reviews, so it is not a review record either.*
 
 ### Prerequisite follow-up — the deferred reclaim leaked the last test's arena
 
@@ -2203,8 +2247,11 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    eight-frame ordered guard. The chain terminates `confirmed` across three
    independent oracle rounds on the "Eight-frame ordered decoder identity" row below.
    Both correction rows follow immediately; read them together with this one.
-   *Reviewer session ID not recoverable — the PR review trail at
-   <https://github.com/CERALIVE/gstreamer-rockchip/pull/16> is the review-trail record.*
+   *Reviewer session `ses_fa791efc4ffepNERweuFQxMc0A` (oracle, PR #16 round 1,
+   2026-08-31T15:26:43Z–15:39:34Z) — the review that returned this `needs-fix`. Its
+   brief singled out the invalid-PTS + `size <= 128` header heuristic as "the single
+   most important correctness question for this todo", which is the defect it then
+   found. PR #16's GitHub thread carries no comments or reviews.*
 
 ### Decoder parameter-set recognition — review correction
 
@@ -2253,8 +2300,10 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    `353602891600ddba82080bd372c1615babeff151` was confirmed at round 2 and was never
    asked to change. The gap was closed by `5668febfca238fde8f7835c80116031e65521d0a`
    and confirmed at round 3; the row below carries the terminal `confirmed`.
-   *Reviewer session ID not recoverable — the PR review trail at
-   <https://github.com/CERALIVE/gstreamer-rockchip/pull/16> is the review-trail record.*
+   *Reviewer session `ses_fa737dd5dffe45aPH2qsaA3YWd` (oracle, PR #16 round 2,
+   2026-08-31T17:05:06Z–17:19:57Z) — the review that confirmed the NAL parser and
+   returned this test-only `needs-fix`. PR #16's GitHub thread carries no comments
+   or reviews.*
 
 ### Eight-frame ordered decoder identity — review correction
 
@@ -2294,8 +2343,11 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    a different agent and model from the fix author — while the GitHub merge button is
    pressed by the repository owner's single account (`andrescera`) on every PR in this
    repo. The ledger claims the former and has never claimed the latter.
-   *Reviewer session ID not recoverable — the PR review trail at
-   <https://github.com/CERALIVE/gstreamer-rockchip/pull/16> is the review-trail record.*
+   *Reviewer sessions, all oracle, all PR #16: round 1
+   `ses_fa791efc4ffepNERweuFQxMc0A`, round 2 `ses_fa737dd5dffe45aPH2qsaA3YWd`,
+   round 3 `ses_fa6f7a787ffe2bRf4WwbDXf6pf` (2026-08-31T18:15:14Z–18:24:34Z, which
+   reviewed `5668febf` and issued the terminal confirmation ~4 minutes before the PR
+   merged). PR #16's GitHub thread carries no comments or reviews.*
 
 ### Drain retained decoder tail frame
 
