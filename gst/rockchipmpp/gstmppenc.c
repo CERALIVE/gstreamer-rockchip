@@ -58,6 +58,14 @@ G_DEFINE_ABSTRACT_TYPE (GstMppEnc, gst_mpp_enc, GST_TYPE_VIDEO_ENCODER);
   g_cond_broadcast (GST_MPP_ENC_EVENT_COND (encoder)); \
   g_mutex_unlock (GST_MPP_ENC_EVENT_MUTEX (encoder));
 
+#define GST_MPP_ENC_FLUSHING(encoder) \
+  g_atomic_int_get (&GST_MPP_ENC (encoder)->flushing)
+
+#define GST_MPP_ENC_PENDING(encoder) \
+  g_atomic_int_get (&GST_MPP_ENC (encoder)->pending_frames)
+#define GST_MPP_ENC_SET_PENDING(encoder, value) \
+  g_atomic_int_set (&GST_MPP_ENC (encoder)->pending_frames, value)
+
 #define GST_MPP_ENC_WAIT(encoder, condition) \
   g_mutex_lock (GST_MPP_ENC_EVENT_MUTEX (encoder)); \
   while (!(condition)) \
@@ -165,23 +173,48 @@ gst_mpp_enc_video_info_align (GstVideoInfo * info)
   return gst_mpp_video_info_align (info, 0, vstride);
 }
 
+gboolean
+gst_mpp_enc_cfg_set_s32 (GstMppEnc * self, const gchar * key, gint value)
+{
+  if (mpp_enc_cfg_set_s32 (self->mpp_cfg, key, value)) {
+    GST_ERROR_OBJECT (self, "MPP rejected config key '%s' (= %d)", key, value);
+    self->cfg_error = TRUE;
+    return FALSE;
+  }
+  return TRUE;
+}
+
+gboolean
+gst_mpp_enc_cfg_set_u32 (GstMppEnc * self, const gchar * key, guint value)
+{
+  if (mpp_enc_cfg_set_u32 (self->mpp_cfg, key, value)) {
+    GST_ERROR_OBJECT (self, "MPP rejected config key '%s' (= %u)", key, value);
+    self->cfg_error = TRUE;
+    return FALSE;
+  }
+  return TRUE;
+}
+
 static void
 gst_mpp_enc_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec)
 {
   GstVideoEncoder *encoder = GST_VIDEO_ENCODER (object);
   GstMppEnc *self = GST_MPP_ENC (encoder);
+  gboolean broadcast = FALSE;
+  gboolean invalid = FALSE;
 
+  GST_MPP_ENC_PROP_LOCK (encoder);
   switch (prop_id) {
     case PROP_MAX_PENDING:{
       self->max_pending = g_value_get_uint (value);
-      GST_MPP_ENC_BROADCAST (encoder);
-      return;
+      broadcast = TRUE;
+      goto out;
     }
     case PROP_HEADER_MODE:{
       MppEncHeaderMode header_mode = g_value_get_enum (value);
       if (self->header_mode == header_mode)
-        return;
+        goto out;
 
       self->header_mode = header_mode;
       break;
@@ -189,7 +222,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_SEI_MODE:{
       MppEncSeiMode sei_mode = g_value_get_enum (value);
       if (self->sei_mode == sei_mode)
-        return;
+        goto out;
 
       self->sei_mode = sei_mode;
       break;
@@ -197,7 +230,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_RC_MODE:{
       MppEncRcMode rc_mode = g_value_get_enum (value);
       if (self->rc_mode == rc_mode)
-        return;
+        goto out;
 
       self->rc_mode = rc_mode;
       break;
@@ -205,7 +238,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_GOP:{
       gint gop = g_value_get_int (value);
       if (self->gop == gop)
-        return;
+        goto out;
 
       self->gop = gop;
       break;
@@ -213,7 +246,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_MAX_REENC:{
       guint max_reenc = g_value_get_uint (value);
       if (self->max_reenc == max_reenc)
-        return;
+        goto out;
 
       self->max_reenc = max_reenc;
       break;
@@ -221,7 +254,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_BPS:{
       guint bps = g_value_get_uint (value);
       if (self->bps == bps)
-        return;
+        goto out;
 
       self->bps = bps;
       break;
@@ -229,7 +262,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_BPS_MIN:{
       guint bps_min = g_value_get_uint (value);
       if (self->bps_min == bps_min)
-        return;
+        goto out;
 
       self->bps_min = bps_min;
       break;
@@ -237,7 +270,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_BPS_MAX:{
       guint bps_max = g_value_get_uint (value);
       if (self->bps_max == bps_max)
-        return;
+        goto out;
 
       self->bps_max = bps_max;
       break;
@@ -245,7 +278,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_FPS_OUT:{
       gint fps_out = g_value_get_int (value);
       if (self->fps_out == fps_out)
-        return;
+        goto out;
 
       self->fps_out = fps_out;
       break;
@@ -253,7 +286,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_DROP_MODE:{
       gint drop_mode = g_value_get_int (value);
       if (self->drop_mode == drop_mode)
-        return;
+        goto out;
 
       self->drop_mode = drop_mode;
       break;
@@ -261,7 +294,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_DROP_THRESHOLD:{
       guint drop_threshold = g_value_get_uint (value);
       if (self->drop_threshold == drop_threshold)
-        return;
+        goto out;
 
       self->drop_threshold = drop_threshold;
       break;
@@ -269,7 +302,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_INTRA_REFRESH:{
       guint intra_refresh = g_value_get_uint (value);
       if (self->intra_refresh == intra_refresh)
-        return;
+        goto out;
 
       self->intra_refresh = intra_refresh;
       break;
@@ -277,7 +310,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_SUPER_MODE:{
       gint super_mode = g_value_get_enum (value);
       if (self->super_mode == super_mode)
-        return;
+        goto out;
 
       self->super_mode = super_mode;
       break;
@@ -285,7 +318,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_SUPER_I_THD:{
       guint super_i_thd = g_value_get_uint (value);
       if (self->super_i_thd == super_i_thd)
-        return;
+        goto out;
 
       self->super_i_thd = super_i_thd;
       break;
@@ -293,7 +326,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_SUPER_P_THD:{
       guint super_p_thd = g_value_get_uint (value);
       if (self->super_p_thd == super_p_thd)
-        return;
+        goto out;
 
       self->super_p_thd = super_p_thd;
       break;
@@ -301,7 +334,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_DEBREATH:{
       gboolean debreath = g_value_get_boolean (value);
       if (self->debreath == debreath)
-        return;
+        goto out;
 
       self->debreath = debreath;
       break;
@@ -309,7 +342,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_DEBREATH_STRENGTH:{
       guint debreath_strength = g_value_get_uint (value);
       if (self->debreath_strength == debreath_strength)
-        return;
+        goto out;
 
       self->debreath_strength = debreath_strength;
       break;
@@ -317,7 +350,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_SCENE_MODE:{
       gint scene_mode = g_value_get_enum (value);
       if (self->scene_mode == scene_mode)
-        return;
+        goto out;
 
       self->scene_mode = scene_mode;
       break;
@@ -325,7 +358,7 @@ gst_mpp_enc_set_property (GObject * object,
     case PROP_ANTI_FLICKER:{
       guint anti_flicker = g_value_get_uint (value);
       if (self->anti_flicker == anti_flicker)
-        return;
+        goto out;
 
       self->anti_flicker = anti_flicker;
       break;
@@ -335,7 +368,7 @@ gst_mpp_enc_set_property (GObject * object,
         GST_WARNING_OBJECT (encoder, "unable to change rotation");
       else
         self->rotation = g_value_get_enum (value);
-      return;
+      goto out;
     }
     case PROP_WIDTH:{
       guint width = g_value_get_uint (value);
@@ -345,7 +378,7 @@ gst_mpp_enc_set_property (GObject * object,
         if (self->input_state)
           self->res_dirty = TRUE;
       }
-      return;
+      goto out;
     }
     case PROP_HEIGHT:{
       guint height = g_value_get_uint (value);
@@ -354,18 +387,18 @@ gst_mpp_enc_set_property (GObject * object,
         if (self->input_state)
           self->res_dirty = TRUE;
       }
-      return;
+      goto out;
     }
     case PROP_ZERO_COPY_PKT:{
       self->zero_copy_pkt = g_value_get_boolean (value);
-      return;
+      goto out;
     }
     case PROP_ARM_AFBC:{
       if (self->input_state)
         GST_WARNING_OBJECT (encoder, "unable to change ARM AFBC");
       else
         self->arm_afbc = g_value_get_boolean (value);
-      return;
+      goto out;
     }
     case PROP_NUM_TEMPORAL_LAYERS:{
       guint layers = g_value_get_uint (value);
@@ -377,11 +410,19 @@ gst_mpp_enc_set_property (GObject * object,
       break;
     }
     default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
-      return;
+      invalid = TRUE;
+      goto out;
   }
 
   self->prop_dirty = TRUE;
+
+out:
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+  if (broadcast) {
+    GST_MPP_ENC_BROADCAST (encoder);
+  }
+  if (invalid)
+    G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
 }
 
 static void
@@ -390,7 +431,9 @@ gst_mpp_enc_get_property (GObject * object,
 {
   GstVideoEncoder *encoder = GST_VIDEO_ENCODER (object);
   GstMppEnc *self = GST_MPP_ENC (encoder);
+  gboolean invalid = FALSE;
 
+  GST_MPP_ENC_PROP_LOCK (encoder);
   switch (prop_id) {
     case PROP_MAX_PENDING:
       g_value_set_uint (value, self->max_pending);
@@ -471,14 +514,187 @@ gst_mpp_enc_get_property (GObject * object,
       g_value_set_uint (value, self->num_temporal_layers);
       break;
     default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
-      return;
+      invalid = TRUE;
+      break;
   }
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+
+  if (invalid)
+    G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+}
+
+typedef struct
+{
+  MppEncHeaderMode header_mode;
+  MppEncRcMode rc_mode;
+  MppEncSeiMode sei_mode;
+  gint gop;
+  guint max_reenc;
+  guint bps;
+  guint bps_min;
+  guint bps_max;
+  gint fps_out;
+  gint fps_n;
+  gint fps_d;
+  gint width;
+  gint height;
+  gint drop_mode;
+  guint drop_threshold;
+  guint intra_refresh;
+  gint super_mode;
+  guint super_i_thd;
+  guint super_p_thd;
+  gboolean debreath;
+  guint debreath_strength;
+  gint scene_mode;
+  guint anti_flicker;
+  guint num_temporal_layers;
+  gboolean ref_dirty;
+} GstMppEncPropertiesSnapshot;
+
+/*
+ * MPP classifies a coded frame as "super" with `(RK_U32) bit_real >= bits_thr`
+ * (mpp/codec/rc/rc_model_v2.c:1276 at the pinned 1.5.0-1). A threshold of 0
+ * therefore matches EVERY frame the moment super-frame mode is enabled, and in
+ * MPP_ENC_RC_SUPER_FRM_DROP that branch also rewrites the rate controller's own
+ * drop_mode/drop_gap. 0 is this element's documented "unset" value, so it maps
+ * to a threshold no real frame can reach rather than one every frame reaches.
+ */
+static guint
+gst_mpp_enc_super_threshold (guint threshold)
+{
+  return threshold ? threshold : G_MAXUINT;
+}
+
+/*
+ * The framerate the encoder actually emits, which is what both the automatic
+ * bitrate and the default GOP must be sized against. fps-out decimates output
+ * independently of the input caps, so a 60-in/30-out pipeline that sizes either
+ * one off the input rate gets twice the bitrate and a two-second GOP.
+ */
+static gint
+gst_mpp_enc_effective_fps (gint fps_out, gint fps_n, gint fps_d)
+{
+  gint fps;
+
+  if (fps_out > 0)
+    return fps_out;
+
+  if (fps_n <= 0 || fps_d <= 0)
+    return DEFAULT_FPS;
+
+  fps = fps_n / fps_d;
+  return fps > 0 ? fps : DEFAULT_FPS;
+}
+
+static gint
+gst_mpp_enc_effective_fps_out (const GstMppEncPropertiesSnapshot * properties)
+{
+  return gst_mpp_enc_effective_fps (properties->fps_out, properties->fps_n,
+      properties->fps_d);
+}
+
+/*
+ * The bitrate=0 "auto" target: an eighth of a raw 8-bit luma plane per output
+ * frame, saturated at G_MAXINT because MPP's rc:bps_* fields are RK_S32.
+ *
+ * The frame term is bounded BEFORE it is scaled by the framerate rather than
+ * after. width and height are each only bounded by G_MAXINT, so the product can
+ * reach 2^59 after the shift, and multiplying that by a framerate first would
+ * wrap guint64 itself -- leaving a post-hoc `> G_MAXINT` test looking at a
+ * small wrapped value and silently returning it as if it were in range.
+ */
+static guint
+gst_mpp_enc_auto_bitrate (gint width, gint height, gint fps)
+{
+  guint64 frame_bits;
+  guint64 limit = G_MAXINT;
+
+  if (width <= 0 || height <= 0 || fps <= 0)
+    return 0;
+
+  frame_bits = width;
+  frame_bits = frame_bits * height / 8;
+
+  if (frame_bits > limit / (guint64) fps)
+    return (guint) G_MAXINT;
+
+  return (guint) (frame_bits * fps);
+}
+
+/*
+ * Scale a bitrate by a small ratio, saturating at G_MAXINT. Same rule as above:
+ * the operand is bounded against the numerator before the multiply, so no
+ * intermediate can wrap.
+ */
+static gint
+gst_mpp_enc_scale_bitrate (guint bps, guint numerator, guint denominator)
+{
+  guint64 scaled = bps;
+  guint64 limit = G_MAXINT;
+
+  if (scaled > G_MAXUINT64 / (guint64) numerator)
+    return G_MAXINT;
+
+  scaled = scaled * numerator / denominator;
+
+  return scaled > limit ? G_MAXINT : (gint) scaled;
+}
+
+/*
+ * The encode geometry, output framerate and peak bitrate a codec subclass has
+ * to size its declared level against, derived exactly as the config writes
+ * below derive them -- same auto-bitrate sentinel, same fps-out decimation,
+ * same bps_max fallback -- so a level check cannot disagree with the numbers
+ * MPP is actually handed.
+ *
+ * The framerate is reported as the exact rational, not as the rounded integer
+ * the automatic bitrate is sized with. Rounding it would hide every violation
+ * that sits between two whole framerates, and MPP is given the rational too.
+ *
+ * A zero bitrate means MPP is given no rate target at all (fixed-QP, or a
+ * geometry too incomplete to derive one), so no level's bitrate limit applies.
+ *
+ * Called from a snapshot callback, i.e. with the property lock already held.
+ */
+void
+gst_mpp_enc_snapshot_rate_info (GstVideoEncoder * encoder,
+    GstMppEncRateInfo * rate)
+{
+  GstMppEnc *self = GST_MPP_ENC (encoder);
+  guint bps;
+
+  gint fps_n = GST_VIDEO_INFO_FPS_N (&self->info);
+  gint fps_d = GST_VIDEO_INFO_FPS_D (&self->info);
+
+  rate->width = GST_VIDEO_INFO_WIDTH (&self->info);
+  rate->height = GST_VIDEO_INFO_HEIGHT (&self->info);
+
+  /* Exactly the rc:fps_out_num / rc:fps_out_denorm pair written below. */
+  if (self->fps_out > 0) {
+    rate->fps_n = self->fps_out;
+    rate->fps_d = 1;
+  } else if (fps_n > 0 && fps_d > 0) {
+    rate->fps_n = fps_n;
+    rate->fps_d = fps_d;
+  } else {
+    rate->fps_n = DEFAULT_FPS;
+    rate->fps_d = 1;
+  }
+
+  bps = self->bps ? self->bps : gst_mpp_enc_auto_bitrate (rate->width,
+      rate->height, gst_mpp_enc_effective_fps (self->fps_out, fps_n, fps_d));
+
+  if (!bps || self->rc_mode == MPP_ENC_RC_MODE_FIXQP)
+    rate->bitrate = 0;
+  else
+    rate->bitrate = self->bps_max ? self->bps_max :
+        (guint) gst_mpp_enc_scale_bitrate (bps, 17, 16);
 }
 
 /*
  * Build and apply the temporal-SVC reference structure for
- * self->num_temporal_layers (2/3/4 -> tsvc2/3/4). Frames in higher temporal
+ * num_temporal_layers (2/3/4 -> tsvc2/3/4). Frames in higher temporal
  * layers are non-reference, so a downstream scheduler can drop the top layer(s)
  * to halve/quarter framerate without breaking decode. The layer tables are a
  * direct port of MPP's own mpi_enc_gen_ref_cfg reference implementation.
@@ -488,7 +704,8 @@ gst_mpp_enc_get_property (GObject * object,
  * behaviour for a hierarchical-P transition.
  */
 static gboolean
-gst_mpp_enc_apply_ref_cfg (GstVideoEncoder * encoder)
+gst_mpp_enc_apply_ref_cfg (GstVideoEncoder * encoder,
+    guint num_temporal_layers)
 {
   GstMppEnc *self = GST_MPP_ENC (encoder);
   MppEncRefLtFrmCfg lt_ref[4];
@@ -496,24 +713,26 @@ gst_mpp_enc_apply_ref_cfg (GstVideoEncoder * encoder)
   RK_S32 lt_cnt = 0;
   RK_S32 st_cnt = 0;
 
-  if (self->num_temporal_layers < 2) {
+  if (num_temporal_layers < 2) {
     /* NULL ref cfg restores MPP's default (flat IPPP) references. */
     if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_REF_CFG, NULL)) {
-      GST_WARNING_OBJECT (self, "failed to reset reference cfg");
+      GST_ERROR_OBJECT (self, "failed to reset reference cfg");
       return FALSE;
     }
     GST_INFO_OBJECT (self, "temporal layers disabled (flat IPPP)");
     return TRUE;
   }
 
-  if (!self->ref_cfg && mpp_enc_ref_cfg_init (&self->ref_cfg))
+  if (!self->ref_cfg && mpp_enc_ref_cfg_init (&self->ref_cfg)) {
+    GST_ERROR_OBJECT (self, "failed to allocate a reference cfg");
     return FALSE;
+  }
   mpp_enc_ref_cfg_reset (self->ref_cfg);
 
   memset (lt_ref, 0, sizeof (lt_ref));
   memset (st_ref, 0, sizeof (st_ref));
 
-  switch (self->num_temporal_layers) {
+  switch (num_temporal_layers) {
     case 4:{
       /* tsvc4: 4 temporal layers, one long-term ref anchoring the base. */
       lt_cnt = 1;
@@ -593,123 +812,214 @@ gst_mpp_enc_apply_ref_cfg (GstVideoEncoder * encoder)
     mpp_enc_ref_cfg_add_st_cfg (self->ref_cfg, st_cnt, st_ref);
 
   if (mpp_enc_ref_cfg_check (self->ref_cfg)) {
-    GST_WARNING_OBJECT (self, "temporal-layer ref cfg check failed");
+    GST_ERROR_OBJECT (self, "temporal-layer ref cfg check failed");
     return FALSE;
   }
 
   if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_REF_CFG, self->ref_cfg)) {
-    GST_WARNING_OBJECT (self, "failed to set temporal-layer ref cfg");
+    GST_ERROR_OBJECT (self, "failed to set temporal-layer ref cfg");
     return FALSE;
   }
 
-  GST_INFO_OBJECT (self, "temporal layers: tsvc%u enabled", self->num_temporal_layers);
+  GST_INFO_OBJECT (self, "temporal layers: tsvc%u enabled",
+      num_temporal_layers);
   return TRUE;
 }
 
 gboolean
-gst_mpp_enc_apply_properties (GstVideoEncoder * encoder)
+gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
+    GstMppEncSnapshotPropertiesFunc snapshot_codec_properties,
+    GstMppEncConfigurePropertiesFunc configure_codec_properties,
+    gpointer codec_snapshot, gboolean * applied)
 {
   GstMppEnc *self = GST_MPP_ENC (encoder);
-  GstVideoInfo *info = &self->info;
-  gint fps = GST_VIDEO_INFO_FPS_N (info) / GST_VIDEO_INFO_FPS_D (info);
+  GstMppEncPropertiesSnapshot properties;
+  gboolean codec_error = FALSE;
+  gint fps_out;
 
-  if (!self->prop_dirty)
-    return TRUE;
+  if (applied)
+    *applied = FALSE;
 
-  self->prop_dirty = FALSE;
-
-  /* Apply a pending temporal-layer reference-structure change before the rest
-   * of the config; the ref cfg governs the GOP structure the RC then sizes to. */
-  if (self->ref_dirty) {
-    self->ref_dirty = FALSE;
-    gst_mpp_enc_apply_ref_cfg (encoder);
+  /* Checked before the prop_dirty early-out on purpose: a pass that latched
+   * cfg_error already cleared prop_dirty, so a later quiescent apply would
+   * otherwise report success for a config MPP never accepted. */
+  if (self->cfg_error) {
+    GST_ERROR_OBJECT (self, "refusing to apply a config MPP partly rejected");
+    return FALSE;
   }
 
-  if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_SEI_CFG, &self->sei_mode))
+  GST_MPP_ENC_PROP_LOCK (encoder);
+  if (!self->prop_dirty) {
+    GST_MPP_ENC_PROP_UNLOCK (encoder);
+    return TRUE;
+  }
+
+  properties.header_mode = self->header_mode;
+  properties.rc_mode = self->rc_mode;
+  properties.sei_mode = self->sei_mode;
+  properties.gop = self->gop;
+  properties.max_reenc = self->max_reenc;
+  properties.bps = self->bps;
+  properties.bps_min = self->bps_min;
+  properties.bps_max = self->bps_max;
+  properties.fps_out = self->fps_out;
+  properties.fps_n = GST_VIDEO_INFO_FPS_N (&self->info);
+  properties.fps_d = GST_VIDEO_INFO_FPS_D (&self->info);
+  properties.width = GST_VIDEO_INFO_WIDTH (&self->info);
+  properties.height = GST_VIDEO_INFO_HEIGHT (&self->info);
+  properties.drop_mode = self->drop_mode;
+  properties.drop_threshold = self->drop_threshold;
+  properties.intra_refresh = self->intra_refresh;
+  properties.super_mode = self->super_mode;
+  properties.super_i_thd = self->super_i_thd;
+  properties.super_p_thd = self->super_p_thd;
+  properties.debreath = self->debreath;
+  properties.debreath_strength = self->debreath_strength;
+  properties.scene_mode = self->scene_mode;
+  properties.anti_flicker = self->anti_flicker;
+  properties.num_temporal_layers = self->num_temporal_layers;
+  properties.ref_dirty = self->ref_dirty;
+  if (snapshot_codec_properties)
+    snapshot_codec_properties (encoder, codec_snapshot);
+  self->prop_dirty = FALSE;
+  self->ref_dirty = FALSE;
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+
+  if (applied)
+    *applied = TRUE;
+
+  /* Resolve the auto sentinel into the snapshot only. self->bps must keep its
+   * 0, or the first geometry the encoder sees becomes the permanent target. */
+  fps_out = gst_mpp_enc_effective_fps_out (&properties);
+  if (!properties.bps)
+    properties.bps = gst_mpp_enc_auto_bitrate (properties.width,
+        properties.height, fps_out);
+
+  /* Latched rather than returned on the spot, for the same reason cfg_error is:
+   * the remaining writes are into this element's own MppEncCfg, and refusing at
+   * the one boundary where that struct is handed to MPP keeps a single, obvious
+   * place where a rejected configuration can never reach the encoder. */
+  if (configure_codec_properties
+      && !configure_codec_properties (encoder, codec_snapshot))
+    codec_error = TRUE;
+
+  /* Apply a pending temporal-layer reference-structure change before the rest
+   * of the config; the ref cfg governs the GOP structure the RC then sizes to.
+   *
+   * A refusal fails the whole apply. Discarding it would leave MPP encoding
+   * with the PREVIOUS reference structure while the element reports the
+   * requested layer count, and the rate controller would then be sized against
+   * a GOP that does not exist. The request stays outstanding -- ref_dirty was
+   * cleared optimistically with the snapshot -- so the next apply retries it
+   * rather than abandoning the transition; prop_dirty has to come back with it,
+   * because the next apply short-circuits on prop_dirty alone. */
+  if (properties.ref_dirty
+      && !gst_mpp_enc_apply_ref_cfg (encoder, properties.num_temporal_layers)) {
+    GST_ERROR_OBJECT (self, "MPP refused the temporal-layer reference cfg for "
+        "%u layers; retrying on the next apply",
+        properties.num_temporal_layers);
+    GST_MPP_ENC_PROP_LOCK (encoder);
+    self->ref_dirty = TRUE;
+    self->prop_dirty = TRUE;
+    GST_MPP_ENC_PROP_UNLOCK (encoder);
+    return FALSE;
+  }
+
+  if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_SEI_CFG,
+          &properties.sei_mode))
     GST_WARNING_OBJECT (self, "failed to set sei mode");
 
   if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_HEADER_MODE,
-          &self->header_mode))
+          &properties.header_mode))
     GST_WARNING_OBJECT (self, "failed to set header mode");
 
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:gop",
-      self->gop < 0 ? fps : self->gop);
-  mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:max_reenc_times", self->max_reenc);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:mode", self->rc_mode);
+  gst_mpp_enc_cfg_set_s32 (self, "rc:gop",
+      properties.gop < 0 ? fps_out : properties.gop);
+  gst_mpp_enc_cfg_set_u32 (self, "rc:max_reenc_times", properties.max_reenc);
+  gst_mpp_enc_cfg_set_s32 (self, "rc:mode", properties.rc_mode);
 
-  if (!self->bps)
-    self->bps =
-        GST_VIDEO_INFO_WIDTH (info) * GST_VIDEO_INFO_HEIGHT (info) / 8 * fps;
-
-  if (!self->bps || self->rc_mode == MPP_ENC_RC_MODE_FIXQP) {
+  if (!properties.bps || properties.rc_mode == MPP_ENC_RC_MODE_FIXQP) {
     /* BPS settings are ignored */
-  } else if (self->rc_mode == MPP_ENC_RC_MODE_CBR) {
+  } else if (properties.rc_mode == MPP_ENC_RC_MODE_CBR) {
     /* CBR mode has narrow bound */
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:bps_target", self->bps);
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:bps_max",
-        self->bps_max ? : self->bps * 17 / 16);
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:bps_min",
-        self->bps_min ? : self->bps * 15 / 16);
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_target", properties.bps);
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_max", properties.bps_max ?
+        (gint) properties.bps_max :
+        gst_mpp_enc_scale_bitrate (properties.bps, 17, 16));
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_min", properties.bps_min ?
+        (gint) properties.bps_min :
+        gst_mpp_enc_scale_bitrate (properties.bps, 15, 16));
   } else {
     /* MPP_ENC_RC_MODE_VBR/MPP_ENC_RC_MODE_AVBR */
     /* VBR mode has wide bound */
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:bps_target", self->bps);
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:bps_max",
-        self->bps_max ? : self->bps * 17 / 16);
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:bps_min",
-        self->bps_min ? : self->bps * 1 / 16);
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_target", properties.bps);
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_max", properties.bps_max ?
+        (gint) properties.bps_max :
+        gst_mpp_enc_scale_bitrate (properties.bps, 17, 16));
+    gst_mpp_enc_cfg_set_s32 (self, "rc:bps_min", properties.bps_min ?
+        (gint) properties.bps_min :
+        gst_mpp_enc_scale_bitrate (properties.bps, 1, 16));
   }
 
   /* Output framerate (for runtime decimation) */
-  if (self->fps_out > 0) {
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_out_num", self->fps_out);
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_out_denorm", 1);
+  if (properties.fps_out > 0) {
+    gst_mpp_enc_cfg_set_s32 (self, "rc:fps_out_num", properties.fps_out);
+    gst_mpp_enc_cfg_set_s32 (self, "rc:fps_out_denorm", 1);
   } else {
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_out_num",
-        GST_VIDEO_INFO_FPS_N (info));
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_out_denorm",
-        GST_VIDEO_INFO_FPS_D (info));
+    gst_mpp_enc_cfg_set_s32 (self, "rc:fps_out_num", properties.fps_n);
+    gst_mpp_enc_cfg_set_s32 (self, "rc:fps_out_denorm", properties.fps_d);
   }
 
   /* Frame drop mode */
-  mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:drop_mode", self->drop_mode);
-  mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:drop_threshold", self->drop_threshold);
+  gst_mpp_enc_cfg_set_u32 (self, "rc:drop_mode", properties.drop_mode);
+  gst_mpp_enc_cfg_set_u32 (self, "rc:drop_thd", properties.drop_threshold);
 
   /* Rolling intra refresh (per-row). Spreads I-blocks across frames so there
    * are no periodic IDR bitrate spikes, and gives continuous loss recovery on
    * a lossy link. Only enabled when a non-zero row count is requested. */
-  if (self->intra_refresh) {
-    mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:refresh_en", 1);
-    mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:refresh_mode",
+  if (properties.intra_refresh) {
+    gst_mpp_enc_cfg_set_u32 (self, "rc:refresh_en", 1);
+    gst_mpp_enc_cfg_set_u32 (self, "rc:refresh_mode",
         MPP_ENC_RC_INTRA_REFRESH_ROW);
-    mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:refresh_num", self->intra_refresh);
+    gst_mpp_enc_cfg_set_u32 (self, "rc:refresh_num", properties.intra_refresh);
   } else {
-    mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:refresh_en", 0);
+    gst_mpp_enc_cfg_set_u32 (self, "rc:refresh_en", 0);
   }
 
   /* Super-frame: bound a single coded frame's size so a scene cut / keyframe
-   * cannot spike the send buffer. */
-  mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:super_mode", self->super_mode);
-  if (self->super_mode != MPP_ENC_RC_SUPER_FRM_NONE) {
-    if (self->super_i_thd)
-      mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:super_i_thd", self->super_i_thd);
-    if (self->super_p_thd)
-      mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:super_p_thd", self->super_p_thd);
-  }
+   * cannot spike the send buffer. Written unconditionally, including when the
+   * mode is off, because MPP keeps the last value it was given and a stale
+   * threshold would otherwise resurrect when the mode is switched back on. */
+  gst_mpp_enc_cfg_set_u32 (self, "rc:super_mode", properties.super_mode);
+  gst_mpp_enc_cfg_set_u32 (self, "rc:super_i_thd",
+      gst_mpp_enc_super_threshold (properties.super_i_thd));
+  gst_mpp_enc_cfg_set_u32 (self, "rc:super_p_thd",
+      gst_mpp_enc_super_threshold (properties.super_p_thd));
 
   /* De-breathing: smooths the GOP bitrate breathing oscillation. */
-  mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:debreath_en", self->debreath ? 1 : 0);
-  if (self->debreath)
-    mpp_enc_cfg_set_u32 (self->mpp_cfg, "rc:debreath_strength",
-        self->debreath_strength);
+  gst_mpp_enc_cfg_set_u32 (self, "rc:debreath_en", properties.debreath ? 1 : 0);
+  gst_mpp_enc_cfg_set_u32 (self, "rc:debreath_strength",
+      properties.debreath_strength);
 
-  /* Content-adaptive tuning. Only emitted when set away from default so older
-   * MPP builds that lack these keys are unaffected. */
-  if (self->scene_mode)
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "tune:scene_mode", self->scene_mode);
-  if (self->anti_flicker)
-    mpp_enc_cfg_set_s32 (self->mpp_cfg, "tune:anti_flicker_str",
-        self->anti_flicker);
+  /* Content-adaptive tuning. Written on every apply, including at 0: these are
+   * the values an operator steps back down to turn the tuning off, and MPP has
+   * no notion of "unset" -- it keeps whatever it was last told. The keys are
+   * part of the pinned MPP's config surface, and gst_mpp_enc_cfg_set_* now
+   * reports a build that disagrees rather than letting the write vanish. */
+  gst_mpp_enc_cfg_set_s32 (self, "tune:scene_mode", properties.scene_mode);
+  gst_mpp_enc_cfg_set_s32 (self, "tune:anti_flicker_str",
+      properties.anti_flicker);
+
+  if (self->cfg_error) {
+    GST_ERROR_OBJECT (self, "refusing to apply a config MPP partly rejected");
+    return FALSE;
+  }
+
+  if (codec_error) {
+    GST_ERROR_OBJECT (self, "refusing to apply a config the codec cannot "
+        "express");
+    return FALSE;
+  }
 
   if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_CFG, self->mpp_cfg)) {
     GST_WARNING_OBJECT (self, "failed to set enc cfg");
@@ -717,6 +1027,12 @@ gst_mpp_enc_apply_properties (GstVideoEncoder * encoder)
   }
 
   return TRUE;
+}
+
+gboolean
+gst_mpp_enc_apply_properties (GstVideoEncoder * encoder)
+{
+  return gst_mpp_enc_apply_properties_full (encoder, NULL, NULL, NULL, NULL);
 }
 
 gboolean
@@ -742,6 +1058,11 @@ gst_mpp_enc_set_src_caps (GstVideoEncoder * encoder, GstCaps * caps)
   return gst_video_encoder_negotiate (encoder);
 }
 
+static gboolean gst_mpp_enc_send_frame_locked (GstVideoEncoder * encoder);
+static gboolean gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder);
+
+#define MPP_ENC_DRAIN_NO_PROGRESS_US (100 * 1000)
+
 static void
 gst_mpp_enc_stop_task (GstVideoEncoder * encoder, gboolean drain)
 {
@@ -755,7 +1076,7 @@ gst_mpp_enc_stop_task (GstVideoEncoder * encoder, gboolean drain)
 
   /* Discard pending frames */
   if (!drain)
-    self->pending_frames = 0;
+    GST_MPP_ENC_SET_PENDING (encoder, 0);
 
   GST_MPP_ENC_BROADCAST (encoder);
 
@@ -772,16 +1093,20 @@ gst_mpp_enc_stop_task (GstVideoEncoder * encoder, gboolean drain)
   GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
 }
 
-static void
+static GstFlowReturn
 gst_mpp_enc_reset (GstVideoEncoder * encoder, gboolean drain, gboolean final)
 {
   GstMppEnc *self = GST_MPP_ENC (encoder);
-
-  GST_MPP_ENC_LOCK (encoder);
+  GstFlowReturn result;
+  gint64 no_progress_deadline;
+  gboolean fully_drained;
 
   GST_DEBUG_OBJECT (self, "resetting");
 
-  self->flushing = TRUE;
+  /* Publish before taking mutex: handle_frame may be waiting for capacity. */
+  g_atomic_int_set (&self->flushing, TRUE);
+  GST_MPP_ENC_BROADCAST (encoder);
+  GST_MPP_ENC_LOCK (encoder);
   self->draining = drain;
 
   /* HACK: The MPP is not capable of handling resets properly. */
@@ -789,12 +1114,37 @@ gst_mpp_enc_reset (GstVideoEncoder * encoder, gboolean drain, gboolean final)
 
   gst_mpp_enc_stop_task (encoder, self->draining);
 
-  self->flushing = final;
+  g_atomic_int_set (&self->flushing, final);
   self->draining = FALSE;
 
-  self->mpi->reset (self->mpp_ctx);
   self->task_ret = GST_FLOW_OK;
-  self->pending_frames = 0;
+  self->mpi->reset (self->mpp_ctx);
+
+  /* MPP leaves encoder output queued across reset. Drain through the normal
+   * output path so stale packets cannot be assigned to the next session. */
+  no_progress_deadline =
+      g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
+  while (g_get_monotonic_time () < no_progress_deadline) {
+    if (gst_mpp_enc_poll_packet_locked (encoder)) {
+      no_progress_deadline =
+          g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
+      continue;
+    }
+    g_usleep (1000);
+  }
+
+  result = self->task_ret;
+  fully_drained =
+      GST_MPP_ENC_PENDING (encoder) == 0 && self->frames == NULL;
+  if (drain && !fully_drained) {
+    GST_ERROR_OBJECT (self,
+        "EOS drain timed out with %d pending and %u unsubmitted frames",
+        GST_MPP_ENC_PENDING (encoder), g_list_length (self->frames));
+    result = GST_FLOW_ERROR;
+  }
+
+  self->task_ret = GST_FLOW_OK;
+  GST_MPP_ENC_SET_PENDING (encoder, 0);
 
   if (self->frames) {
     g_list_free (self->frames);
@@ -802,9 +1152,12 @@ gst_mpp_enc_reset (GstVideoEncoder * encoder, gboolean drain, gboolean final)
   }
 
   /* Force re-apply prop */
+  GST_MPP_ENC_PROP_LOCK (encoder);
   self->prop_dirty = TRUE;
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
 
   GST_MPP_ENC_UNLOCK (encoder);
+  return result;
 }
 
 static gboolean
@@ -844,13 +1197,17 @@ gst_mpp_enc_start (GstVideoEncoder * encoder)
   if (mpp_enc_cfg_init (&self->mpp_cfg))
     goto err_deinit_frame;
 
+  self->cfg_error = FALSE;
+
   if (self->mpi->control (self->mpp_ctx, MPP_ENC_GET_CFG, self->mpp_cfg))
     goto err_deinit_cfg;
 
   self->task_ret = GST_FLOW_OK;
+  GST_MPP_ENC_PROP_LOCK (encoder);
   self->input_state = NULL;
-  self->flushing = FALSE;
-  self->pending_frames = 0;
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+  g_atomic_int_set (&self->flushing, FALSE);
+  GST_MPP_ENC_SET_PENDING (encoder, 0);
   self->frames = NULL;
 
   g_mutex_init (&self->mutex);
@@ -877,6 +1234,7 @@ static gboolean
 gst_mpp_enc_stop (GstVideoEncoder * encoder)
 {
   GstMppEnc *self = GST_MPP_ENC (encoder);
+  GstVideoCodecState *input_state;
 
   GST_DEBUG_OBJECT (self, "stopping");
 
@@ -900,8 +1258,12 @@ gst_mpp_enc_stop (GstVideoEncoder * encoder)
 
   gst_object_unref (self->allocator);
 
-  if (self->input_state)
-    gst_video_codec_state_unref (self->input_state);
+  GST_MPP_ENC_PROP_LOCK (encoder);
+  input_state = self->input_state;
+  self->input_state = NULL;
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+  if (input_state)
+    gst_video_codec_state_unref (input_state);
 
   GST_DEBUG_OBJECT (self, "stopped");
 
@@ -912,16 +1274,14 @@ static gboolean
 gst_mpp_enc_flush (GstVideoEncoder * encoder)
 {
   GST_DEBUG_OBJECT (encoder, "flushing");
-  gst_mpp_enc_reset (encoder, FALSE, FALSE);
-  return TRUE;
+  return gst_mpp_enc_reset (encoder, FALSE, FALSE) == GST_FLOW_OK;
 }
 
-static gboolean
+static GstFlowReturn
 gst_mpp_enc_finish (GstVideoEncoder * encoder)
 {
   GST_DEBUG_OBJECT (encoder, "finishing");
-  gst_mpp_enc_reset (encoder, TRUE, FALSE);
-  return GST_FLOW_OK;
+  return gst_mpp_enc_reset (encoder, TRUE, FALSE);
 }
 
 static gboolean
@@ -933,8 +1293,8 @@ gst_mpp_enc_apply_strides (GstVideoEncoder * encoder, gint hstride,
 
   mpp_frame_set_hor_stride (self->mpp_frame, hstride);
   mpp_frame_set_ver_stride (self->mpp_frame, vstride);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:hor_stride", hstride);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:ver_stride", vstride);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:hor_stride", hstride);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:ver_stride", vstride);
 
   if (hstride == GST_MPP_VIDEO_INFO_HSTRIDE (info) &&
       vstride == GST_MPP_VIDEO_INFO_VSTRIDE (info))
@@ -942,7 +1302,9 @@ gst_mpp_enc_apply_strides (GstVideoEncoder * encoder, gint hstride,
 
   GST_INFO_OBJECT (self, "strides updated to (%dx%d)", hstride, vstride);
 
+  GST_MPP_ENC_PROP_LOCK (encoder);
   self->prop_dirty = TRUE;
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
   return gst_mpp_video_info_align (info, hstride, vstride);
 }
 
@@ -951,22 +1313,38 @@ gst_mpp_enc_set_format (GstVideoEncoder * encoder, GstVideoCodecState * state)
 {
   GstMppEnc *self = GST_MPP_ENC (encoder);
   GstVideoInfo *info = &self->info;
+  GstVideoCodecState *old_state;
   MppFrameFormat format;
-  gint width, height, hstride, vstride;
+  gint width, height, hstride, vstride, rotation, prop_width, prop_height;
+  gboolean arm_afbc;
 
   GST_DEBUG_OBJECT (self, "setting format: %" GST_PTR_FORMAT, state->caps);
 
-  if (self->input_state) {
-    if (gst_caps_is_strictly_equal (self->input_state->caps, state->caps))
-      return TRUE;
+  GST_MPP_ENC_PROP_LOCK (encoder);
+  old_state = self->input_state;
+  if (old_state && gst_caps_is_strictly_equal (old_state->caps, state->caps)) {
+    GST_MPP_ENC_PROP_UNLOCK (encoder);
+    return TRUE;
+  }
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
 
-    gst_mpp_enc_reset (encoder, TRUE, FALSE);
+  if (old_state) {
+    if (gst_mpp_enc_reset (encoder, TRUE, FALSE) != GST_FLOW_OK)
+      return FALSE;
 
-    gst_video_codec_state_unref (self->input_state);
+    GST_MPP_ENC_PROP_LOCK (encoder);
     self->input_state = NULL;
+    GST_MPP_ENC_PROP_UNLOCK (encoder);
+    gst_video_codec_state_unref (old_state);
   }
 
+  GST_MPP_ENC_PROP_LOCK (encoder);
   self->input_state = gst_video_codec_state_ref (state);
+  rotation = self->rotation;
+  prop_width = self->width;
+  prop_height = self->height;
+  arm_afbc = self->arm_afbc;
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
 
   *info = state->info;
 
@@ -977,18 +1355,18 @@ gst_mpp_enc_set_format (GstVideoEncoder * encoder, GstVideoCodecState * state)
   width = GST_VIDEO_INFO_WIDTH (info);
   height = GST_VIDEO_INFO_HEIGHT (info);
 
-  if (self->rotation % 180)
+  if (rotation % 180)
     SWAP (width, height);
 
-  width = self->width ? : width;
-  height = self->height ? : height;
+  width = prop_width ? : width;
+  height = prop_height ? : height;
 
   /*
    * Check for conversion
    * NOTE: Not checking the strides here, since they might not be the actual
    * ones (could be overrided by video-meta)
    */
-  if (self->rotation || format == MPP_FMT_BUTT ||
+  if (rotation || format == MPP_FMT_BUTT ||
       width != GST_VIDEO_INFO_WIDTH (info) ||
       height != GST_VIDEO_INFO_HEIGHT (info)) {
     if (!gst_mpp_use_rga ()) {
@@ -1014,13 +1392,15 @@ gst_mpp_enc_set_format (GstVideoEncoder * encoder, GstVideoCodecState * state)
 
   GST_INFO_OBJECT (self, "applying %s%s %dx%d (%dx%d)",
       gst_mpp_video_format_to_string (GST_VIDEO_INFO_FORMAT (info)),
-      self->arm_afbc ? "(AFBC)" : "", width, height, hstride, vstride);
+      arm_afbc ? "(AFBC)" : "", width, height, hstride, vstride);
 
-  if (self->arm_afbc) {
+  if (arm_afbc) {
     if (self->mpp_type != MPP_VIDEO_CodingAVC &&
         self->mpp_type != MPP_VIDEO_CodingHEVC) {
       GST_WARNING_OBJECT (self, "Only H.264 and H.265 support ARM AFBC");
+      GST_MPP_ENC_PROP_LOCK (encoder);
       self->arm_afbc = FALSE;
+      GST_MPP_ENC_PROP_UNLOCK (encoder);
     } else {
       format |= MPP_FRAME_FBC_AFBC_V2;
     }
@@ -1038,22 +1418,57 @@ gst_mpp_enc_set_format (GstVideoEncoder * encoder, GstVideoCodecState * state)
     GST_VIDEO_INFO_FPS_D (info) = 1;
   }
 
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:format", format);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:width", width);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:height", height);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:format", format);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:width", width);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:height", height);
 
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_in_flex", 0);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_in_num",
-      GST_VIDEO_INFO_FPS_N (info));
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_in_denorm",
+  gst_mpp_enc_cfg_set_s32 (self, "rc:fps_in_flex", 0);
+  gst_mpp_enc_cfg_set_s32 (self, "rc:fps_in_num", GST_VIDEO_INFO_FPS_N (info));
+  gst_mpp_enc_cfg_set_s32 (self, "rc:fps_in_denorm",
       GST_VIDEO_INFO_FPS_D (info));
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_out_flex", 0);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_out_num",
-      GST_VIDEO_INFO_FPS_N (info));
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "rc:fps_out_denorm",
+  gst_mpp_enc_cfg_set_s32 (self, "rc:fps_out_flex", 0);
+  gst_mpp_enc_cfg_set_s32 (self, "rc:fps_out_num", GST_VIDEO_INFO_FPS_N (info));
+  gst_mpp_enc_cfg_set_s32 (self, "rc:fps_out_denorm",
       GST_VIDEO_INFO_FPS_D (info));
 
   return gst_mpp_enc_apply_strides (encoder, hstride, vstride);
+}
+
+static gboolean
+gst_mpp_enc_drain_resolution_boundary (GstVideoEncoder * encoder)
+{
+  GstMppEnc *self = GST_MPP_ENC (encoder);
+  gint64 no_progress_deadline =
+      g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
+
+  while (self->frames || GST_MPP_ENC_PENDING (encoder)) {
+    gboolean progress = FALSE;
+
+    while (gst_mpp_enc_send_frame_locked (encoder))
+      progress = TRUE;
+    while (gst_mpp_enc_poll_packet_locked (encoder))
+      progress = TRUE;
+
+    if (self->task_ret != GST_FLOW_OK)
+      return FALSE;
+
+    if (progress) {
+      no_progress_deadline =
+          g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
+      continue;
+    }
+
+    if (g_get_monotonic_time () >= no_progress_deadline) {
+      GST_ERROR_OBJECT (self,
+          "resolution drain timed out with %d pending and %u unsubmitted frames",
+          GST_MPP_ENC_PENDING (encoder), g_list_length (self->frames));
+      return FALSE;
+    }
+
+    g_usleep (1000);
+  }
+
+  return TRUE;
 }
 
 /*
@@ -1074,16 +1489,42 @@ gst_mpp_enc_apply_pending_resolution (GstVideoEncoder * encoder)
 {
   GstMppEnc *self = GST_MPP_ENC (encoder);
   GstVideoInfo *info = &self->info;
+  GstVideoCodecState *input_state;
   MppFrameFormat format;
-  gint width, height, hstride, vstride;
+  gint width, height, hstride, vstride, rotation, prop_width, prop_height;
+  gboolean arm_afbc;
   GstCaps *caps;
 
-  if (!self->res_dirty || !self->input_state)
+  GST_MPP_ENC_PROP_LOCK (encoder);
+  if (!self->res_dirty || !self->input_state) {
+    GST_MPP_ENC_PROP_UNLOCK (encoder);
     return TRUE;
+  }
 
   self->res_dirty = FALSE;
+  input_state = self->input_state;
+  rotation = self->rotation;
+  prop_width = self->width;
+  prop_height = self->height;
+  arm_afbc = self->arm_afbc;
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
 
-  *info = self->input_state->info;
+  /* Every queued frame was converted against the current geometry, but the
+   * send path copies dimensions from the shared mpp_frame template. Finish all
+   * queued and MPP-owned work before changing that template or output caps. */
+  if (!gst_mpp_enc_drain_resolution_boundary (encoder)) {
+    GST_MPP_ENC_PROP_LOCK (encoder);
+    self->res_dirty = TRUE;
+    GST_MPP_ENC_PROP_UNLOCK (encoder);
+    return FALSE;
+  }
+
+  GST_MPP_ENC_PROP_LOCK (encoder);
+  /* New geometry invalidates the automatic bitrate derived from the old one. */
+  self->prop_dirty = TRUE;
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+
+  *info = input_state->info;
 
   if (!gst_mpp_enc_video_info_align (info))
     return FALSE;
@@ -1092,13 +1533,13 @@ gst_mpp_enc_apply_pending_resolution (GstVideoEncoder * encoder)
   width = GST_VIDEO_INFO_WIDTH (info);
   height = GST_VIDEO_INFO_HEIGHT (info);
 
-  if (self->rotation % 180)
+  if (rotation % 180)
     SWAP (width, height);
 
-  width = self->width ? : width;
-  height = self->height ? : height;
+  width = prop_width ? : width;
+  height = prop_height ? : height;
 
-  if (self->rotation || format == MPP_FMT_BUTT ||
+  if (rotation || format == MPP_FMT_BUTT ||
       width != GST_VIDEO_INFO_WIDTH (info) ||
       height != GST_VIDEO_INFO_HEIGHT (info)) {
     if (!gst_mpp_use_rga ()) {
@@ -1118,7 +1559,7 @@ gst_mpp_enc_apply_pending_resolution (GstVideoEncoder * encoder)
   hstride = GST_MPP_VIDEO_INFO_HSTRIDE (info);
   vstride = GST_MPP_VIDEO_INFO_VSTRIDE (info);
 
-  if (self->arm_afbc && (self->mpp_type == MPP_VIDEO_CodingAVC ||
+  if (arm_afbc && (self->mpp_type == MPP_VIDEO_CodingAVC ||
           self->mpp_type == MPP_VIDEO_CodingHEVC))
     format |= MPP_FRAME_FBC_AFBC_V2;
 
@@ -1129,16 +1570,19 @@ gst_mpp_enc_apply_pending_resolution (GstVideoEncoder * encoder)
   mpp_frame_set_width (self->mpp_frame, width);
   mpp_frame_set_height (self->mpp_frame, height);
 
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:format", format);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:width", width);
-  mpp_enc_cfg_set_s32 (self->mpp_cfg, "prep:height", height);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:format", format);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:width", width);
+  gst_mpp_enc_cfg_set_s32 (self, "prep:height", height);
 
-  /* prep:*_stride + prop_dirty, so apply_properties pushes MPP_ENC_SET_CFG. */
   if (!gst_mpp_enc_apply_strides (encoder, hstride, vstride))
     return FALSE;
-  self->prop_dirty = TRUE;
 
-  if (!gst_mpp_enc_apply_properties (encoder))
+  if (self->cfg_error) {
+    GST_ERROR_OBJECT (self, "refusing to apply a config MPP partly rejected");
+    return FALSE;
+  }
+
+  if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_CFG, self->mpp_cfg))
     return FALSE;
 
   /* Renegotiate the encoded caps so downstream sees the new resolution.
@@ -1219,15 +1663,21 @@ static GstBuffer *
 gst_mpp_enc_convert (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
 {
   GstMppEnc *self = GST_MPP_ENC (encoder);
-  GstVideoInfo src_info = self->input_state->info;
+  GstVideoInfo src_info;
   GstVideoInfo dst_info = self->info;
   GstVideoFrame src_frame, dst_frame;
   GstBuffer *outbuf, *inbuf;
   GstMemory *in_mem, *out_mem = NULL;
   GstVideoMeta *meta;
   gsize size, maxsize, offset;
-  gint src_hstride, src_vstride;
+  gint src_hstride, src_vstride, rotation;
+  gboolean strides_changed;
   guint i;
+
+  GST_MPP_ENC_PROP_LOCK (encoder);
+  src_info = self->input_state->info;
+  rotation = self->rotation;
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
 
   inbuf = frame->input_buffer;
 
@@ -1250,7 +1700,7 @@ gst_mpp_enc_convert (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
   if (!outbuf)
     goto err;
 
-  if (self->rotation)
+  if (rotation)
     goto convert;
 
   if (gst_buffer_n_memory (inbuf) != 1)
@@ -1277,11 +1727,20 @@ gst_mpp_enc_convert (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
     goto convert;
   }
 
+  strides_changed = src_hstride != GST_MPP_VIDEO_INFO_HSTRIDE (&self->info) ||
+      src_vstride != GST_MPP_VIDEO_INFO_VSTRIDE (&self->info);
   gst_mpp_enc_apply_strides (encoder, src_hstride, src_vstride);
-  if (!gst_mpp_enc_apply_properties (encoder))
+  if (strides_changed && self->mpi->control (self->mpp_ctx, MPP_ENC_SET_CFG,
+          self->mpp_cfg))
     goto err;
 
+  /*
+   * Invariant: out_mem names a reference this function still owns. Appending
+   * transfers it to outbuf, so clearing it is what lets convert: and err:
+   * release it without knowing which path reached them.
+   */
   gst_buffer_append_memory (outbuf, out_mem);
+  out_mem = NULL;
 
   /* Keep a ref of the original memory */
   gst_buffer_append_memory (outbuf, gst_memory_ref (in_mem));
@@ -1299,34 +1758,49 @@ convert:
     goto err;
 
   gst_buffer_append_memory (outbuf, out_mem);
+  out_mem = NULL;
 
 #ifdef HAVE_RGA
+  /* outbuf owns the memory now, so the blit borrows it back rather than
+   * keeping a second name for it alive across the error paths below. */
   if (gst_mpp_use_rga () &&
-      gst_mpp_rga_convert (inbuf, &src_info, out_mem, &dst_info,
-          self->rotation)) {
+      gst_mpp_rga_convert (inbuf, &src_info,
+          gst_buffer_peek_memory (outbuf, 0), &dst_info, rotation)) {
     GST_DEBUG_OBJECT (self, "using RGA converted buffer");
     goto out;
   }
 #endif
 
-  if (self->rotation ||
+  if (rotation ||
       GST_VIDEO_INFO_FORMAT (&src_info) != GST_VIDEO_INFO_FORMAT (&dst_info))
     goto err;
 
-  if (gst_video_frame_map (&src_frame, &src_info, inbuf, GST_MAP_READ)) {
-    if (gst_video_frame_map (&dst_frame, &dst_info, outbuf, GST_MAP_WRITE)) {
-      GST_VIDEO_ENCODER_STREAM_UNLOCK (encoder);
-      if (!gst_video_frame_copy (&dst_frame, &src_frame)) {
-        GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
-        gst_video_frame_unmap (&dst_frame);
-        gst_video_frame_unmap (&src_frame);
-        goto err;
-      }
-      GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
-      gst_video_frame_unmap (&dst_frame);
-    }
-    gst_video_frame_unmap (&src_frame);
+  /*
+   * Nothing below writes the MPP buffer, so a skipped copy leaves it holding
+   * whatever the allocator last put there. Both maps must therefore fail the
+   * conversion rather than fall through to the success path.
+   */
+  if (!gst_video_frame_map (&src_frame, &src_info, inbuf, GST_MAP_READ)) {
+    GST_ERROR_OBJECT (self, "failed to map input frame");
+    goto err;
   }
+
+  if (!gst_video_frame_map (&dst_frame, &dst_info, outbuf, GST_MAP_WRITE)) {
+    GST_ERROR_OBJECT (self, "failed to map converted frame");
+    gst_video_frame_unmap (&src_frame);
+    goto err;
+  }
+
+  GST_VIDEO_ENCODER_STREAM_UNLOCK (encoder);
+  if (!gst_video_frame_copy (&dst_frame, &src_frame)) {
+    GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
+    gst_video_frame_unmap (&dst_frame);
+    gst_video_frame_unmap (&src_frame);
+    goto err;
+  }
+  GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
+  gst_video_frame_unmap (&dst_frame);
+  gst_video_frame_unmap (&src_frame);
 
   GST_DEBUG_OBJECT (self, "using software converted buffer");
 
@@ -1413,7 +1887,13 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
   MppPacket mpkt;
   MppMeta meta;
   MppBuffer mbuf;
+  RK_S32 output_intra;
   gint pkt_size;
+  gboolean zero_copy_pkt;
+
+  GST_MPP_ENC_PROP_LOCK (encoder);
+  zero_copy_pkt = self->zero_copy_pkt;
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
 
   self->mpi->encode_get_packet (self->mpp_ctx, &mpkt);
   if (!mpkt)
@@ -1424,14 +1904,22 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
   if (!mpp_meta_get_frame (meta, KEY_INPUT_FRAME, &mframe))
     mpp_frame_deinit (&mframe);
 
+  /* MPP reports whether it coded this output as an intra/IDR picture here. */
+  if (mpp_meta_get_s32 (meta, KEY_OUTPUT_INTRA, &output_intra))
+    output_intra = 0;
+
   /* Wake up the frame producer */
-  self->pending_frames--;
+  g_atomic_int_add (&self->pending_frames, -1);
   GST_MPP_ENC_BROADCAST (encoder);
 
   /* This encoded frame must be the oldest one */
   frame = gst_video_encoder_get_oldest_frame (encoder);
+  if (!frame) {
+    GST_WARNING_OBJECT (self, "dropping packet without an oldest frame");
+    goto out;
+  }
 
-  if (self->flushing && !self->draining)
+  if (GST_MPP_ENC_FLUSHING (encoder) && !self->draining)
     goto drop;
 
   pkt_size = mpp_packet_get_length (mpkt);
@@ -1439,7 +1927,13 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
   if (!mbuf)
     goto error;
 
-  if (self->zero_copy_pkt) {
+  /* An MPP rate-controller drop still returns a packet, with its buffer
+   * attached and zero length. Wrapping that in a GstBuffer feeds an empty
+   * access unit to the muxer instead of reporting the frame as dropped. */
+  if (pkt_size <= 0)
+    goto rc_drop;
+
+  if (zero_copy_pkt) {
     buffer = gst_buffer_new ();
     if (!buffer)
       goto error;
@@ -1466,6 +1960,13 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
   gst_buffer_replace (&frame->output_buffer, buffer);
   gst_buffer_unref (buffer);
 
+  /* Must precede finish_frame(): the base class turns the sync-point flag into
+   * the downstream DELTA_UNIT flag and its force-key-unit bookkeeping. */
+  if (output_intra)
+    GST_VIDEO_CODEC_FRAME_SET_SYNC_POINT (frame);
+  else
+    GST_VIDEO_CODEC_FRAME_UNSET_SYNC_POINT (frame);
+
   GST_DEBUG_OBJECT (self, "finish frame ts=%" GST_TIME_FORMAT,
       GST_TIME_ARGS (frame->pts));
 
@@ -1476,6 +1977,9 @@ out:
   return TRUE;
 error:
   GST_WARNING_OBJECT (self, "can't process this frame");
+  goto drop;
+rc_drop:
+  GST_DEBUG_OBJECT (self, "rate controller dropped this frame");
 drop:
   GST_DEBUG_OBJECT (self, "drop frame");
   gst_buffer_replace (&frame->output_buffer, NULL);
@@ -1487,12 +1991,14 @@ static void
 gst_mpp_enc_loop (GstVideoEncoder * encoder)
 {
   GstMppEnc *self = GST_MPP_ENC (encoder);
+  gboolean packet_progress = FALSE;
 
-  GST_MPP_ENC_WAIT (encoder, self->pending_frames || self->flushing);
+  GST_MPP_ENC_WAIT (encoder,
+      GST_MPP_ENC_PENDING (encoder) || GST_MPP_ENC_FLUSHING (encoder));
 
   GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
 
-  if (self->flushing && !self->pending_frames) {
+  if (GST_MPP_ENC_FLUSHING (encoder) && !GST_MPP_ENC_PENDING (encoder)) {
     GST_INFO_OBJECT (self, "flushing");
     self->task_ret = GST_FLOW_FLUSHING;
     goto out;
@@ -1502,7 +2008,24 @@ gst_mpp_enc_loop (GstVideoEncoder * encoder)
   while (gst_mpp_enc_send_frame_locked (encoder));
 
   /* Try polling encoded packets from MPP (1ms timeout) */
-  while (gst_mpp_enc_poll_packet_locked (encoder));
+  while (gst_mpp_enc_poll_packet_locked (encoder))
+    packet_progress = TRUE;
+
+  if (GST_MPP_ENC_FLUSHING (encoder) && GST_MPP_ENC_PENDING (encoder) &&
+      !packet_progress) {
+    gint64 deadline = g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
+    do {
+      g_usleep (1000);
+      packet_progress = gst_mpp_enc_poll_packet_locked (encoder);
+    } while (!packet_progress && g_get_monotonic_time () < deadline);
+
+    if (!packet_progress) {
+      GST_WARNING_OBJECT (self,
+          "pausing encoder drain with %d pending frames after no output progress",
+          GST_MPP_ENC_PENDING (encoder));
+      self->task_ret = GST_FLOW_FLUSHING;
+    }
+  }
 
 out:
   if (self->task_ret != GST_FLOW_OK) {
@@ -1513,6 +2036,18 @@ out:
   }
 
   GST_VIDEO_ENCODER_STREAM_UNLOCK (encoder);
+}
+
+static guint
+gst_mpp_enc_get_max_pending (GstVideoEncoder * encoder)
+{
+  GstMppEnc *self = GST_MPP_ENC (encoder);
+  guint max_pending;
+
+  GST_MPP_ENC_PROP_LOCK (encoder);
+  max_pending = self->max_pending;
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+  return max_pending;
 }
 
 static GstFlowReturn
@@ -1526,7 +2061,7 @@ gst_mpp_enc_handle_frame (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
 
   GST_MPP_ENC_LOCK (encoder);
 
-  if (G_UNLIKELY (self->flushing))
+  if (G_UNLIKELY (GST_MPP_ENC_FLUSHING (encoder)))
     goto flushing;
 
   if (G_UNLIKELY (!GST_MPP_ENC_TASK_STARTED (encoder))) {
@@ -1537,8 +2072,7 @@ gst_mpp_enc_handle_frame (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
   }
 
   /* Apply a pending runtime resolution change before converting this frame. */
-  if (G_UNLIKELY (self->res_dirty)
-      && !gst_mpp_enc_apply_pending_resolution (encoder))
+  if (G_UNLIKELY (!gst_mpp_enc_apply_pending_resolution (encoder)))
     goto not_negotiated;
 
   buffer = gst_mpp_enc_convert (encoder, frame);
@@ -1549,17 +2083,20 @@ gst_mpp_enc_handle_frame (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
   frame->output_buffer = buffer;
 
   /* Avoid holding too many frames */
-  if (G_UNLIKELY (self->pending_frames >= self->max_pending)) {
+  if (G_UNLIKELY (GST_MPP_ENC_PENDING (encoder) >=
+          (gint) gst_mpp_enc_get_max_pending (encoder))) {
     GST_VIDEO_ENCODER_STREAM_UNLOCK (encoder);
-    GST_MPP_ENC_WAIT (encoder, self->pending_frames < self->max_pending
-        || self->flushing);
+    GST_MPP_ENC_WAIT (encoder,
+        GST_MPP_ENC_PENDING (encoder) <
+        (gint) gst_mpp_enc_get_max_pending (encoder) ||
+        GST_MPP_ENC_FLUSHING (encoder));
     GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
   }
 
-  if (G_UNLIKELY (self->flushing))
+  if (G_UNLIKELY (GST_MPP_ENC_FLUSHING (encoder)))
     goto flushing;
 
-  self->pending_frames++;
+  g_atomic_int_inc (&self->pending_frames);
   self->frames =
       g_list_append (self->frames,
       GUINT_TO_POINTER (frame->system_frame_number));
@@ -1604,8 +2141,19 @@ gst_mpp_enc_change_state (GstElement * element, GstStateChange transition)
 }
 
 static void
+gst_mpp_enc_finalize (GObject * object)
+{
+  GstMppEnc *self = GST_MPP_ENC (object);
+
+  g_mutex_clear (&self->prop_mutex);
+  G_OBJECT_CLASS (parent_class)->finalize (object);
+}
+
+static void
 gst_mpp_enc_init (GstMppEnc * self)
 {
+  g_mutex_init (&self->prop_mutex);
+
   self->mpp_type = MPP_VIDEO_CodingUnused;
 
   self->max_pending = DEFAULT_PROP_MAX_PENDING;
@@ -1767,6 +2315,7 @@ gst_mpp_enc_class_init (GstMppEncClass * klass)
 
   gobject_class->set_property = GST_DEBUG_FUNCPTR (gst_mpp_enc_set_property);
   gobject_class->get_property = GST_DEBUG_FUNCPTR (gst_mpp_enc_get_property);
+  gobject_class->finalize = gst_mpp_enc_finalize;
 
   env = g_getenv ("GST_MPP_ENC_MAX_PENDING");
   if (env)

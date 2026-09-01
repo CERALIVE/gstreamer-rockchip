@@ -29,6 +29,10 @@
 #include "gstmppallocator.h"
 #include "gstmppdec.h"
 
+#if GST_CHECK_VERSION(1, 24, 0)
+#include <gst/video/video-info-dma.h>
+#endif
+
 #define GST_CAT_DEFAULT mpp_dec_debug
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
 
@@ -40,6 +44,15 @@ G_DEFINE_ABSTRACT_TYPE (GstMppDec, gst_mpp_dec, GST_TYPE_VIDEO_DECODER);
 
 #define MPP_OUTPUT_TIMEOUT_MS 200       /* Block timeout for MPP output queue */
 #define MPP_INPUT_TIMEOUT_MS 10 /* Block timeout for MPP input queue */
+
+/* Safety cap on the GstVideoDecoder pending-frame list. Under normal
+ * operation each decoded MPP output consumes exactly one pending input frame,
+ * so the list stays small. If some inputs never get a matching output (orphans)
+ * the list can still creep; past this bound we release the oldest so the
+ * per-output gst_video_decoder_get_frames() walk cannot degrade to O(N^2). */
+#define GST_MPP_DEC_MAX_PENDING_FRAMES 64
+
+#define GST_MPP_DEC_NAL_LENGTH_DISABLED G_MAXUINT
 
 #define MPP_TO_GST_PTS(pts) ((pts) * GST_MSECOND)
 
@@ -189,18 +202,19 @@ gst_mpp_dec_get_property (GObject * object,
   }
 }
 
-static void
+static GstFlowReturn
 gst_mpp_dec_stop_task (GstVideoDecoder * decoder, gboolean drain)
 {
   GstMppDecClass *klass = GST_MPP_DEC_GET_CLASS (decoder);
+  GstFlowReturn shutdown_result = GST_FLOW_OK;
 
   if (!GST_MPP_DEC_TASK_STARTED (decoder))
-    return;
+    return shutdown_result;
 
   GST_DEBUG_OBJECT (decoder, "stopping decoding thread");
 
   GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
-  if (klass->shutdown && klass->shutdown (decoder, drain)) {
+  if (klass->shutdown && klass->shutdown (decoder, drain, &shutdown_result)) {
     /* Wait for task thread to pause */
     GstTask *task = decoder->srcpad->task;
     if (task) {
@@ -213,13 +227,49 @@ gst_mpp_dec_stop_task (GstVideoDecoder * decoder, gboolean drain)
 
   gst_pad_stop_task (decoder->srcpad);
   GST_VIDEO_DECODER_STREAM_LOCK (decoder);
+  return shutdown_result;
 }
 
-static void
+static GstFlowReturn
+gst_mpp_dec_flush_ready_frames (GstVideoDecoder * decoder, gboolean finish)
+{
+  GstMppDec *self = GST_MPP_DEC (decoder);
+  GstFlowReturn result = GST_FLOW_OK;
+  GstVideoCodecFrame *frame;
+
+  if (!self->ready_frames)
+    return result;
+
+  while ((frame = g_queue_pop_head (self->ready_frames))) {
+    if (finish) {
+      GstFlowReturn finish_result = gst_video_decoder_finish_frame (decoder, frame);
+
+      if (result == GST_FLOW_OK && finish_result != GST_FLOW_OK)
+        result = finish_result;
+    } else {
+      gst_video_decoder_release_frame (decoder, frame);
+    }
+  }
+
+  g_queue_free (self->ready_frames);
+  self->ready_frames = NULL;
+  return result;
+}
+
+static GstFlowReturn
 gst_mpp_dec_reset (GstVideoDecoder * decoder, gboolean drain, gboolean final)
 {
   GstMppDec *self = GST_MPP_DEC (decoder);
+  GstFlowReturn shutdown_result;
+  GstFlowReturn result;
+  GstFlowReturn ready_result;
   GList *frames;
+  GList *frame_list;
+
+  if (!drain) {
+    g_atomic_int_inc (&self->reset_generation);
+    self->mpi->reset (self->mpp_ctx);
+  }
 
   GST_MPP_DEC_LOCK (decoder);
 
@@ -228,34 +278,39 @@ gst_mpp_dec_reset (GstVideoDecoder * decoder, gboolean drain, gboolean final)
   self->flushing = TRUE;
   self->draining = drain;
 
-  gst_mpp_dec_stop_task (decoder, drain);
+  shutdown_result = gst_mpp_dec_stop_task (decoder, drain);
 
+  result = self->task_ret == GST_FLOW_EOS ? GST_FLOW_OK : self->task_ret;
+  if (shutdown_result != GST_FLOW_OK)
+    result = shutdown_result;
   self->flushing = final;
   self->draining = FALSE;
 
-  self->mpi->reset (self->mpp_ctx);
+  if (self->mpp_frame) {
+    mpp_frame_deinit (&self->mpp_frame);
+    self->mpp_frame = NULL;
+  }
+
+  if (drain)
+    self->mpi->reset (self->mpp_ctx);
   self->task_ret = GST_FLOW_OK;
   self->decoded_frames = 0;
 
-  /* Clear the output frame queue, if present */
-  if (self->ready_frames) {
-    GstVideoCodecFrame *f;
-    while (f = g_queue_pop_head(self->ready_frames)) {
-      gst_video_decoder_release_frame (decoder, f);
-    }
-
-    g_queue_free (self->ready_frames);
-    self->ready_frames = NULL;
-  }
+  ready_result = gst_mpp_dec_flush_ready_frames (decoder, drain);
+  if (result == GST_FLOW_OK && ready_result != GST_FLOW_OK)
+    result = ready_result;
 
   /* Clear pending input frames */
   frames = gst_video_decoder_get_frames (decoder);
+  frame_list = frames;
   for (; frames; frames = frames->next) {
     GstVideoCodecFrame *f = frames->data;
     gst_video_decoder_release_frame (decoder, f);
   }
+  g_list_free (frame_list);
 
   GST_MPP_DEC_UNLOCK (decoder);
+  return result;
 }
 
 static gboolean
@@ -281,10 +336,12 @@ gst_mpp_dec_start (GstVideoDecoder * decoder)
   self->task_ret = GST_FLOW_OK;
   self->decoded_frames = 0;
   self->flushing = FALSE;
+  g_atomic_int_set (&self->reset_generation, 0);
 
   /* Prefer using MPP PTS */
   self->use_mpp_pts = TRUE;
   self->mpp_delta_pts = 0;
+  self->nal_length_size = GST_MPP_DEC_NAL_LENGTH_DISABLED;
 
   g_mutex_init (&self->mutex);
 
@@ -354,20 +411,196 @@ static GstFlowReturn
 gst_mpp_dec_drain (GstVideoDecoder * decoder)
 {
   GST_DEBUG_OBJECT (decoder, "draining");
-  gst_mpp_dec_reset (decoder, TRUE, FALSE);
-  return GST_FLOW_OK;
+  return gst_mpp_dec_reset (decoder, TRUE, FALSE);
 }
 
 static GstFlowReturn
 gst_mpp_dec_finish (GstVideoDecoder * decoder)
 {
+  GstFlowReturn ret;
+
   GST_DEBUG_OBJECT (decoder, "finishing");
-  gst_mpp_dec_reset (decoder, TRUE, FALSE);
+  ret = gst_mpp_dec_reset (decoder, TRUE, FALSE);
 
   /* No need to caching buffers after finished */
   gst_mpp_dec_clear_allocator (decoder);
 
-  return GST_FLOW_OK;
+  return ret;
+}
+
+static guint
+gst_mpp_dec_codec_data_nal_length_size (GstMppDec * self,
+    GstVideoCodecState * state)
+{
+  GstMapInfo map = GST_MAP_INFO_INIT;
+  guint offset;
+  guint length_size = GST_MPP_DEC_NAL_LENGTH_DISABLED;
+
+  if (!state->codec_data)
+    return length_size;
+
+  offset = self->mpp_type == MPP_VIDEO_CodingAVC ? 4 : 21;
+  if (!gst_buffer_map (state->codec_data, &map, GST_MAP_READ))
+    return length_size;
+
+  if (map.size > offset && map.data[0] == 1) {
+    length_size = (map.data[offset] & 0x03) + 1;
+    if (length_size == 3)
+      length_size = GST_MPP_DEC_NAL_LENGTH_DISABLED;
+  }
+
+  gst_buffer_unmap (state->codec_data, &map);
+  return length_size;
+}
+
+static void
+gst_mpp_dec_configure_nal_format (GstMppDec * self, GstVideoCodecState * state)
+{
+  const GstStructure *structure = gst_caps_get_structure (state->caps, 0);
+  const gchar *stream_format = gst_structure_get_string (structure,
+      "stream-format");
+
+  self->nal_length_size = GST_MPP_DEC_NAL_LENGTH_DISABLED;
+  if (self->mpp_type != MPP_VIDEO_CodingAVC &&
+      self->mpp_type != MPP_VIDEO_CodingHEVC)
+    return;
+
+  if (g_strcmp0 (stream_format, "byte-stream") == 0) {
+    self->nal_length_size = 0;
+  } else if ((self->mpp_type == MPP_VIDEO_CodingAVC &&
+          (g_strcmp0 (stream_format, "avc") == 0 ||
+              g_strcmp0 (stream_format, "avc3") == 0)) ||
+      (self->mpp_type == MPP_VIDEO_CodingHEVC &&
+          (g_strcmp0 (stream_format, "hvc1") == 0 ||
+              g_strcmp0 (stream_format, "hev1") == 0))) {
+    self->nal_length_size = gst_mpp_dec_codec_data_nal_length_size (self,
+        state);
+  }
+}
+
+static gboolean
+gst_mpp_dec_nal_is_parameter_set (GstMppDec * self, const guint8 * data,
+    gsize size)
+{
+  guint type;
+
+  if (self->mpp_type == MPP_VIDEO_CodingAVC) {
+    if (size < 2 || data[0] & 0x80)
+      return FALSE;
+    type = data[0] & 0x1f;
+    return type == 7 || type == 8;
+  }
+
+  if (self->mpp_type == MPP_VIDEO_CodingHEVC) {
+    if (size < 3 || data[0] & 0x80 || !(data[1] & 0x07))
+      return FALSE;
+    type = (data[0] >> 1) & 0x3f;
+    return type >= 32 && type <= 34;
+  }
+
+  return FALSE;
+}
+
+static gboolean
+gst_mpp_dec_find_start_code (const guint8 * data, gsize size, gsize from,
+    gsize * prefix, gsize * nal)
+{
+  gsize i;
+
+  for (i = from; i + 3 <= size; i++) {
+    if (data[i] || data[i + 1])
+      continue;
+    if (data[i + 2] == 1) {
+      *prefix = i;
+      *nal = i + 3;
+      return TRUE;
+    }
+    if (i + 4 <= size && !data[i + 2] && data[i + 3] == 1) {
+      *prefix = i;
+      *nal = i + 4;
+      return TRUE;
+    }
+  }
+
+  return FALSE;
+}
+
+static gboolean
+gst_mpp_dec_annex_b_is_parameter_set_au (GstMppDec * self,
+    const guint8 * data, gsize size)
+{
+  gsize prefix, nal_start, next_prefix, next_nal;
+  gsize i;
+  gboolean found = FALSE;
+
+  if (!gst_mpp_dec_find_start_code (data, size, 0, &prefix, &nal_start))
+    return FALSE;
+  for (i = 0; i < prefix; i++) {
+    if (data[i])
+      return FALSE;
+  }
+
+  while (nal_start < size) {
+    gboolean have_next = gst_mpp_dec_find_start_code (data, size, nal_start,
+        &next_prefix, &next_nal);
+    gsize nal_end = have_next ? next_prefix : size;
+
+    while (nal_end > nal_start && !data[nal_end - 1])
+      nal_end--;
+    if (nal_end <= nal_start ||
+        !gst_mpp_dec_nal_is_parameter_set (self, data + nal_start,
+            nal_end - nal_start))
+      return FALSE;
+
+    found = TRUE;
+    if (!have_next)
+      break;
+    if (next_nal >= size)
+      return FALSE;
+    nal_start = next_nal;
+  }
+
+  return found;
+}
+
+static gboolean
+gst_mpp_dec_length_prefixed_is_parameter_set_au (GstMppDec * self,
+    const guint8 * data, gsize size)
+{
+  guint length_size = self->nal_length_size;
+  gsize offset = 0;
+  gboolean found = FALSE;
+
+  while (offset < size) {
+    guint32 nal_size = 0;
+    guint i;
+
+    if (size - offset < length_size)
+      return FALSE;
+    for (i = 0; i < length_size; i++)
+      nal_size = (nal_size << 8) | data[offset + i];
+    offset += length_size;
+
+    if (!nal_size || nal_size > size - offset ||
+        !gst_mpp_dec_nal_is_parameter_set (self, data + offset, nal_size))
+      return FALSE;
+    found = TRUE;
+    offset += nal_size;
+  }
+
+  return found;
+}
+
+static gboolean
+gst_mpp_dec_is_parameter_set_au (GstMppDec * self, const guint8 * data,
+    gsize size)
+{
+  if (!data || !size ||
+      self->nal_length_size == GST_MPP_DEC_NAL_LENGTH_DISABLED)
+    return FALSE;
+  if (!self->nal_length_size)
+    return gst_mpp_dec_annex_b_is_parameter_set_au (self, data, size);
+  return gst_mpp_dec_length_prefixed_is_parameter_set_au (self, data, size);
 }
 
 static gboolean
@@ -406,6 +639,7 @@ gst_mpp_dec_set_format (GstVideoDecoder * decoder, GstVideoCodecState * state)
   if (self->ignore_error)
     self->mpi->control (self->mpp_ctx, MPP_DEC_SET_DISABLE_ERROR, NULL);
 
+  gst_mpp_dec_configure_nal_format (self, state);
   self->input_state = gst_video_codec_state_ref (state);
   return TRUE;
 }
@@ -454,15 +688,57 @@ gst_mpp_dec_update_video_info (GstVideoDecoder * decoder, GstVideoFormat format,
   }
 
   if (self->dma_feature) {
-    GstCaps *tmp_caps = gst_caps_copy (output_state->caps);
-    gst_caps_set_features (tmp_caps, 0,
+#if GST_CHECK_VERSION(1, 24, 0)
+    GstVideoInfoDmaDrm drm_info;
+
+    /* Offer both legacy DMABuf caps and DMA_DRM caps with a linear modifier,
+     * then let the peer choose. Keep the existing output_state->info intact:
+     * only its caps participate in this negotiation. If the peer is not ready
+     * yet, retain the sysmem caps so a later RECONFIGURE can retry. */
+    if (!afbc && !rfbc &&
+        gst_video_info_dma_drm_from_video_info (&drm_info,
+            &output_state->info, 0)) {
+      GstCaps *drm_caps = gst_video_info_dma_drm_to_caps (&drm_info);
+
+      if (drm_caps) {
+        GstCaps *offer = gst_caps_copy (output_state->caps);
+        GstCaps *peer_caps;
+
+        gst_caps_set_features (offer, 0,
+            gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_DMABUF, NULL));
+        gst_caps_append (offer, drm_caps);
+
+        peer_caps = gst_pad_peer_query_caps (decoder->srcpad, offer);
+        gst_caps_unref (offer);
+
+        if (peer_caps && !gst_caps_is_empty (peer_caps) &&
+            !gst_caps_is_any (peer_caps)) {
+          GstCaps *chosen = gst_caps_fixate (peer_caps);
+
+          if (gst_caps_features_contains (gst_caps_get_features (chosen, 0),
+                  GST_CAPS_FEATURE_MEMORY_DMABUF)) {
+            gst_caps_unref (output_state->caps);
+            output_state->caps = chosen;
+          } else {
+            gst_caps_unref (chosen);
+          }
+        } else if (peer_caps) {
+          gst_caps_unref (peer_caps);
+        }
+      }
+    } else if (afbc || rfbc) {
+      /* Private compression flags have no matching DRM modifier yet. */
+      gst_caps_set_features (output_state->caps, 0,
+          gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_DMABUF, NULL));
+    }
+#else
+    /*
+     * GStreamer before 1.24 has no DMA_DRM caps API. Preserve the legacy
+     * DMABuf negotiation used by the bookworm/GStreamer 1.22 build.
+     */
+    gst_caps_set_features (output_state->caps, 0,
         gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_DMABUF, NULL));
-
-    /* HACK: Expose dmabuf feature when the subset check is hacked */
-    if (gst_caps_is_subset (tmp_caps, output_state->caps))
-      gst_caps_replace (&output_state->caps, tmp_caps);
-
-    gst_caps_unref (tmp_caps);
+#endif
   }
 
   *info = output_state->info;
@@ -676,6 +952,29 @@ gst_mpp_dec_get_frame (GstVideoDecoder * decoder, GstClockTime pts)
     return NULL;
   }
 
+  /* If the pending list has run away, release the oldest frames beyond the
+   * bound (they are orphans that never got a matching MPP output) so the
+   * per-output list walk cannot go O(N^2). Rate-limited by nature: once
+   * trimmed to the bound this branch stops firing. Then re-fetch the trimmed
+   * list before matching. */
+  {
+    guint n_pending = g_list_length (frames);
+    if (n_pending > GST_MPP_DEC_MAX_PENDING_FRAMES) {
+      guint drop = n_pending - GST_MPP_DEC_MAX_PENDING_FRAMES;
+      GST_WARNING_OBJECT (self, "pending frame list = %u; releasing %u oldest "
+          "(pending cap)", n_pending, drop);
+      for (l = frames; l != NULL && drop > 0; l = l->next, drop--) {
+        GstVideoCodecFrame *f = l->data;
+        gst_video_codec_frame_ref (f);
+        gst_video_decoder_release_frame (decoder, f);
+      }
+      g_list_free_full (frames, (GDestroyNotify) gst_video_codec_frame_unref);
+      frames = gst_video_decoder_get_frames (decoder);
+      if (!frames)
+        return NULL;
+    }
+  }
+
   /* Choose PTS source when getting the first frame */
   if (is_first_frame) {
     /* Find the frame with earliest PTS (including invalid PTS) */
@@ -808,10 +1107,21 @@ out:
 
     gst_video_codec_frame_ref (frame);
     self->last_frame = frame;
-  } else if (self->last_frame) {
-    frame = self->last_frame;
-    GST_DEBUG_OBJECT (self, "reusing the last frame (#%d)",
+  } else {
+    /* No PTS match. Consume the oldest pending frame instead of reusing
+     * self->last_frame (already finished; not in the base pending list). The
+     * old reuse consumed zero pending frames per output, so priv->frames never
+     * drained and gst_video_decoder_get_frames() went O(N^2). Invariant: one
+     * MPP output consumes one pending frame. frames is oldest-first (see the
+     * seen_valid_pts branch above). */
+    frame = frames->data;
+    GST_DEBUG_OBJECT (self, "no PTS match; consuming oldest pending frame (#%d)",
         frame->system_frame_number);
+
+    if (self->last_frame)
+      gst_video_codec_frame_unref (self->last_frame);
+    gst_video_codec_frame_ref (frame);
+    self->last_frame = frame;
   }
 
   if (frame) {
@@ -857,7 +1167,7 @@ gst_mpp_dec_rga_convert (GstVideoDecoder * decoder, MppFrame mframe,
 
   if (crop && ret) {
     // We've already cropped the frame with RGA, remove the crop meta
-    gst_buffer_remove_meta(buffer, crop);
+    gst_buffer_remove_meta (buffer, &crop->meta);
   }
 
   return ret;
@@ -1024,6 +1334,11 @@ gst_mpp_dec_loop (GstVideoDecoder * decoder)
     goto info_change;
   }
 
+  if (mpp_frame_get_eos (mframe)) {
+    self->task_ret = gst_mpp_dec_flush_ready_frames (decoder, TRUE);
+    goto out;
+  }
+
   frame = gst_mpp_dec_get_frame (decoder, mpp_frame_get_pts (mframe));
   if (!frame)
     goto no_frame;
@@ -1116,7 +1431,8 @@ out:
   if (mframe) {
     if (mpp_frame_get_eos (mframe)) {
       GST_INFO_OBJECT (self, "got eos");
-      self->task_ret = GST_FLOW_EOS;
+      if (self->task_ret == GST_FLOW_OK)
+        self->task_ret = GST_FLOW_EOS;
     }
 
     if (self->mpp_frame)
@@ -1165,6 +1481,8 @@ gst_mpp_dec_send_mpp_packet_unlocked (GstVideoDecoder * decoder, MppPacket mpkt)
       case MPP_OK:
         return GST_FLOW_OK;
       case MPP_ERR_BUFFER_FULL:
+        /* fall-through */
+      case MPP_ERR_TIMEOUT:
         /* Timed out */
         break;
       default:
@@ -1183,6 +1501,8 @@ gst_mpp_dec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
   GstBuffer *tmp;
   GstFlowReturn ret;
   MppPacket mpkt = NULL;
+  gboolean packet_has_buffer = FALSE;
+  gboolean parameter_set_only;
 
   GST_MPP_DEC_LOCK (decoder);
 
@@ -1214,12 +1534,18 @@ gst_mpp_dec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
 
   GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
   gst_buffer_map (frame->input_buffer, &mapinfo, GST_MAP_READ);
+  parameter_set_only = gst_mpp_dec_is_parameter_set_au (self, mapinfo.data,
+      mapinfo.size);
   mpkt = klass->get_mpp_packet (decoder, &mapinfo);
   GST_VIDEO_DECODER_STREAM_LOCK (decoder);
   if (!mpkt)
     goto no_packet;
 
   mpp_packet_set_pts (mpkt, self->use_mpp_pts ? -1 : (gint64) frame->pts);
+
+  /* Buffered packets transfer to MPP on success and may be recycled before
+   * send_mpp_packet() returns. Snapshot ownership while the packet is ours. */
+  packet_has_buffer = (mpp_packet_get_buffer (mpkt) != NULL);
 
   if (GST_CLOCK_TIME_IS_VALID (frame->pts))
     self->seen_valid_pts = TRUE;
@@ -1233,8 +1559,21 @@ gst_mpp_dec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
   else if (G_UNLIKELY (ret != GST_FLOW_OK))
     goto drop;
 
-  /* NOTE: Sub-class takes over the MPP packet when success */
-  mpkt = NULL;
+  if (packet_has_buffer)
+    mpkt = NULL;
+  else
+    mpp_packet_deinit (&mpkt);
+
+  if (parameter_set_only) {
+    GST_DEBUG_OBJECT (self, "releasing parameter-set-only frame (#%d)",
+        frame->system_frame_number);
+
+    gst_buffer_unmap (frame->input_buffer, &mapinfo);
+    gst_video_decoder_release_frame (decoder, frame);
+    GST_MPP_DEC_UNLOCK (decoder);
+    return self->task_ret;
+  }
+
   gst_buffer_unmap (frame->input_buffer, &mapinfo);
 
   /* No need to keep input arround */

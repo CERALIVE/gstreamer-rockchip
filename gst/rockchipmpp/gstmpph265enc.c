@@ -53,6 +53,22 @@ struct _GstMppH265Enc
   gboolean sao;            /* Sample Adaptive Offset filter */
 };
 
+typedef struct
+{
+  guint qp_init;
+  guint qp_min;
+  guint qp_max;
+  guint qp_min_i;
+  guint qp_max_i;
+  gint qp_ip;
+  gint profile;
+  gint tier;
+  gint level;
+  gboolean sao;
+  MppEncRcMode rc_mode;
+  gboolean level_ok;
+} GstMppH265EncPropertiesSnapshot;
+
 #define parent_class gst_mpp_h265_enc_parent_class
 G_DEFINE_TYPE (GstMppH265Enc, gst_mpp_h265_enc, GST_TYPE_MPP_ENC);
 
@@ -165,6 +181,153 @@ static GstStaticPadTemplate gst_mpp_h265_enc_sink_template =
         "format = (string) { " MPP_H265_ENC_FORMATS " }, "
         GST_MPP_H265_ENC_SIZE_CAPS ";"));
 
+/*
+ * H.265 level limits, Tables A.6/A.8/A.9 of ITU-T H.265, keyed by
+ * general_level_idc. Identical values to MPP's own `levels[]`
+ * (mpp/codec/enc/h265/h265e_ps.c at the pinned 1.5.0-1), which is deliberate:
+ * MPP consults only max_luma_ps there, so this table extends the same numbers
+ * to the two axes it leaves unchecked while agreeing with it exactly on the one
+ * it does check. Level 8.5 is omitted -- it is the unbounded still-picture
+ * level, not a streaming target, and the level property does not offer it.
+ *
+ * max_br_* is in units of CpbBrVclFactor bits/s, 1000 for every profile this
+ * element offers (Main, Main 10, Main Still Picture -- Table A.2), not bits/s.
+ * G_MAXUINT in max_br_high marks a level at which the high tier is not defined.
+ */
+typedef struct
+{
+  gint level;
+  const gchar *name;
+  guint max_luma_ps;
+  guint64 max_luma_sr;
+  guint max_br_main;
+  guint max_br_high;
+} GstMppH265LevelLimits;
+
+static const GstMppH265LevelLimits gst_mpp_h265_enc_level_limits[] = {
+  {30, "1", 36864, 552960, 128, G_MAXUINT},
+  {60, "2", 122880, 3686400, 1500, G_MAXUINT},
+  {63, "2.1", 245760, 7372800, 3000, G_MAXUINT},
+  {90, "3", 552960, 16588800, 6000, G_MAXUINT},
+  {93, "3.1", 983040, 33177600, 10000, G_MAXUINT},
+  {120, "4", 2228224, 66846720, 12000, 30000},
+  {123, "4.1", 2228224, 133693440, 20000, 50000},
+  {150, "5", 8912896, 267386880, 25000, 100000},
+  {153, "5.1", 8912896, 534773760, 40000, 160000},
+  {156, "5.2", 8912896, 1069547520, 60000, 240000},
+  {180, "6", 35651584, 1069547520, 60000, 240000},
+  {183, "6.1", 35651584, 2139095040, 120000, 480000},
+  {186, "6.2", 35651584, 4278190080ULL, 240000, 800000},
+};
+
+#define GST_MPP_H265_CPB_BR_VCL_FACTOR 1000
+
+static guint
+gst_mpp_h265_enc_level_index (gint level)
+{
+  guint i;
+
+  for (i = 0; i < G_N_ELEMENTS (gst_mpp_h265_enc_level_limits); i++) {
+    if (gst_mpp_h265_enc_level_limits[i].level == level)
+      return i;
+  }
+  return 0;
+}
+
+static guint
+gst_mpp_h265_enc_required_level_index (gint tier,
+    const GstMppEncRateInfo * rate, gboolean * conforming)
+{
+  guint64 luma_ps;
+  guint64 luma_ticks;
+  guint i;
+
+  luma_ps = (guint64) rate->width * rate->height;
+
+  /* Cross-multiplied for the same reason as the H.264 macroblock rate: the
+   * exact sample rate is a rational, and rounding it hides violations narrower
+   * than one frame per second. */
+  luma_ticks = luma_ps * (guint64) rate->fps_n;
+
+  *conforming = TRUE;
+
+  for (i = 0; i < G_N_ELEMENTS (gst_mpp_h265_enc_level_limits); i++) {
+    const GstMppH265LevelLimits *limits = &gst_mpp_h265_enc_level_limits[i];
+    guint max_br = tier ? limits->max_br_high : limits->max_br_main;
+
+    if (tier && max_br == G_MAXUINT)
+      continue;
+    if (luma_ps > (guint64) limits->max_luma_ps)
+      continue;
+    if (luma_ticks > limits->max_luma_sr * (guint64) rate->fps_d)
+      continue;
+    if (rate->bitrate && (guint64) rate->bitrate >
+        (guint64) max_br * GST_MPP_H265_CPB_BR_VCL_FACTOR)
+      continue;
+    return i;
+  }
+
+  *conforming = FALSE;
+  return G_N_ELEMENTS (gst_mpp_h265_enc_level_limits) - 1;
+}
+
+/*
+ * The level the bitstream actually conforms to, which is what the VPS/SPS and
+ * the src caps must both carry.
+ *
+ * MPP raises an under-declared level for picture size alone (h265e_ps.c only
+ * tests maxLumaSamples), so a 1080p60 stream declared at level 4 keeps emitting
+ * a VPS claiming level 4 while exceeding its luma sample rate by 2x.
+ *
+ * Raising rather than rejecting is deliberate where a higher conforming level
+ * EXISTS: `level` defaults to 4 and cerastream never sets it, so every shipped
+ * 1080p50/60, 1440p and 2160p profile would fail negotiation under a blanket
+ * rejection.
+ *
+ * When no level and tier in the table can carry the stream there is nothing to
+ * raise to, and clamping to the top level would publish a level the bitstream
+ * is known to exceed. That case returns FALSE and the apply is refused.
+ */
+static gboolean
+gst_mpp_h265_enc_effective_level (GstVideoEncoder * encoder, gint tier,
+    gint declared, const GstMppEncRateInfo * rate, gint * effective)
+{
+  gboolean conforming;
+  guint declared_index;
+  guint required_index;
+  gint required;
+
+  *effective = declared;
+
+  if (rate->width <= 0 || rate->height <= 0 || rate->fps_n <= 0
+      || rate->fps_d <= 0)
+    return TRUE;
+
+  declared_index = gst_mpp_h265_enc_level_index (declared);
+  required_index =
+      gst_mpp_h265_enc_required_level_index (tier, rate, &conforming);
+  required = gst_mpp_h265_enc_level_limits[required_index].level;
+
+  if (!conforming) {
+    GST_ERROR_OBJECT (encoder, "%dx%d@%d/%d fps at %u bps exceeds every H.265 "
+        "%s-tier level, including level_idc %d; refusing to encode a stream no "
+        "level can describe", rate->width, rate->height, rate->fps_n,
+        rate->fps_d, rate->bitrate, tier ? "high" : "main", required);
+    return FALSE;
+  }
+
+  if (required_index <= declared_index)
+    return TRUE;
+
+  GST_WARNING_OBJECT (encoder, "declared H.265 level_idc %d cannot carry "
+      "%dx%d@%d/%d fps at %u bps; raising to level_idc %d so the bitstream and "
+      "its VPS agree", declared, rate->width, rate->height, rate->fps_n,
+      rate->fps_d, rate->bitrate, required);
+
+  *effective = required;
+  return TRUE;
+}
+
 static void
 gst_mpp_h265_enc_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec)
@@ -172,12 +335,14 @@ gst_mpp_h265_enc_set_property (GObject * object,
   GstVideoEncoder *encoder = GST_VIDEO_ENCODER (object);
   GstMppH265Enc *self = GST_MPP_H265_ENC (encoder);
   GstMppEnc *mppenc = GST_MPP_ENC (encoder);
+  gboolean invalid = FALSE;
 
+  GST_MPP_ENC_PROP_LOCK (encoder);
   switch (prop_id) {
     case PROP_QP_INIT:{
       guint qp_init = g_value_get_uint (value);
       if (self->qp_init == qp_init)
-        return;
+        goto out;
 
       self->qp_init = qp_init;
       break;
@@ -185,7 +350,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_QP_MIN:{
       guint qp_min = g_value_get_uint (value);
       if (self->qp_min == qp_min)
-        return;
+        goto out;
 
       self->qp_min = qp_min;
       break;
@@ -193,7 +358,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_QP_MAX:{
       guint qp_max = g_value_get_uint (value);
       if (self->qp_max == qp_max)
-        return;
+        goto out;
 
       self->qp_max = qp_max;
       break;
@@ -201,7 +366,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_QP_MIN_I:{
       guint qp_min_i = g_value_get_uint (value);
       if (self->qp_min_i == qp_min_i)
-        return;
+        goto out;
 
       self->qp_min_i = qp_min_i;
       break;
@@ -209,7 +374,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_QP_MAX_I:{
       guint qp_max_i = g_value_get_uint (value);
       if (self->qp_max_i == qp_max_i)
-        return;
+        goto out;
 
       self->qp_max_i = qp_max_i;
       break;
@@ -217,7 +382,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_QP_IP:{
       gint qp_ip = g_value_get_int (value);
       if (self->qp_ip == qp_ip)
-        return;
+        goto out;
 
       self->qp_ip = qp_ip;
       break;
@@ -225,7 +390,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_PROFILE:{
       gint profile = g_value_get_enum (value);
       if (self->profile == profile)
-        return;
+        goto out;
 
       self->profile = profile;
       break;
@@ -233,7 +398,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_TIER:{
       gint tier = g_value_get_enum (value);
       if (self->tier == tier)
-        return;
+        goto out;
 
       self->tier = tier;
       break;
@@ -241,7 +406,7 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_LEVEL:{
       gint level = g_value_get_enum (value);
       if (self->level == level)
-        return;
+        goto out;
 
       self->level = level;
       break;
@@ -249,17 +414,22 @@ gst_mpp_h265_enc_set_property (GObject * object,
     case PROP_SAO:{
       gboolean sao = g_value_get_boolean (value);
       if (self->sao == sao)
-        return;
+        goto out;
 
       self->sao = sao;
       break;
     }
     default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
-      return;
+      invalid = TRUE;
+      goto out;
   }
 
   mppenc->prop_dirty = TRUE;
+
+out:
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+  if (invalid)
+    G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
 }
 
 static void
@@ -268,7 +438,9 @@ gst_mpp_h265_enc_get_property (GObject * object,
 {
   GstVideoEncoder *encoder = GST_VIDEO_ENCODER (object);
   GstMppH265Enc *self = GST_MPP_H265_ENC (encoder);
+  gboolean invalid = FALSE;
 
+  GST_MPP_ENC_PROP_LOCK (encoder);
   switch (prop_id) {
     case PROP_QP_INIT:
       g_value_set_uint (value, self->qp_init);
@@ -301,16 +473,54 @@ gst_mpp_h265_enc_get_property (GObject * object,
       g_value_set_boolean (value, self->sao);
       break;
     default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      invalid = TRUE;
       break;
+  }
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+
+  if (invalid)
+    G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+}
+
+/*
+ * The GStreamer spellings, which are not the property nicks: `main10` is
+ * `main-10` and `main-still` is `main-still-picture` in video/x-h265 caps, and
+ * the level field carries the level number rather than general_level_idc.
+ * Publishing the nick or the idc would put a value downstream cannot parse into
+ * a field h265parse and the muxers read.
+ */
+static const gchar *
+gst_mpp_h265_enc_profile_string (gint profile)
+{
+  switch (profile) {
+    case 2:
+      return "main-10";
+    case 3:
+      return "main-still-picture";
+    default:
+      return "main";
   }
 }
 
+static const gchar *
+gst_mpp_h265_enc_level_string (gint level)
+{
+  guint i;
+
+  for (i = 0; i < G_N_ELEMENTS (gst_mpp_h265_enc_level_limits); i++) {
+    if (gst_mpp_h265_enc_level_limits[i].level == level)
+      return gst_mpp_h265_enc_level_limits[i].name;
+  }
+  return NULL;
+}
+
 static gboolean
-gst_mpp_h265_enc_set_src_caps (GstVideoEncoder * encoder)
+gst_mpp_h265_enc_set_src_caps (GstVideoEncoder * encoder, gint profile,
+    gint tier, gint level)
 {
   GstStructure *structure;
   GstCaps *caps;
+  const gchar *level_string;
 
   caps = gst_caps_new_empty_simple ("video/x-h265");
 
@@ -319,52 +529,109 @@ gst_mpp_h265_enc_set_src_caps (GstVideoEncoder * encoder)
       G_TYPE_STRING, "byte-stream", NULL);
   gst_structure_set (structure, "alignment", G_TYPE_STRING, "au", NULL);
 
+  gst_structure_set (structure, "profile", G_TYPE_STRING,
+      gst_mpp_h265_enc_profile_string (profile), NULL);
+  gst_structure_set (structure, "tier", G_TYPE_STRING,
+      tier ? "high" : "main", NULL);
+
+  /* Tier and level are one constraint, so an unnameable level leaves both out
+   * rather than publishing a tier for a level nobody can read. */
+  level_string = gst_mpp_h265_enc_level_string (level);
+  if (level_string)
+    gst_structure_set (structure, "level", G_TYPE_STRING, level_string, NULL);
+  else
+    gst_structure_remove_field (structure, "tier");
+
   return gst_mpp_enc_set_src_caps (encoder, caps);
+}
+
+static void
+gst_mpp_h265_enc_snapshot_properties (GstVideoEncoder * encoder,
+    gpointer snapshot)
+{
+  GstMppH265Enc *self = GST_MPP_H265_ENC (encoder);
+  GstMppEnc *mppenc = GST_MPP_ENC (encoder);
+  GstMppH265EncPropertiesSnapshot *properties = snapshot;
+  GstMppEncRateInfo rate;
+
+  gst_mpp_enc_snapshot_rate_info (encoder, &rate);
+
+  properties->qp_init = self->qp_init;
+  properties->qp_min = self->qp_min;
+  properties->qp_max = self->qp_max;
+  properties->qp_min_i = self->qp_min_i;
+  properties->qp_max_i = self->qp_max_i;
+  properties->qp_ip = self->qp_ip;
+  properties->profile = self->profile;
+  properties->tier = self->tier;
+  /* Declared level stays on the property; the effective one is what MPP is
+   * configured with and what the caps publish. */
+  properties->level_ok = gst_mpp_h265_enc_effective_level (encoder, self->tier,
+      self->level, &rate, &properties->level);
+  properties->sao = self->sao;
+  properties->rc_mode = mppenc->rc_mode;
+}
+
+static gboolean
+gst_mpp_h265_enc_configure_properties (GstVideoEncoder * encoder,
+    gconstpointer snapshot)
+{
+  GstMppEnc *mppenc = GST_MPP_ENC (encoder);
+  const GstMppH265EncPropertiesSnapshot *properties = snapshot;
+
+  /* Nothing is written for a stream no level can describe, so the level MPP
+   * holds stays the last one that was actually valid. */
+  if (!properties->level_ok)
+    return FALSE;
+
+  gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_init", properties->qp_init);
+
+  if (properties->rc_mode == MPP_ENC_RC_MODE_FIXQP) {
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min_i", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max_i", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_ip", 0);
+  } else {
+    /* MPP_ENC_RC_MODE_CBR/MPP_ENC_RC_MODE_VBR/MPP_ENC_RC_MODE_AVBR */
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min",
+        properties->qp_min ? properties->qp_min : 10);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max",
+        properties->qp_max ? properties->qp_max : 51);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min_i",
+        properties->qp_min_i ? properties->qp_min_i : 10);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max_i",
+        properties->qp_max_i ? properties->qp_max_i : 51);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_ip",
+        properties->qp_ip >= 0 ? properties->qp_ip : 2);
+  }
+
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h265:profile", properties->profile);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h265:tier", properties->tier);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h265:level", properties->level);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h265:sao_luma_disable",
+      properties->sao ? 0 : 1);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h265:sao_chroma_disable",
+      properties->sao ? 0 : 1);
+
+  return TRUE;
 }
 
 static gboolean
 gst_mpp_h265_enc_apply_properties (GstVideoEncoder * encoder)
 {
-  GstMppH265Enc *self = GST_MPP_H265_ENC (encoder);
-  GstMppEnc *mppenc = GST_MPP_ENC (encoder);
+  GstMppH265EncPropertiesSnapshot properties;
+  gboolean applied;
 
-  if (G_LIKELY (!mppenc->prop_dirty))
+  if (!gst_mpp_enc_apply_properties_full (encoder,
+          gst_mpp_h265_enc_snapshot_properties,
+          gst_mpp_h265_enc_configure_properties, &properties, &applied))
+    return FALSE;
+  if (!applied)
     return TRUE;
 
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_init", self->qp_init);
-
-  if (mppenc->rc_mode == MPP_ENC_RC_MODE_FIXQP) {
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min", self->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max", self->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min_i", self->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max_i", self->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_ip", 0);
-  } else {
-    /* MPP_ENC_RC_MODE_CBR/MPP_ENC_RC_MODE_VBR/MPP_ENC_RC_MODE_AVBR */
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min",
-        self->qp_min ? self->qp_min : 10);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max",
-        self->qp_max ? self->qp_max : 51);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min_i",
-        self->qp_min_i ? self->qp_min_i : 10);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max_i",
-        self->qp_max_i ? self->qp_max_i : 51);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_ip",
-        self->qp_ip >= 0 ? self->qp_ip : 2);
-  }
-
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:profile", self->profile);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:tier", self->tier);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:level", self->level);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:sao_luma_disable",
-      self->sao ? 0 : 1);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h265:sao_chroma_disable",
-      self->sao ? 0 : 1);
-
-  if (!gst_mpp_enc_apply_properties (encoder))
-    return FALSE;
-
-  return gst_mpp_h265_enc_set_src_caps (encoder);
+  return gst_mpp_h265_enc_set_src_caps (encoder, properties.profile,
+      properties.tier, properties.level);
 }
 
 static gboolean

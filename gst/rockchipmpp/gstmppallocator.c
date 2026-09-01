@@ -175,10 +175,20 @@ gst_mpp_allocator_import_mppbuf (GstAllocator * allocator, MppBuffer mbuf)
     mem = gst_mpp_allocator_import_dmafd (allocator, fd, size);
     quark = gst_mpp_ext_buffer_quark ();
   } else {
-    mem = gst_fd_allocator_alloc (allocator, dup (fd), size,
+    gint dup_fd = dup (fd);
+
+    if (dup_fd < 0) {
+      GST_ERROR_OBJECT (self, "failed to duplicate dmafd");
+      return NULL;
+    }
+
+    mem = gst_fd_allocator_alloc (allocator, dup_fd, size,
         GST_FD_MEMORY_FLAG_KEEP_MAPPED);
     quark = gst_mpp_buffer_quark ();
   }
+
+  if (!mem)
+    return NULL;
 
   mpp_buffer_inc_ref (mbuf);
   gst_mini_object_set_qdata (GST_MINI_OBJECT (mem), quark, mbuf,

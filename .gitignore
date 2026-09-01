@@ -67,3 +67,9 @@ Build
 
 /build
 /subprojects
+
+# packaging/build-deb.sh outputs. meson self-ignores its own build dir, but the
+# stage tree and the .deb it produces are ours to keep out of the index.
+/build-deb-*
+/stage-deb-*
+/dist

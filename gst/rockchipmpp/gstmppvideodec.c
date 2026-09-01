@@ -31,6 +31,8 @@
 #define GST_MPP_VIDEO_DEC(obj) (G_TYPE_CHECK_INSTANCE_CAST((obj), \
     GST_TYPE_MPP_VIDEO_DEC, GstMppVideoDec))
 
+#define MPP_VIDEO_DEC_DRAIN_NO_PROGRESS_US (100 * 1000)
+
 #define GST_CAT_DEFAULT mpp_video_dec_debug
 GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
 
@@ -244,9 +246,6 @@ gst_mpp_video_dec_send_mpp_packet (GstVideoDecoder * decoder,
   mppdec->mpi->control (mppdec->mpp_ctx, MPP_SET_INPUT_TIMEOUT, &timeout_ms);
 
   ret = mppdec->mpi->decode_put_packet (mppdec->mpp_ctx, mpkt);
-  if (!ret)
-    mpp_packet_deinit (&mpkt);
-
   return ret;
 }
 
@@ -268,32 +267,44 @@ gst_mpp_video_dec_poll_mpp_frame (GstVideoDecoder * decoder, gint timeout_ms)
 }
 
 static gboolean
-gst_mpp_video_dec_shutdown (GstVideoDecoder * decoder, gboolean drain)
+gst_mpp_video_dec_shutdown (GstVideoDecoder * decoder, gboolean drain,
+    GstFlowReturn * shutdown_result)
 {
   GstMppDec *mppdec = GST_MPP_DEC (decoder);
   MppPacket mpkt;
   MPP_RET ret;
+  gint64 deadline;
 
   /* It's safe to stop decoding immediately */
-  if (!drain) {
-    /* Interrupt the frame polling */
-    mppdec->mpi->reset (mppdec->mpp_ctx);
+  if (!drain)
     return FALSE;
-  }
 
   mpp_packet_init (&mpkt, NULL, 0);
   mpp_packet_set_eos (mpkt);
 
-  while (1) {
+  deadline = g_get_monotonic_time () + MPP_VIDEO_DEC_DRAIN_NO_PROGRESS_US;
+  while (g_get_monotonic_time () < deadline) {
     ret = mppdec->mpi->decode_put_packet (mppdec->mpp_ctx, mpkt);
-    if (!ret)
-      break;
+    if (ret == MPP_OK) {
+      mpp_packet_deinit (&mpkt);
+      return TRUE;
+    }
+
+    if (ret != MPP_ERR_BUFFER_FULL) {
+      GST_ERROR_OBJECT (decoder, "failed to send EOS packet: %d", ret);
+      goto error;
+    }
 
     g_usleep (1000);
   }
 
+  GST_ERROR_OBJECT (decoder, "timed out waiting for decoder input capacity");
+
+error:
+  *shutdown_result = GST_FLOW_ERROR;
+  mppdec->mpi->reset (mppdec->mpp_ctx);
   mpp_packet_deinit (&mpkt);
-  return TRUE;
+  return FALSE;
 }
 
 #define GST_TYPE_MPP_VIDEO_DEC_FORMAT (gst_mpp_video_dec_format_get_type ())

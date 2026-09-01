@@ -61,6 +61,20 @@ struct _GstMppH264Enc
   gint qp_ip;
 };
 
+typedef struct
+{
+  GstMppH264Profile profile;
+  gint level;
+  guint qp_init;
+  guint qp_min;
+  guint qp_max;
+  guint qp_min_i;
+  guint qp_max_i;
+  gint qp_ip;
+  MppEncRcMode rc_mode;
+  gboolean level_ok;
+} GstMppH264EncPropertiesSnapshot;
+
 #define parent_class gst_mpp_h264_enc_parent_class
 G_DEFINE_TYPE (GstMppH264Enc, gst_mpp_h264_enc, GST_TYPE_MPP_ENC);
 
@@ -161,6 +175,178 @@ gst_mpp_h264_enc_level_get_type (void)
   return level;
 }
 
+/*
+ * H.264 level limits, Table A-1 of ITU-T H.264. Identical values to MPP's own
+ * `level_infos[]` (mpp/codec/enc/h264/h264e_sps.c at the pinned 1.5.0-1), which
+ * is deliberate: MPP consults only max_mbs there, so this table extends the
+ * same numbers to the two axes it leaves unchecked while agreeing with it
+ * exactly on the one it does check.
+ *
+ * max_br is in units of cpbBrVclFactor bits/s -- 1000 for Baseline/Main, 1250
+ * for High (Table A-1's "cpbBrVclFactor" column) -- not bits/s.
+ *
+ * Ordered by increasing capability, which is NOT numeric level order: 1b is 99.
+ * Everything here therefore compares table indices, never level values.
+ */
+typedef struct
+{
+  gint level;
+  gint max_mbps;
+  gint max_mbs;
+  gint max_br;
+} GstMppH264LevelLimits;
+
+static const GstMppH264LevelLimits gst_mpp_h264_enc_level_limits[] = {
+  {10, 1485, 99, 64},
+  {99, 1485, 99, 128},          /* 1b */
+  {11, 3000, 396, 192},
+  {12, 6000, 396, 384},
+  {13, 11880, 396, 768},
+  {20, 11880, 396, 2000},
+  {21, 19800, 792, 4000},
+  {22, 20250, 1620, 4000},
+  {30, 40500, 1620, 10000},
+  {31, 108000, 3600, 14000},
+  {32, 216000, 5120, 20000},
+  {40, 245760, 8192, 20000},
+  {41, 245760, 8192, 50000},
+  {42, 522240, 8704, 50000},
+  {50, 589824, 22080, 135000},
+  {51, 983040, 36864, 240000},
+  {52, 2073600, 36864, 240000},
+  {60, 4177920, 139264, 240000},
+  {61, 8355840, 139264, 480000},
+  {62, 16711680, 139264, 800000},
+};
+
+#define GST_MPP_H264_LEVEL_1B 99
+
+static guint
+gst_mpp_h264_enc_level_index (gint level)
+{
+  guint i;
+
+  for (i = 0; i < G_N_ELEMENTS (gst_mpp_h264_enc_level_limits); i++) {
+    if (gst_mpp_h264_enc_level_limits[i].level == level)
+      return i;
+  }
+  return 0;
+}
+
+static guint
+gst_mpp_h264_enc_cpb_br_vcl_factor (GstMppH264Profile profile)
+{
+  return profile == GST_MPP_H264_PROFILE_HIGH ? 1250 : 1000;
+}
+
+/*
+ * The lowest level index whose frame size, macroblock rate AND bitrate limits
+ * all admit this configuration. 1b is skipped as a target exactly as MPP skips
+ * it, and an unreachable configuration saturates at the top level rather than
+ * wrapping to a small one.
+ */
+static guint
+gst_mpp_h264_enc_required_level_index (GstMppH264Profile profile,
+    const GstMppEncRateInfo * rate, gboolean * conforming)
+{
+  guint factor = gst_mpp_h264_enc_cpb_br_vcl_factor (profile);
+  guint64 mbs;
+  guint64 mb_ticks;
+  guint i;
+
+  mbs = (guint64) GST_ROUND_UP_16 (rate->width) *
+      GST_ROUND_UP_16 (rate->height) / 256;
+
+  /* The macroblock rate is compared by cross-multiplication rather than by
+   * evaluating mbs * fps_n / fps_d: the quotient is not an integer in general,
+   * and rounding it either way loses violations that sit inside one frame per
+   * second. Both denominators are positive, so the comparison is exact and the
+   * products stay well inside guint64 for any geometry GstVideoInfo accepts. */
+  mb_ticks = mbs * (guint64) rate->fps_n;
+
+  *conforming = TRUE;
+
+  for (i = 0; i < G_N_ELEMENTS (gst_mpp_h264_enc_level_limits); i++) {
+    const GstMppH264LevelLimits *limits = &gst_mpp_h264_enc_level_limits[i];
+
+    if (limits->level == GST_MPP_H264_LEVEL_1B)
+      continue;
+    if (mbs > (guint64) limits->max_mbs)
+      continue;
+    if (mb_ticks > (guint64) limits->max_mbps * (guint64) rate->fps_d)
+      continue;
+    if (rate->bitrate
+        && (guint64) rate->bitrate > (guint64) limits->max_br * factor)
+      continue;
+    return i;
+  }
+
+  *conforming = FALSE;
+  return G_N_ELEMENTS (gst_mpp_h264_enc_level_limits) - 1;
+}
+
+/*
+ * The level the bitstream actually conforms to, which is what the SPS and the
+ * src caps must both carry.
+ *
+ * MPP raises an under-declared level for frame size alone (h264e_sps.c only
+ * tests max_MBs), so a 1080p60 stream declared at level 4 keeps emitting an SPS
+ * that claims level 4 while exceeding its macroblock rate by 2x. Raising here
+ * is what MPP already does on the one axis it checks, extended to the two it
+ * does not.
+ *
+ * Raising rather than rejecting is deliberate and load-bearing where a higher
+ * conforming level EXISTS: `level` defaults to 4 and cerastream never sets it,
+ * so every shipped 1080p50/60, 1440p and 2160p profile would fail negotiation
+ * under a blanket rejection. A warning plus a conforming stream is the honest
+ * outcome there; a refusal to encode is not.
+ *
+ * When no level in the table can carry the stream there is nothing to raise to,
+ * and clamping to the top level would publish a level the bitstream is known to
+ * exceed -- the exact lie this fix exists to remove. That case returns FALSE and
+ * the apply is refused.
+ */
+static gboolean
+gst_mpp_h264_enc_effective_level (GstVideoEncoder * encoder,
+    GstMppH264Profile profile, gint declared, const GstMppEncRateInfo * rate,
+    gint * effective)
+{
+  gboolean conforming;
+  guint declared_index;
+  guint required_index;
+  gint required;
+
+  *effective = declared;
+
+  if (rate->width <= 0 || rate->height <= 0 || rate->fps_n <= 0
+      || rate->fps_d <= 0)
+    return TRUE;
+
+  declared_index = gst_mpp_h264_enc_level_index (declared);
+  required_index =
+      gst_mpp_h264_enc_required_level_index (profile, rate, &conforming);
+  required = gst_mpp_h264_enc_level_limits[required_index].level;
+
+  if (!conforming) {
+    GST_ERROR_OBJECT (encoder, "%dx%d@%d/%d fps at %u bps exceeds every H.264 "
+        "level, including %d; refusing to encode a stream no level can "
+        "describe", rate->width, rate->height, rate->fps_n, rate->fps_d,
+        rate->bitrate, required);
+    return FALSE;
+  }
+
+  if (required_index <= declared_index)
+    return TRUE;
+
+  GST_WARNING_OBJECT (encoder, "declared H.264 level %d cannot carry "
+      "%dx%d@%d/%d fps at %u bps; raising to level %d so the bitstream and its "
+      "SPS agree", declared, rate->width, rate->height, rate->fps_n,
+      rate->fps_d, rate->bitrate, required);
+
+  *effective = required;
+  return TRUE;
+}
+
 static void
 gst_mpp_h264_enc_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec)
@@ -168,12 +354,14 @@ gst_mpp_h264_enc_set_property (GObject * object,
   GstVideoEncoder *encoder = GST_VIDEO_ENCODER (object);
   GstMppH264Enc *self = GST_MPP_H264_ENC (encoder);
   GstMppEnc *mppenc = GST_MPP_ENC (encoder);
+  gboolean invalid = FALSE;
 
+  GST_MPP_ENC_PROP_LOCK (encoder);
   switch (prop_id) {
     case PROP_PROFILE:{
       GstMppH264Profile profile = g_value_get_enum (value);
       if (self->profile == profile)
-        return;
+        goto out;
 
       self->profile = profile;
       break;
@@ -181,7 +369,7 @@ gst_mpp_h264_enc_set_property (GObject * object,
     case PROP_LEVEL:{
       gint level = g_value_get_enum (value);
       if (self->level == level)
-        return;
+        goto out;
 
       self->level = level;
       break;
@@ -189,7 +377,7 @@ gst_mpp_h264_enc_set_property (GObject * object,
     case PROP_QP_INIT:{
       guint qp_init = g_value_get_uint (value);
       if (self->qp_init == qp_init)
-        return;
+        goto out;
 
       self->qp_init = qp_init;
       break;
@@ -197,7 +385,7 @@ gst_mpp_h264_enc_set_property (GObject * object,
     case PROP_QP_MIN:{
       guint qp_min = g_value_get_uint (value);
       if (self->qp_min == qp_min)
-        return;
+        goto out;
 
       self->qp_min = qp_min;
       break;
@@ -205,7 +393,7 @@ gst_mpp_h264_enc_set_property (GObject * object,
     case PROP_QP_MAX:{
       guint qp_max = g_value_get_uint (value);
       if (self->qp_max == qp_max)
-        return;
+        goto out;
 
       self->qp_max = qp_max;
       break;
@@ -213,7 +401,7 @@ gst_mpp_h264_enc_set_property (GObject * object,
     case PROP_QP_MIN_I:{
       guint qp_min_i = g_value_get_uint (value);
       if (self->qp_min_i == qp_min_i)
-        return;
+        goto out;
 
       self->qp_min_i = qp_min_i;
       break;
@@ -221,7 +409,7 @@ gst_mpp_h264_enc_set_property (GObject * object,
     case PROP_QP_MAX_I:{
       guint qp_max_i = g_value_get_uint (value);
       if (self->qp_max_i == qp_max_i)
-        return;
+        goto out;
 
       self->qp_max_i = qp_max_i;
       break;
@@ -229,17 +417,22 @@ gst_mpp_h264_enc_set_property (GObject * object,
     case PROP_QP_IP:{
       gint qp_ip = g_value_get_int (value);
       if (self->qp_ip == qp_ip)
-        return;
+        goto out;
 
       self->qp_ip = qp_ip;
       break;
     }
     default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
-      return;
+      invalid = TRUE;
+      goto out;
   }
 
   mppenc->prop_dirty = TRUE;
+
+out:
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+  if (invalid)
+    G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
 }
 
 static void
@@ -248,7 +441,9 @@ gst_mpp_h264_enc_get_property (GObject * object,
 {
   GstVideoEncoder *encoder = GST_VIDEO_ENCODER (object);
   GstMppH264Enc *self = GST_MPP_H264_ENC (encoder);
+  gboolean invalid = FALSE;
 
+  GST_MPP_ENC_PROP_LOCK (encoder);
   switch (prop_id) {
     case PROP_PROFILE:
       g_value_set_enum (value, self->profile);
@@ -275,15 +470,19 @@ gst_mpp_h264_enc_get_property (GObject * object,
       g_value_set_int (value, self->qp_ip);
       break;
     default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      invalid = TRUE;
       break;
   }
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+
+  if (invalid)
+    G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
 }
 
 static gboolean
-gst_mpp_h264_enc_set_src_caps (GstVideoEncoder * encoder)
+gst_mpp_h264_enc_set_src_caps (GstVideoEncoder * encoder,
+    GstMppH264Profile profile, gint level)
 {
-  GstMppH264Enc *self = GST_MPP_H264_ENC (encoder);
   GstStructure *structure;
   GstCaps *caps;
   gchar *string;
@@ -295,61 +494,104 @@ gst_mpp_h264_enc_set_src_caps (GstVideoEncoder * encoder)
       G_TYPE_STRING, "byte-stream", NULL);
   gst_structure_set (structure, "alignment", G_TYPE_STRING, "au", NULL);
 
-  string = g_enum_to_string (GST_TYPE_MPP_H264_ENC_PROFILE, self->profile);
+  string = g_enum_to_string (GST_TYPE_MPP_H264_ENC_PROFILE, profile);
   gst_structure_set (structure, "profile", G_TYPE_STRING, string, NULL);
   g_free (string);
 
-  string = g_enum_to_string (GST_TYPE_MPP_H264_ENC_LEVEL, self->level);
+  string = g_enum_to_string (GST_TYPE_MPP_H264_ENC_LEVEL, level);
   gst_structure_set (structure, "level", G_TYPE_STRING, string, NULL);
   g_free (string);
 
   return gst_mpp_enc_set_src_caps (encoder, caps);
 }
 
-static gboolean
-gst_mpp_h264_enc_apply_properties (GstVideoEncoder * encoder)
+static void
+gst_mpp_h264_enc_snapshot_properties (GstVideoEncoder * encoder,
+    gpointer snapshot)
 {
   GstMppH264Enc *self = GST_MPP_H264_ENC (encoder);
   GstMppEnc *mppenc = GST_MPP_ENC (encoder);
+  GstMppH264EncPropertiesSnapshot *properties = snapshot;
+  GstMppEncRateInfo rate;
 
-  if (G_LIKELY (!mppenc->prop_dirty))
-    return TRUE;
+  gst_mpp_enc_snapshot_rate_info (encoder, &rate);
 
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_init", self->qp_init);
+  properties->profile = self->profile;
+  /* The declared level is what the operator asked for; the effective one is
+   * what MPP is configured with and what the caps publish. They differ when the
+   * declared level cannot carry the negotiated rate. */
+  properties->level_ok = gst_mpp_h264_enc_effective_level (encoder,
+      self->profile, self->level, &rate, &properties->level);
+  properties->qp_init = self->qp_init;
+  properties->qp_min = self->qp_min;
+  properties->qp_max = self->qp_max;
+  properties->qp_min_i = self->qp_min_i;
+  properties->qp_max_i = self->qp_max_i;
+  properties->qp_ip = self->qp_ip;
+  properties->rc_mode = mppenc->rc_mode;
+}
 
-  if (mppenc->rc_mode == MPP_ENC_RC_MODE_FIXQP) {
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min", self->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max", self->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min_i", self->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max_i", self->qp_init);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_ip", 0);
-  } else {
-    /* MPP_ENC_RC_MODE_CBR/MPP_ENC_RC_MODE_VBR/MPP_ENC_RC_MODE_AVBR */
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min",
-        self->qp_min ? self->qp_min : 10);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max",
-        self->qp_max ? self->qp_max : 51);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_min_i",
-        self->qp_min_i ? self->qp_min_i : 10);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_max_i",
-        self->qp_max_i ? self->qp_max_i : 51);
-    mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "rc:qp_ip",
-        self->qp_ip >= 0 ? self->qp_ip : 2);
-  }
+static gboolean
+gst_mpp_h264_enc_configure_properties (GstVideoEncoder * encoder,
+    gconstpointer snapshot)
+{
+  GstMppEnc *mppenc = GST_MPP_ENC (encoder);
+  const GstMppH264EncPropertiesSnapshot *properties = snapshot;
 
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h264:profile", self->profile);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h264:level", self->level);
-
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h264:trans8x8",
-      self->profile == GST_MPP_H264_PROFILE_HIGH);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h264:cabac_en",
-      self->profile != GST_MPP_H264_PROFILE_BASELINE);
-  mpp_enc_cfg_set_s32 (mppenc->mpp_cfg, "h264:cabac_idc", 0);
-
-  if (!gst_mpp_enc_apply_properties (encoder))
+  /* Nothing is written for a stream no level can describe, so the level MPP
+   * holds stays the last one that was actually valid. */
+  if (!properties->level_ok)
     return FALSE;
 
-  return gst_mpp_h264_enc_set_src_caps (encoder);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_init", properties->qp_init);
+
+  if (properties->rc_mode == MPP_ENC_RC_MODE_FIXQP) {
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min_i", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max_i", properties->qp_init);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_ip", 0);
+  } else {
+    /* MPP_ENC_RC_MODE_CBR/MPP_ENC_RC_MODE_VBR/MPP_ENC_RC_MODE_AVBR */
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min",
+        properties->qp_min ? properties->qp_min : 10);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max",
+        properties->qp_max ? properties->qp_max : 51);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_min_i",
+        properties->qp_min_i ? properties->qp_min_i : 10);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_max_i",
+        properties->qp_max_i ? properties->qp_max_i : 51);
+    gst_mpp_enc_cfg_set_s32 (mppenc, "rc:qp_ip",
+        properties->qp_ip >= 0 ? properties->qp_ip : 2);
+  }
+
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h264:profile", properties->profile);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h264:level", properties->level);
+
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h264:trans8x8",
+      properties->profile == GST_MPP_H264_PROFILE_HIGH);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h264:cabac_en",
+      properties->profile != GST_MPP_H264_PROFILE_BASELINE);
+  gst_mpp_enc_cfg_set_s32 (mppenc, "h264:cabac_idc", 0);
+
+  return TRUE;
+}
+
+static gboolean
+gst_mpp_h264_enc_apply_properties (GstVideoEncoder * encoder)
+{
+  GstMppH264EncPropertiesSnapshot properties;
+  gboolean applied;
+
+  if (!gst_mpp_enc_apply_properties_full (encoder,
+          gst_mpp_h264_enc_snapshot_properties,
+          gst_mpp_h264_enc_configure_properties, &properties, &applied))
+    return FALSE;
+  if (!applied)
+    return TRUE;
+
+  return gst_mpp_h264_enc_set_src_caps (encoder, properties.profile,
+      properties.level);
 }
 
 static gboolean

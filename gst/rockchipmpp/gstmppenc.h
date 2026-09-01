@@ -42,6 +42,11 @@ struct _GstMppEnc
   GstVideoEncoder parent;
 
   GMutex mutex;
+  /* Runtime properties use a dedicated mutex rather than mutex above because
+   * the frame mutex spans MPP control calls. A separate lock lets the encode
+   * path acknowledge one coherent property snapshot, then release it before
+   * calling MPP, so property setters cannot deadlock behind the streaming path. */
+  GMutex prop_mutex;
   GstAllocator *allocator;
   GstVideoCodecState *input_state;
 
@@ -49,7 +54,7 @@ struct _GstMppEnc
   GstVideoInfo info;
 
   /* stop handling new frame when flushing */
-  gboolean flushing;
+  gint flushing;
 
   /* drop frames when flushing but not draining */
   gboolean draining;
@@ -60,7 +65,9 @@ struct _GstMppEnc
   /* Max number of pending frames */
   guint32 max_pending;
 
-  guint pending_frames;
+  /* Shared by the frame producer and output task. All accesses are atomic;
+   * event_mutex only sequences event_cond sleep/wake and never owns this value. */
+  gint pending_frames;
   GMutex event_mutex;
   GCond event_cond;
 
@@ -125,12 +132,52 @@ struct _GstMppEnc
   gboolean ref_dirty;
 
   MppEncCfg mpp_cfg;
+
+  /* Sticky for the life of mpp_cfg: set when MPP refuses a config key, which
+   * means the plugin's idea of the MPP config surface disagrees with the MPP it
+   * is running against. The key set is compile-time constant, so a refusal will
+   * repeat on every apply; latching it keeps a rejection from being lost in the
+   * window between the write and the MPP_ENC_SET_CFG that would report it. */
+  gboolean cfg_error;
+
   MppFrame mpp_frame;
 
   MppCodingType mpp_type;
   MppCtx mpp_ctx;
   MppApi *mpi;
 };
+
+#define GST_MPP_ENC_PROP_LOCK(encoder) \
+  g_mutex_lock (&GST_MPP_ENC (encoder)->prop_mutex)
+#define GST_MPP_ENC_PROP_UNLOCK(encoder) \
+  g_mutex_unlock (&GST_MPP_ENC (encoder)->prop_mutex)
+
+typedef void (*GstMppEncSnapshotPropertiesFunc) (GstVideoEncoder * encoder,
+    gpointer snapshot);
+
+/* FALSE means the codec cannot express this configuration at all. The apply is
+ * then refused at the MPP_ENC_SET_CFG boundary, the same place a rejected
+ * config key is refused, so nothing is handed to MPP and no caps are published. */
+typedef gboolean (*GstMppEncConfigurePropertiesFunc) (GstVideoEncoder * encoder,
+    gconstpointer snapshot);
+
+/* The three axes an H.264/H.265 level constrains.
+ *
+ * The framerate is the exact rational MPP is given (rc:fps_out_num over
+ * rc:fps_out_denorm), NOT a rounded integer: a level's rate ceiling can sit
+ * between two whole framerates, so 1080p at 753/25 fps exceeds H.264 level 4
+ * while the same stream truncated to 30 fps does not.
+ *
+ * bitrate is the peak MPP is configured for, or 0 when MPP is given no rate
+ * target and no bitrate limit can apply. */
+typedef struct
+{
+  gint width;
+  gint height;
+  gint fps_n;
+  gint fps_d;
+  guint bitrate;
+} GstMppEncRateInfo;
 
 #define MPP_ENC_IN_FORMATS \
     "NV12, I420, YUY2, UYVY, " \
@@ -143,7 +190,23 @@ struct _GstMppEnc
 #define MPP_ENC_FORMATS MPP_ENC_IN_FORMATS
 #endif
 
+/* Checked wrappers around mpp_enc_cfg_set_*. MPP answers MPP_NOK for a key it
+ * does not know and writes nothing, so an unchecked setter turns a misspelt or
+ * version-drifted key into a tunable that silently never takes effect. Every
+ * config write in this plugin goes through these. */
+gboolean gst_mpp_enc_cfg_set_s32 (GstMppEnc * self, const gchar * key,
+    gint value);
+gboolean gst_mpp_enc_cfg_set_u32 (GstMppEnc * self, const gchar * key,
+    guint value);
+
+void gst_mpp_enc_snapshot_rate_info (GstVideoEncoder * encoder,
+    GstMppEncRateInfo * rate);
+
 gboolean gst_mpp_enc_apply_properties (GstVideoEncoder * encoder);
+gboolean gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
+    GstMppEncSnapshotPropertiesFunc snapshot_codec_properties,
+    GstMppEncConfigurePropertiesFunc configure_codec_properties,
+    gpointer codec_snapshot, gboolean * applied);
 gboolean gst_mpp_enc_set_src_caps (GstVideoEncoder * encoder, GstCaps * caps);
 
 gboolean gst_mpp_enc_supported (MppCodingType mpp_type);

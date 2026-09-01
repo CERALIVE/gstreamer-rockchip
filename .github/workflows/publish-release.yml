@@ -1,0 +1,460 @@
+name: Publish Release
+
+# `workflow_dispatch` ONLY, and deliberately so. There is no `push:` and no
+# `tags:` trigger: this workflow publishes a package devices install, so cutting
+# a release is always a human decision. The version is DERIVED from the tags
+# that already exist (ci/next-release-version.sh), never typed into an input, so
+# the only thing an operator chooses is the channel and whether this is a
+# rehearsal.
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: Release channel
+        required: true
+        default: beta
+        type: choice
+        options:
+          - stable
+          - beta
+      dry_run:
+        description: >-
+          Build, gate, package and install-smoke ONLY — create no tag, no GitHub
+          release, and fire no apt-reindex dispatch.
+        type: boolean
+        default: true
+
+# NOT ref-scoped, on purpose. The release counter is derived from the tags that
+# exist at run time, so two concurrent runs would compute the SAME next counter
+# and collide on the tag. One release at a time — and never cancelled part-way
+# through publishing.
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# A container job's default shell is `sh -e`, and dash has no `pipefail`. Every
+# `run:` block here is bash; say so once rather than degrading each one.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  resolve:
+    name: Resolve target suite and release version
+    runs-on: ubuntu-latest
+    outputs:
+      suite: ${{ steps.suite.outputs.suite }}
+      glibc_floor: ${{ steps.suite.outputs.glibc_floor }}
+      gst_runtime_minor: ${{ steps.suite.outputs.gst_runtime_minor }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      channel: ${{ inputs.release_type }}
+      source_date_epoch: ${{ steps.version.outputs.source_date_epoch }}
+    steps:
+      # fetch-depth 0 is load-bearing: the counter is derived from existing
+      # tags, and a shallow checkout would see none and propose `+ceralive.1`
+      # over a release that already exists.
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # The suite reaches the build job as an OUTPUT, never `$GITHUB_ENV`.
+      # GitHub selects a job's `container:` before that job's first step runs,
+      # so a same-job export is structurally too late to name the image.
+      - name: Read ci/target-suite.env
+        id: suite
+        run: |
+          set -euo pipefail
+          # shellcheck source=ci/target-suite.env
+          source ci/target-suite.env
+          for key in TARGET_SUITE GLIBC_FLOOR GST_RUNTIME_MINOR; do
+            if [ -z "${!key:-}" ]; then
+              echo "ERROR: $key is not declared in ci/target-suite.env" >&2
+              exit 1
+            fi
+          done
+          {
+            echo "suite=${TARGET_SUITE}"
+            echo "glibc_floor=${GLIBC_FLOOR}"
+            echo "gst_runtime_minor=${GST_RUNTIME_MINOR}"
+          } >> "$GITHUB_OUTPUT"
+          echo "target suite ${TARGET_SUITE} · glibc floor ${GLIBC_FLOOR} · GStreamer ${GST_RUNTIME_MINOR}"
+
+      # The package is built ONCE, on the target suite, and must install and
+      # load on BOTH. Dropping the trixie leg would leave a real GStreamer 1.26
+      # gap invisible, so the leg set is asserted rather than trusted to review.
+      - name: Assert the install smoke covers both suites, including the target
+        run: |
+          set -euo pipefail
+          legs="$(sed -n 's/^[[:space:]]*suite: \[\(.*\)\]$/\1/p' .github/workflows/publish-release.yml)"
+          if [ -z "${legs}" ]; then
+            echo "ERROR: could not read the install-smoke matrix from this workflow" >&2
+            exit 1
+          fi
+          for required in bookworm trixie '${{ steps.suite.outputs.suite }}'; do
+            case ",${legs// /}," in
+              *",${required},"*) ;;
+              *)
+                echo "ERROR: the install-smoke matrix [${legs}] has no '${required}' leg." >&2
+                echo "       A trixie gap is a real GStreamer 1.26 problem; it must never be" >&2
+                echo "       masked by smoking bookworm alone." >&2
+                exit 1
+                ;;
+            esac
+          done
+          echo "install smoke legs: ${legs}"
+
+      - name: Derive the release version
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(bash ci/next-release-version.sh)"
+          {
+            echo "version=${version}"
+            echo "tag=${version}"
+            echo "source_date_epoch=$(git log -1 --pretty=%ct)"
+          } >> "$GITHUB_OUTPUT"
+          echo "next release version: ${version} (channel ${{ inputs.release_type }})"
+          if git rev-parse -q --verify "refs/tags/${version}" >/dev/null; then
+            echo "ERROR: tag ${version} already exists" >&2
+            exit 1
+          fi
+
+      - name: Run summary
+        run: |
+          {
+            echo "## Release plan"
+            echo
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| version | \`${{ steps.version.outputs.version }}\` |"
+            echo "| tag | \`${{ steps.version.outputs.tag }}\` |"
+            echo "| channel | \`${{ inputs.release_type }}\` |"
+            echo "| build suite | \`debian:${{ steps.suite.outputs.suite }}-slim\` |"
+            echo "| dry run | \`${{ inputs.dry_run }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Gate and package · debian:${{ needs.resolve.outputs.suite }} · arm64
+    needs: resolve
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: debian:${{ needs.resolve.outputs.suite }}-slim
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 200M
+      CERALIVE_GSTREAMER_ROCKCHIP_VERSION: ${{ needs.resolve.outputs.version }}
+      DEB_ARCH: arm64
+      SOURCE_DATE_EPOCH: ${{ needs.resolve.outputs.source_date_epoch }}
+    steps:
+      # The slim image has no git, and `actions/checkout` silently degrades to a
+      # history-less REST tarball without it. Base tooling installs BEFORE the
+      # checkout, not after.
+      - name: Install base tooling
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git
+
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install build dependencies (suite packages + pinned MPP/RGA)
+        run: bash ci/install-build-deps.sh
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-release-${{ needs.resolve.outputs.suite }}-arm64-${{ github.sha }}
+          restore-keys: |
+            ccache-release-${{ needs.resolve.outputs.suite }}-arm64-
+            ccache-${{ needs.resolve.outputs.suite }}-arm64-
+
+      - name: Configure bounded ccache
+        run: ccache -M "$CCACHE_MAXSIZE"
+
+      # Proves the container really ships the GStreamer the target contract
+      # claims. A base-image change that quietly moved the minor would otherwise
+      # ship a package built against a runtime nobody measured.
+      - name: Assert the container's GStreamer minor
+        run: |
+          set -euo pipefail
+          actual="$(pkg-config --modversion gstreamer-1.0 | cut -d. -f1,2)"
+          if [ "$actual" != "${{ needs.resolve.outputs.gst_runtime_minor }}" ]; then
+            echo "ERROR: debian:${{ needs.resolve.outputs.suite }}-slim ships GStreamer $actual," >&2
+            echo "       but ci/target-suite.env declares ${{ needs.resolve.outputs.gst_runtime_minor }}." >&2
+            exit 1
+          fi
+          echo "debian:${{ needs.resolve.outputs.suite }}-slim ships GStreamer $actual"
+
+      # `CC="ccache gcc"` is the meson way — meson has no compiler-launcher
+      # option, it reads the compiler out of the environment at setup time. The
+      # feature flags mirror packaging/build-deb.sh so the gates below run
+      # against the same four-plugin configuration the package ships.
+      - name: meson setup and compile
+        run: |
+          set -euo pipefail
+          export CC="ccache gcc"
+          meson setup build \
+            -Drkximage=enabled \
+            -Drockchipmpp=enabled \
+            -Dkmssrc=enabled \
+            -Drga=enabled
+          meson compile -C build
+
+      # ---------------------------------------------------------------------
+      # The FULL gate. Every one of these runs BEFORE packaging: a release that
+      # fails any of them must not produce a .deb at all, let alone publish one.
+      # ---------------------------------------------------------------------
+      - name: Gate 1/4 — meson test
+        run: meson test -C build --print-errorlogs
+
+      # parity-check.sh has two legs. The source-contract leg is deterministic
+      # and always runs; the runtime leg needs a Rockchip board, and the script
+      # signals that honest skip with exit 77 (its own documented contract —
+      # gst_mpp_enc_supported() refuses to register the encoders off-board).
+      # 77 is therefore a PASS-with-skip here and every other code is a failure.
+      # Collapsing them into `|| true` would retire the gate silently.
+      - name: Gate 2/4 — golden parity contract
+        run: |
+          set -uo pipefail
+          rc=0
+          bash tests/parity-check.sh || rc=$?
+          case "${rc}" in
+            0)  echo "parity: green — source contract AND runtime leg" ;;
+            77) echo "parity: green — source contract; runtime leg skipped off-board (exit 77)" ;;
+            *)  echo "parity: FAILED (exit ${rc})" >&2; exit "${rc}" ;;
+          esac
+
+      - name: Gate 3/4 — GLIBC floor
+        run: bash ci/check-glibc-floor.sh build/gst/rockchipmpp/libgstrockchipmpp.so
+
+      - name: Gate 4/4 — MPP ABI closure
+        run: bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so
+
+      - name: Package contract (static)
+        run: bash packaging/package-contract.sh
+
+      # ---------------------------------------------------------------------
+      # Packaging. Only reached once every gate above is green.
+      # ---------------------------------------------------------------------
+      - name: Build the Debian package
+        run: bash packaging/build-deb.sh
+
+      - name: Package contract (staged tree + dist)
+        run: bash packaging/package-contract.sh stage-deb-arm64 dist
+
+      # The gates above ran against the meson build tree. These re-run against
+      # the STRIPPED plugin the package actually ships, so the artifact itself
+      # is what carries the proof, not a sibling build of the same source.
+      - name: Re-gate the shipped plugin
+        run: |
+          set -euo pipefail
+          shipped="stage-deb-arm64/usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstrockchipmpp.so"
+          bash ci/check-glibc-floor.sh "${shipped}"
+          bash ci/check-mpp-abi.sh "${shipped}"
+
+      # F5: the release publishes EXACTLY ONE .deb. apt-worker's reindex
+      # downloads every .deb attached to the tag and hard-fails if any package
+      # name differs from the dispatched component, so a stray second archive is
+      # a publish failure, not a cosmetic one.
+      - name: Assemble and verify the release assets
+        run: |
+          set -euo pipefail
+          deb="dist/gstreamer1.0-rockchip-ceralive_${CERALIVE_GSTREAMER_ROCKCHIP_VERSION}_arm64.deb"
+          [ -f "${deb}" ] || { echo "ERROR: ${deb} was not produced" >&2; exit 1; }
+          ( cd dist && sha256sum "$(basename "${deb}")" > "$(basename "${deb}").sha256" )
+          # Set EQUALITY, not a count plus a spot check: counting to two and
+          # confirming the .deb exists would happily accept the .deb plus any
+          # stray file as the release payload.
+          expected="$(printf '%s\n%s\n' "$(basename "${deb}")" "$(basename "${deb}").sha256" | sort)"
+          actual="$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)"
+          if [ "${actual}" != "${expected}" ]; then
+            echo "ERROR: dist must hold exactly the .deb and its .sha256" >&2
+            { echo "expected:"; printf '%s\n' "${expected}" | sed 's/^/  /'; } >&2
+            { echo "actual:";   printf '%s\n' "${actual}"   | sed 's/^/  /'; } >&2
+            exit 1
+          fi
+          echo "release assets:"
+          printf '%s\n' "${actual}" | sed 's/^/  /'
+          cat "${deb}.sha256"
+
+      - name: Record the package control fields
+        run: |
+          set -euo pipefail
+          deb="dist/gstreamer1.0-rockchip-ceralive_${CERALIVE_GSTREAMER_ROCKCHIP_VERSION}_arm64.deb"
+          {
+            echo "## Package"
+            echo
+            echo '```'
+            dpkg-deb -I "${deb}"
+            echo '```'
+            echo
+            echo '<details><summary>contents</summary>'
+            echo
+            echo '```'
+            dpkg-deb -c "${deb}"
+            echo '```'
+            echo
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save ccache
+        if: success()
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-release-${{ needs.resolve.outputs.suite }}-arm64-${{ github.sha }}
+
+      - name: Upload the release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: dist
+          if-no-files-found: error
+
+  install-smoke:
+    name: Install smoke · debian:${{ matrix.suite }}
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      # Both legs always report. A trixie failure is a real GStreamer 1.26 gap
+      # and must be seen, not hidden behind a cancelled sibling.
+      fail-fast: false
+      matrix:
+        suite: [bookworm, trixie]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Download the release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: dist
+
+      # Fetched on the RUNNER, not inside the smoke container: pulling them in
+      # there would need curl and ca-certificates, and every package installed
+      # before the closure check is a library that could mask a missing Depends.
+      - name: Fetch the pinned runtime libraries
+        run: |
+          set -euo pipefail
+          # shellcheck source=ci/mpp-pin.env
+          source ci/mpp-pin.env
+          mkdir -p runtime-debs
+          bash ci/fetch-pinned-deb.sh "${MPP_RUNTIME_URL}" "${MPP_RUNTIME_SHA256}" "runtime-debs/${MPP_RUNTIME_DEB}"
+          bash ci/fetch-pinned-deb.sh "${RGA_RUNTIME_URL}" "${RGA_RUNTIME_SHA256}" "runtime-debs/${RGA_RUNTIME_DEB}"
+
+      - name: Clean-container install smoke
+        run: |
+          set -euo pipefail
+          deb="$(find dist -maxdepth 1 -name '*.deb')"
+          [ -n "${deb}" ] || { echo "ERROR: no .deb in the downloaded artifact" >&2; exit 1; }
+          docker run --rm \
+            -v "${PWD}:/work" -w /work \
+            "debian:${{ matrix.suite }}-slim" \
+            bash ci/install-smoke.sh "${deb}" runtime-debs
+
+  publish:
+    name: Publish release and dispatch apt reindex
+    needs: [resolve, build, install-smoke]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: dist
+
+      # The same F5 assertion as the build job, re-checked on the bytes about to
+      # be attached. The two jobs are separated by an artifact round-trip, and
+      # this is the last point at which an extra asset can still be refused.
+      - name: Assert exactly one .deb and its checksum
+        run: |
+          set -euo pipefail
+          deb="dist/gstreamer1.0-rockchip-ceralive_${{ needs.resolve.outputs.version }}_arm64.deb"
+          expected="$(printf '%s\n%s\n' "$(basename "${deb}")" "$(basename "${deb}").sha256" | sort)"
+          actual="$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)"
+          printf '%s\n' "${actual}" | sed 's/^/  /'
+          if [ "${actual}" != "${expected}" ]; then
+            echo "ERROR: the .deb / .sha256 pair is not the asset set" >&2
+            exit 1
+          fi
+          ( cd dist && sha256sum -c "$(basename "${deb}").sha256" )
+
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: gstreamer1.0-rockchip-ceralive ${{ needs.resolve.outputs.version }}
+          prerelease: ${{ inputs.release_type == 'beta' }}
+          files: |
+            dist/*.deb
+            dist/*.deb.sha256
+          fail_on_unmatched_files: true
+
+      # apt-worker's reindex.yml listens for `apt-reindex` and validates every
+      # field against its own allowlists; `component` must equal the Package
+      # name in the .deb and `repo` must be this repository's name.
+      - name: Dispatch apt-reindex to CERALIVE/apt-worker
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.CERALIVE_DISPATCH_TOKEN }}
+          repository: CERALIVE/apt-worker
+          event-type: apt-reindex
+          client-payload: >-
+            {"component":"gstreamer1.0-rockchip-ceralive","repo":"gstreamer-rockchip","channel":"${{ inputs.release_type }}","tag":"${{ needs.resolve.outputs.tag }}","version":"${{ needs.resolve.outputs.version }}"}
+
+  dry-run-report:
+    name: Dry run — what would have been published
+    needs: [resolve, build, install-smoke]
+    if: ${{ inputs.dry_run }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: dist
+
+      # A dry run proves everything except the two irreversible actions. It
+      # still renders the dispatch payload verbatim, so the shape apt-worker
+      # will validate is reviewable without firing it.
+      - name: Report the withheld release and dispatch
+        run: |
+          set -euo pipefail
+          payload='{"component":"gstreamer1.0-rockchip-ceralive","repo":"gstreamer-rockchip","channel":"${{ inputs.release_type }}","tag":"${{ needs.resolve.outputs.tag }}","version":"${{ needs.resolve.outputs.version }}"}'
+          python3 -c 'import json,sys; json.loads(sys.argv[1])' "${payload}"
+          {
+            echo "## Dry run — nothing was published"
+            echo
+            echo "No tag was created, no GitHub release exists, and no \`apt-reindex\`"
+            echo "dispatch was fired. Everything below was produced and verified."
+            echo
+            echo "### Assets that would have been attached"
+            echo
+            echo '```'
+            find dist -maxdepth 1 -type f | sort
+            echo '```'
+            echo
+            echo "### Release that would have been created"
+            echo
+            echo "- tag: \`${{ needs.resolve.outputs.tag }}\`"
+            echo "- prerelease: \`${{ inputs.release_type == 'beta' }}\`"
+            echo
+            echo "### repository_dispatch that would have been sent to CERALIVE/apt-worker"
+            echo
+            echo '```json'
+            echo "${payload}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$GITHUB_STEP_SUMMARY"
