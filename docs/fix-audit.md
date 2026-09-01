@@ -211,7 +211,8 @@ the same feature flags CI and `debian/rules` use
    the mandated different-agent adversarial review has NOT run. Self-review found
    no defect: diff is 5 insertions / 8 deletions confined to
    `gst_mpp_dec_update_video_info`, touches no frozen property and no encoder file.
-   Independently reviewed by a separate agent/model (oracle); confirmed via patch-ID comparison + git range-diff against the fetched upstream source (see `.omo/notepads/gstreamer-rockchip-fork/decisions.md` for the full review record).
+   Independently reviewed by a separate agent/model (oracle) and confirmed via
+   patch-ID comparison plus `git range-diff` against the fetched upstream source.
 
 ### d27ae92 — unmatched-PTS pending-frame bound
 
@@ -257,7 +258,8 @@ the same feature flags CI and `debian/rules` use
    frame list after releasing, and the rewritten no-match branch refs the frame it
    stores into `self->last_frame`, so the ref accounting stays balanced against the
    caller's drop path.
-   Independently reviewed by a separate agent/model (oracle); confirmed via patch-ID comparison + git range-diff against the fetched upstream source (see `.omo/notepads/gstreamer-rockchip-fork/decisions.md` for the full review record).
+   Independently reviewed by a separate agent/model (oracle) and confirmed via
+   patch-ID comparison plus `git range-diff` against the fetched upstream source.
 
 ### 3ccc1e3 — NOT PORTED (rejected with evidence)
 
@@ -301,7 +303,8 @@ the same feature flags CI and `debian/rules` use
    falsifier's favour — the baseline already carries 31ee8bd's content — which is
    the adjudication the 31ee8bd verify-delta work was scheduled to make; that work
    should confirm rather than re-derive it.
-   Independently reviewed by a separate agent/model (oracle); confirmed via patch-ID comparison + git range-diff against the fetched upstream source (see `.omo/notepads/gstreamer-rockchip-fork/decisions.md` for the full review record).
+   Independently reviewed by a separate agent/model (oracle) and confirmed via
+   patch-ID comparison plus `git range-diff` against the fetched upstream source.
 
 ### 31ee8bd — SKIP-ALREADY-PRESENT (verify-delta adjudication)
 

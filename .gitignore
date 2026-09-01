@@ -73,3 +73,4 @@ Build
 /build-deb-*
 /stage-deb-*
 /dist
+/test-results/
