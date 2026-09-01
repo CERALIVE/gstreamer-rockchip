@@ -2178,6 +2178,29 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    no MPP API call; the closure remains empty against pinned MPP 1.5.0-1.
 5. **Reviewer verdict** — `confirmed`. Confirmed by independent oracle review: FIX-22's RGA gate confirmed to reuse the SAME HAVE_RGA mechanism used elsewhere (not a parallel/divergent conditional), matching set_format's actual negotiation reality. FIX-23's 10-bit gate confirmed to derive from the same HAVE_NV12_10LE40/HAVE_NV16_10LE40 macros as the format table; trixie's CI run independently confirmed NV16_10LE40 correctly evaluates absent (pre-GStreamer-1.28), organically proving the conditional. Reference-config golden parity confirmed EXACT (mppvideodec 17/17, mppjpegdec 27/27, zero diff against Radxa runtime goldens) — the stricter-than-usual 'shrink only in non-deliverable configs' requirement satisfied.
 
+### Make release parity exercise capability-aware decoder goldens
+
+1. **Provenance SHA** — first-party test-infrastructure remediation against release
+   baseline `73b0e7720e6ed6f40d8903f18e6b29d64e7cd1c2`; no encoder or decoder logic changes.
+2. **Red/green outputs** — without the mock-MPP preload, the release command passes both
+   source contracts and exits `77` at `mpph264enc`, never inspecting a decoder. With the
+   existing mock seam, the pre-fix command passes both encoders and fails at
+   `mppvideodec` because the unconditional Radxa golden requires `NV16_10LE40` while
+   bookworm/1.22 and trixie/1.26 both omit `HAVE_NV16_10LE40`. GREEN preloads
+   `libmppmock.so`, points `GST_PLUGIN_PATH` at the built plugin, and selects the exact
+   decoder baseline from the generated `config.h`; all four elements pass in both suites.
+   A synthetic reference config defining `HAVE_NV16_10LE40` against the current
+   non-capable build fails with `mppvideodec omits NV16_10LE40`, proving the conditional
+   cannot turn a wrong capability set green. The immutable Radxa goldens are unchanged.
+3. **Hardware gate** — `hardware-independent`. `gst-inspect-1.0` loads the built plugin
+   through the same mock-MPP registration seam as the Meson plugin test, and that test now
+   invokes the full parity script on every build.
+4. **MPP ABI closure** — unchanged: test/workflow/golden selection only; no production
+   source or MPP call changed.
+5. **Reviewer verdict** — `needs-human-review`. This remediation changes the release-time
+   correctness gate itself and must remain unmerged until an independent reviewer confirms
+   the fail-closed workflow and both capability branches.
+
 ### Gate decoder 10-bit caps on available GStreamer formats
 
 1. **Provenance SHA** — first-party correction against task baseline
