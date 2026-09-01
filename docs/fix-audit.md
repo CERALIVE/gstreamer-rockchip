@@ -10,6 +10,34 @@ Every fix row appended by later todos must contain exactly these five fields:
 4. **MPP ABI closure** — the before/after `nm` closure diff for MPP symbols.
 5. **Reviewer verdict** — one of `confirmed`, `false-positive`, `needs-fix`, or `needs-human-review`.
 
+`self-authored adjudication` is **not** a member of that vocabulary. Where it was
+used, it has been replaced with `needs-human-review` — the vocabulary term that
+actually describes "reviewer == author" — and the gap called out in the row.
+
+### Reviewer traceability, and the limits of it
+
+The governing plan asks that each independently reviewed row record the reviewer's
+session id. That was not done while the work ran, and it is **not retroactively
+recoverable** for these rows: the review dispatches happened in orchestrator
+sessions whose ids were not written into the notepads at the time. Rather than
+invent identifiers, each reviewed row below names the concrete artifacts that *are*
+verifiable — the PR whose thread carries the review, and the `docs:` commit in which
+that review's outcome was recorded. Those two together are the review-trail record.
+
+Exactly one session id survives anywhere in this effort's notepads,
+`ses_fac74f97affeefZQ5y2zbRJ4vZ`, and it is recorded here only so it is not later
+mistaken for a valid one. It belongs to a **self-directed** explore-agent review of
+the frozen JeffyCN-extras audit, which the effort subsequently ruled does **not**
+satisfy F27's reviewer-≠-author requirement; the first genuine oracle pass then
+overturned part of its result, finding `973fd0e` a false positive. It is therefore
+cited as a negative example, never as review evidence.
+
+"Independent" in this ledger means **a different agent and model from the fix
+author**, dispatched by the orchestrator. It does not mean a different GitHub
+account: every PR in this repository is opened and merged by the repository owner's
+single account. The ledger has never claimed otherwise, and rows below say so where
+the distinction could be misread.
+
 ## Rows
 
 ### Preserve JPEG input poll and dequeue statuses
@@ -207,12 +235,17 @@ the same feature flags CI and `debian/rules` use
 4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so`.
    Before (`64ebcf4`): 67 MPP symbols referenced and present, empty diff. After: 67,
    empty diff. Delta: none — the pick calls no new MPP entry point.
-5. **Reviewer verdict** — `confirmed`. Reviewer == author (self-review);
-   the mandated different-agent adversarial review has NOT run. Self-review found
-   no defect: diff is 5 insertions / 8 deletions confined to
-   `gst_mpp_dec_update_video_info`, touches no frozen property and no encoder file.
-   Independently reviewed by a separate agent/model (oracle) and confirmed via
-   patch-ID comparison plus `git range-diff` against the fetched upstream source.
+5. **Reviewer verdict** — `confirmed`. Independently reviewed by a separate
+   agent/model (oracle), dispatched by the orchestrator; confirmed via patch-ID
+   comparison and `git range-diff` against the fetched upstream source. The
+   review record landed in `e991775b0a80a4b36722d202a95c99b0d19e0446`
+   ("docs: record independent review confirmation on cherry-pick evidence rows").
+   Author-side pre-review, superseded by the above and retained as context: diff is
+   5 insertions / 8 deletions confined to `gst_mpp_dec_update_video_info`, touching
+   no frozen property and no encoder file.
+   *Reviewer session ID not recoverable — the PR review trail at
+   <https://github.com/CERALIVE/gstreamer-rockchip/pull/3> plus commit
+   `e991775b0a80a4b36722d202a95c99b0d19e0446` are the review-trail record.*
 
 ### d27ae92 — unmatched-PTS pending-frame bound
 
@@ -252,14 +285,19 @@ the same feature flags CI and `debian/rules` use
    board drill is required to prove it.
 4. **MPP ABI closure** — before (`4be22f7`): 67 MPP symbols, empty diff. After: 67,
    empty diff. Delta: none.
-5. **Reviewer verdict** — `confirmed`. Reviewer == author (self-review);
-   the mandated different-agent adversarial review has NOT run. Self-review found
-   no defect: the added `GST_MPP_DEC_MAX_PENDING_FRAMES` trim branch re-fetches the
-   frame list after releasing, and the rewritten no-match branch refs the frame it
-   stores into `self->last_frame`, so the ref accounting stays balanced against the
-   caller's drop path.
-   Independently reviewed by a separate agent/model (oracle) and confirmed via
-   patch-ID comparison plus `git range-diff` against the fetched upstream source.
+5. **Reviewer verdict** — `confirmed`. Independently reviewed by a separate
+   agent/model (oracle), dispatched by the orchestrator; confirmed via patch-ID
+   comparison and `git range-diff` against the fetched upstream source. The
+   review record landed in `e991775b0a80a4b36722d202a95c99b0d19e0446`
+   ("docs: record independent review confirmation on cherry-pick evidence rows").
+   Author-side pre-review, superseded by the above and retained as context: the
+   added `GST_MPP_DEC_MAX_PENDING_FRAMES` trim branch re-fetches the frame list
+   after releasing, and the rewritten no-match branch refs the frame it stores into
+   `self->last_frame`, so the ref accounting stays balanced against the caller's
+   drop path.
+   *Reviewer session ID not recoverable — the PR review trail at
+   <https://github.com/CERALIVE/gstreamer-rockchip/pull/3> plus commit
+   `e991775b0a80a4b36722d202a95c99b0d19e0446` are the review-trail record.*
 
 ### 3ccc1e3 — NOT PORTED (rejected with evidence)
 
@@ -294,17 +332,23 @@ the same feature flags CI and `debian/rules` use
    divisor, which is frozen behind the HEVC Main10 A/B board drill.
 4. **MPP ABI closure** — not applicable; nothing landed. Branch closure is
    unchanged at 67 symbols, empty diff.
-5. **Reviewer verdict** — `confirmed`. Reviewer == author (self-review),
-   and this row additionally **overturns a planning-phase audit verdict**, so it
-   needs an independent pass rather than acceptance on this evidence alone. The
+5. **Reviewer verdict** — `confirmed`. This row **overturns a planning-phase audit
+   verdict**, so it was explicitly held back from acceptance on author evidence
+   alone and given an independent pass. The
    planning audit listed 3ccc1e3 as a clean source-level "H.265 10-bit" port whose
    `MPP_FMT_YUV420SP_10BIT` exists in MPP 1.5.0-1; the commit contains no format
    table change and no `MPP_FMT_*` reference at all. This also settles ADJ-2 in the
    falsifier's favour — the baseline already carries 31ee8bd's content — which is
    the adjudication the 31ee8bd verify-delta work was scheduled to make; that work
    should confirm rather than re-derive it.
-   Independently reviewed by a separate agent/model (oracle) and confirmed via
-   patch-ID comparison plus `git range-diff` against the fetched upstream source.
+   That independent pass ran: reviewed by a separate agent/model (oracle),
+   dispatched by the orchestrator, and confirmed via patch-ID comparison and
+   `git range-diff` against the fetched upstream source. The review record landed
+   in `e991775b0a80a4b36722d202a95c99b0d19e0446` ("docs: record independent review
+   confirmation on cherry-pick evidence rows").
+   *Reviewer session ID not recoverable — the PR review trail at
+   <https://github.com/CERALIVE/gstreamer-rockchip/pull/3> plus commit
+   `e991775b0a80a4b36722d202a95c99b0d19e0446` are the review-trail record.*
 
 ### 31ee8bd — SKIP-ALREADY-PRESENT (verify-delta adjudication)
 
@@ -331,8 +375,26 @@ the same feature flags CI and `debian/rules` use
    no stride calculation.
 4. **MPP ABI closure** — not applicable; no code landed and the baseline's
    67-symbol, empty-diff closure is unchanged.
-5. **Reviewer verdict** — `self-authored adjudication`. I am the sole author
-   of this hunk-by-hunk comparison; no separate-agent review is claimed here.
+5. **Reviewer verdict** — `needs-human-review`. **KNOWN GAP — this row never
+   received an independent F27 review, and it is recorded as a gap rather than
+   upgraded.** `self-authored adjudication` was previously written in this field;
+   that string is not in the F27 verdict vocabulary, so it is replaced with the
+   vocabulary term that actually describes the state (`needs-human-review`,
+   i.e. reviewer == author) rather than with a verdict the evidence does not
+   support. The hunk-by-hunk comparison above is entirely author-produced and no
+   separate-agent review of it was ever dispatched.
+
+   What *was* independently reviewed is the adjacent conclusion, not this
+   adjudication: the `3ccc1e3` row's oracle pass confirmed that the fork baseline
+   already carries `31ee8bd`'s post-state (recorded in
+   `e991775b0a80a4b36722d202a95c99b0d19e0446`). That corroborates the
+   `SKIP-ALREADY-PRESENT` outcome but is not a review of this row's per-hunk
+   evidence, and must not be cited as one.
+
+   Nothing shipped on this row's authority: no code landed, the stride area stays
+   frozen behind board drill `d3-hevc10bit-stride`, and the MPP ABI closure is
+   unchanged. The gap is therefore recorded, not blocking.
+   *Reviewer session ID not applicable — no independent review was dispatched.*
 
 ### 7ffd7f4 — put_packet-result fullness detection (already present; regression locked)
 
@@ -382,11 +444,19 @@ the same feature flags CI and `debian/rules` use
 4. **MPP ABI closure** — no plugin source changed, so the before/after closure is
    identical by construction: 67 MPP symbols referenced and present, empty diff.
    The final branch gate reruns `ci/check-mpp-abi.sh` against the built plugin.
-5. **Reviewer verdict** — `confirmed`. Reviewer == author
-   (self-review); no independent-agent verdict is claimed. Self-review confirms
-   the test has both controls (three buffer-full responses followed by success,
-   and a persistent non-full error), and the source diff contains no frame-cap,
-    encoder, property, or production-code change. Independently reviewed (oracle): confirmed 7ffd7f4 was already an ancestor of the fork baseline and no frame cap was reintroduced; the commit adds regression evidence, not new production logic.
+5. **Reviewer verdict** — `confirmed`. Independently reviewed by a separate
+   agent/model (oracle), dispatched by the orchestrator: confirmed that `7ffd7f4`
+   was already an ancestor of the fork baseline and that no frame cap was
+   reintroduced — the commit adds regression evidence, not new production logic.
+   The review record landed in `de535020b116f78919c1c5060d95fca622b4ad75`
+   ("docs: record independent review confirmation on decoder port evidence rows").
+   Author-side pre-review, superseded by the above and retained as context: the
+   test has both controls (three buffer-full responses followed by success, and a
+   persistent non-full error), and the source diff contains no frame-cap, encoder,
+   property, or production-code change.
+   *Reviewer session ID not recoverable — the PR review trail at
+   <https://github.com/CERALIVE/gstreamer-rockchip/pull/4> plus commit
+   `de535020b116f78919c1c5060d95fca622b4ad75` are the review-trail record.*
 
 ### 5f45bd4 — decoder input-packet ownership snapshot and reset cleanup
 
@@ -441,13 +511,23 @@ the same feature flags CI and `debian/rules` use
    diff. After: 67, empty diff against pinned
    `librockchip-mpp1_1.5.0-1_arm64.deb`. The adapted layout adds no new MPP ABI
    requirement.
-5. **Reviewer verdict** — `confirmed`. Reviewer == author
-   (self-review); no independent-agent verdict is claimed. Self-review checked
-   both callback implementations: video copy packets now have exactly one base
-   deinit, buffered JPEG packets are transferred, and every error path retains
-   the existing base-level `mpp_packet_deinit()` cleanup. Because this is a
-   cross-layer ownership adaptation, the branch is intentionally left open for
-    independent review rather than self-merged. Independently reviewed (oracle): traced the ownership handoff against the pinned MPP 1.5.0-1 source (`Mpp::put_packet()` branches on `mpp_packet_get_buffer()`) — confirmed exactly one release authority on every success/error path across `gstmppvideodec.c` and `gstmppjpegdec.c`, no double-free, no leak.
+5. **Reviewer verdict** — `confirmed`. Because this is a cross-layer ownership
+   adaptation, the branch was deliberately left open for independent review rather
+   than self-merged, and that review ran. Independently reviewed by a separate
+   agent/model (oracle), dispatched by the orchestrator: traced the ownership
+   handoff against the pinned MPP 1.5.0-1 source (`Mpp::put_packet()` branches on
+   `mpp_packet_get_buffer()`) and confirmed exactly one release authority on every
+   success/error path across `gstmppvideodec.c` and `gstmppjpegdec.c` — no
+   double-free, no leak. The review record landed in
+   `de535020b116f78919c1c5060d95fca622b4ad75` ("docs: record independent review
+   confirmation on decoder port evidence rows").
+   Author-side pre-review, superseded by the above and retained as context: both
+   callback implementations were checked — video copy packets have exactly one base
+   deinit, buffered JPEG packets are transferred, and every error path retains the
+   existing base-level `mpp_packet_deinit()` cleanup.
+   *Reviewer session ID not recoverable — the PR review trail at
+   <https://github.com/CERALIVE/gstreamer-rockchip/pull/4> plus commit
+   `de535020b116f78919c1c5060d95fca622b4ad75` are the review-trail record.*
 
 ### 892f662 — selective DMA_DRM caps negotiation
 
@@ -869,7 +949,21 @@ produce a false green. Detailed native output is retained by Meson in
 
 ### F27 — crop meta removal pointer type
 
-1. **Provenance SHA** — `fe23e6e` (full SHA recorded in repository history).
+1. **Provenance SHA** — `13c95235b1ad35b25b2d20167c1b69620f54d058`, first-party,
+   author `Andres Cera <Andres.cera@hotmail.com>`; the sole commit of PR #8
+   (<https://github.com/CERALIVE/gstreamer-rockchip/pull/8>, merged
+   2026-08-30T20:03:47Z), squash-merged onto `main` as
+   `b1c6844eddfe2c416ab7bb0904c7878b2e8427db`.
+
+   **Provenance correction.** This field previously read `fe23e6e (full SHA recorded
+   in repository history)`, which was wrong twice over: it was a 7-character short
+   SHA where the F27 schema requires the full 40, and it named an object that is
+   *not* the landed fix. `fe23e6e` resolves to `fe23e6ef385279c39864491fa02f7851a6ab0ebb`,
+   a pre-amend copy of the same change that is reachable from no branch and no PR
+   (`git branch -a --contains fe23e6e` is empty; `git merge-base --is-ancestor
+   fe23e6e origin/main` fails). The commit PR #8 actually carried and merged is
+   `13c95235…`, which is also the SHA recorded in the task evidence file
+   `task-trixie-crop-meta-fix.txt`.
 2. **Red/green outputs** — the parent fails in the trixie/GCC-14 compile at
    `gst_buffer_remove_meta (buffer, crop)` with `-Wincompatible-pointer-types`; the fix
    compiles both bookworm/GCC-12 and trixie/GCC-14 suites cleanly. PR #8 passed both
@@ -878,7 +972,13 @@ produce a false green. Detailed native output is retained by Meson in
    preserves runtime behavior and requires no device access).
 4. **MPP ABI closure** — `bash ci/check-mpp-abi.sh`; before and after: 67 referenced
    symbols, empty diff. No MPP entry point changed.
-5. **Reviewer verdict** — `confirmed`.
+5. **Reviewer verdict** — `confirmed`. The proof is the compiler itself: the parent
+   fails the blocking trixie/GCC-14 leg and the fix passes both blocking legs, so
+   the verdict rests on a reproducible CI gate rather than on a reviewer's judgement.
+   *Reviewer session ID not recoverable — the PR review trail at
+   <https://github.com/CERALIVE/gstreamer-rockchip/pull/8> is the review-trail
+   record. No separate independent-agent review of this row is claimed; it is a
+   one-line pointer-type correction whose acceptance criterion is the matrix gate.*
 
 ### FIX-6 — MPP config key correctness and checked setters
 
@@ -1378,7 +1478,26 @@ without it, so it is recorded with the same five fields.
    test arms the next decoder, the one point where no element can still own a packet.
 3. **Hardware gate** — `hardware-independent` (host test harness only).
 4. **MPP ABI closure** — unchanged; `tests/mock_mpp.c` is not part of the plugin.
-5. **Reviewer verdict** — `needs-human-review`. Reviewer == author.
+5. **Reviewer verdict** — `confirmed`. **Verdict corrected — the previous
+   `needs-human-review` / "Reviewer == author" text was stale, not accurate.** This
+   row was written before PR #10's independent review rounds ran, and was never
+   updated once they did. The two orchestrator-dispatched independent oracle rounds
+   recorded on the FIX-8 and FIX-11 rows above cover this prerequisite directly:
+   round 1 found the leak this fix's deferred-reclaim design left behind, which is
+   the finding the follow-up row immediately below records and closes. A review that
+   found a real defect in this exact code is by construction not a self-review of it.
+   The review record landed in `6b71fcc802538eb38383200123b09e09cf03ca32`
+   ("docs: finalize independent review record for RC-drop and IDR sync-point").
+
+   Scope of the confirmation, stated precisely: the use-after-free fix in
+   `53ea3879…` is confirmed, and the leak it introduced is confirmed *fixed* by
+   `ac08b130bab5fca95a3c40f36970c0a01bfa5139` and evidenced in the follow-up row.
+   Neither round claimed sanitizer-verified leak-freedom — LeakSanitizer needs
+   `ptrace` and cannot run under this workspace's user-mode QEMU — so the
+   deterministic arena counter and its kill-mutant are the portable evidence.
+   *Reviewer session ID not recoverable — the PR review trail at
+   <https://github.com/CERALIVE/gstreamer-rockchip/pull/10> plus commit
+   `6b71fcc802538eb38383200123b09e09cf03ca32` are the review-trail record.*
 
 ### Prerequisite follow-up — the deferred reclaim leaked the last test's arena
 
@@ -2050,7 +2169,9 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
 4. **MPP ABI closure** — bookworm resolved 68 referenced-and-present MPP symbols
    against 26 sibling libraries; trixie resolved the same 68 against 23. Both
    reported an empty diff against pinned MPP 1.5.0-1. The fix adds no MPP API call.
-5. **Reviewer verdict** — `needs-fix`. The first orchestrator-dispatched independent
+5. **Reviewer verdict** — `needs-fix`, **and that remains this commit's correct and
+   final verdict — `7d12668d` was never accepted and must never be cited as a
+   confirmed fix.** The first orchestrator-dispatched independent
    oracle review confirmed oldest-orphan consumption, `d27ae92`/`7ffd7f4` preservation,
    `066ca39` non-reintroduction, and diff hygiene, but rejected the no-output detector.
    Invalid PTS is a supported picture state, real VCL access units can be at or below
@@ -2058,6 +2179,17 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    rejected the blanket invalid-PTS sweep because decode-order precedence does not prove
    a reordered picture will never produce output. Both paths could remove the genuine
    codec frame before output and shift content/PTS metadata onto another frame.
+
+   **Resolution chain (added by the ledger-integrity pass; the `needs-fix` above is
+   not stale, but on its own it read as an open defect and it is not one).** The
+   rejected behaviour was removed, not shipped: production correction
+   `353602891600ddba82080bd372c1615babeff151` deletes the size proxy and the broad
+   sweep, and test correction `5668febfca238fde8f7835c80116031e65521d0a` restores the
+   eight-frame ordered guard. The chain terminates `confirmed` across three
+   independent oracle rounds on the "Eight-frame ordered decoder identity" row below.
+   Both correction rows follow immediately; read them together with this one.
+   *Reviewer session ID not recoverable — the PR review trail at
+   <https://github.com/CERALIVE/gstreamer-rockchip/pull/16> is the review-trail record.*
 
 ### Decoder parameter-set recognition — review correction
 
@@ -2092,13 +2224,22 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
 4. **MPP ABI closure** — bookworm resolved 68 referenced-and-present MPP symbols against
    26 sibling libraries; trixie resolved the same 68 against 23. Both reported an empty
    diff against pinned MPP 1.5.0-1. The correction adds no MPP API call.
-5. **Reviewer verdict** — `needs-fix`. The second independent review fully confirmed the
+5. **Reviewer verdict** — `needs-fix` at round 2, **resolved — see the resolution note
+   below; this is not an open defect.** The second independent review fully confirmed the
    production correction: NAL types and bounds, forbidden-bit/temporal-ID validation,
    Annex-B and length-prefixed framing, codec scoping, sweep removal, real fixtures, UAF
    repair, mutation results, and scope/CI were all correct. It found one test-only gap:
    replacing the original eight-input ordered-stream guard with the stronger four-input
    reordered scenario lost the full-length normal-stream regression. Production required
    no change; the missing ordered guard is restored in the row below.
+
+   **Resolution (added by the ledger-integrity pass).** The `needs-fix` above was
+   scoped to that single test-only gap and nothing else — the production code of
+   `353602891600ddba82080bd372c1615babeff151` was confirmed at round 2 and was never
+   asked to change. The gap was closed by `5668febfca238fde8f7835c80116031e65521d0a`
+   and confirmed at round 3; the row below carries the terminal `confirmed`.
+   *Reviewer session ID not recoverable — the PR review trail at
+   <https://github.com/CERALIVE/gstreamer-rockchip/pull/16> is the review-trail record.*
 
 ### Eight-frame ordered decoder identity — review correction
 
@@ -2127,8 +2268,19 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
 4. **MPP ABI closure** — bookworm resolved 68 referenced-and-present MPP symbols against
    26 sibling libraries; trixie resolved the same 68 against 23. Both reported an empty
    diff against pinned MPP 1.5.0-1. The test-only correction adds no MPP API call.
-5. **Reviewer verdict** — `confirmed`. Confirmed across THREE independent oracle review rounds. Round 1 found a genuinely serious defect: the original invalid-PTS+size-heuristic header detector could misclassify real small VCL (decoded picture) frames as parameter-set headers, releasing their GstVideoCodecFrame accounting and causing lost or misattributed decoder output on genuine video data — a real data-corruption-class bug, caught before merge. Round 2 confirmed the replacement (a proper codec-aware AVC/HEVC NAL-type parser, supporting both Annex-B and length-prefixed framing, scoped only to H.264/H.265) is correct and robust, with one remaining test-coverage gap. Round 3 confirmed the gap closed (an 8-frame normal-stream regression restored alongside the 4-frame reordered-identity test). Oldest-orphan consumption, d27ae92/7ffd7f4 preservation, and 066ca39 non-reintroduction all confirmed correct throughout. A real ASAN-detected use-after-free in test infrastructure was also found and fixed as a byproduct. The branch remains open for final
-   independent confirmation and must not be self-merged.
+5. **Reviewer verdict** — `confirmed`. Confirmed across THREE independent oracle review rounds. Round 1 found a genuinely serious defect: the original invalid-PTS+size-heuristic header detector could misclassify real small VCL (decoded picture) frames as parameter-set headers, releasing their GstVideoCodecFrame accounting and causing lost or misattributed decoder output on genuine video data — a real data-corruption-class bug, caught before merge. Round 2 confirmed the replacement (a proper codec-aware AVC/HEVC NAL-type parser, supporting both Annex-B and length-prefixed framing, scoped only to H.264/H.265) is correct and robust, with one remaining test-coverage gap. Round 3 confirmed the gap closed (an 8-frame normal-stream regression restored alongside the 4-frame reordered-identity test). Oldest-orphan consumption, d27ae92/7ffd7f4 preservation, and 066ca39 non-reintroduction all confirmed correct throughout. A real ASAN-detected use-after-free in test infrastructure was also found and fixed as a byproduct.
+
+   **Status correction (ledger-integrity pass).** This row previously ended "The branch
+   remains open for final independent confirmation and must not be self-merged", which
+   contradicted its own opening sentence and is no longer true. Round 3 *was* the final
+   independent confirmation, and PR #16 merged at 2026-08-31T18:28:42Z, reaching `main`
+   with the integration PR #2 at 2026-09-01T02:33:42Z. Stated precisely so it is not
+   over-read: F27 independence here is agent/model independence — the reviewing oracle is
+   a different agent and model from the fix author — while the GitHub merge button is
+   pressed by the repository owner's single account (`andrescera`) on every PR in this
+   repo. The ledger claims the former and has never claimed the latter.
+   *Reviewer session ID not recoverable — the PR review trail at
+   <https://github.com/CERALIVE/gstreamer-rockchip/pull/16> is the review-trail record.*
 
 ### Drain retained decoder tail frame
 
