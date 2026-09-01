@@ -1,0 +1,2 @@
+gst/rockchipmpp/gstmppenc.c -text whitespace=cr-at-eol
+gst/rockchipmpp/gstmppenc.h -text whitespace=cr-at-eol

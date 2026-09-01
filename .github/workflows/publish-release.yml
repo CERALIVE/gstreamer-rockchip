@@ -54,6 +54,14 @@ jobs:
       channel: ${{ inputs.release_type }}
       source_date_epoch: ${{ steps.version.outputs.source_date_epoch }}
     steps:
+      - name: Require the main release ref
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "ERROR: releases may run only from refs/heads/main, not $GITHUB_REF" >&2
+            exit 1
+          fi
+
       # fetch-depth 0 is load-bearing: the counter is derived from existing
       # tags, and a shallow checkout would see none and propose `+ceralive.1`
       # over a release that already exists.
@@ -214,22 +222,12 @@ jobs:
       - name: Gate 1/4 — meson test
         run: meson test -C build --print-errorlogs
 
-      # parity-check.sh has two legs. The source-contract leg is deterministic
-      # and always runs; the runtime leg needs a Rockchip board, and the script
-      # signals that honest skip with exit 77 (its own documented contract —
-      # gst_mpp_enc_supported() refuses to register the encoders off-board).
-      # 77 is therefore a PASS-with-skip here and every other code is a failure.
-      # Collapsing them into `|| true` would retire the gate silently.
+      # The mock MPP is the hardware-independent registration seam used by the
+      # Meson plugin test. Keep that preload and the build's generated config in
+      # this release gate so parity reaches both decoder comparisons. Exit 77 is
+      # not accepted here: it means this required seam stopped working.
       - name: Gate 2/4 — golden parity contract
-        run: |
-          set -uo pipefail
-          rc=0
-          bash tests/parity-check.sh || rc=$?
-          case "${rc}" in
-            0)  echo "parity: green — source contract AND runtime leg" ;;
-            77) echo "parity: green — source contract; runtime leg skipped off-board (exit 77)" ;;
-            *)  echo "parity: FAILED (exit ${rc})" >&2; exit "${rc}" ;;
-          esac
+        run: sh tests/parity_with_mock.sh "$GITHUB_WORKSPACE/build" "$GITHUB_WORKSPACE"
 
       - name: Gate 3/4 — GLIBC floor
         run: bash ci/check-glibc-floor.sh build/gst/rockchipmpp/libgstrockchipmpp.so
