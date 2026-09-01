@@ -2430,7 +2430,9 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    invokes the full parity script on every build.
 4. **MPP ABI closure** — unchanged: test/workflow/golden selection only; no production
    source or MPP call changed.
-5. **Reviewer verdict** — `needs-human-review`. The first independent review confirmed the
+5. **Reviewer verdict** — `confirmed`; independent oracle review session
+   `ses_fa43dc657ffeN6R3238CMHNsN6` returned CONFIRMED/MERGE, and PR #25 is merged. The
+   first independent review confirmed the
    mock wiring, exit-77 propagation, capability selection, explicit wrong-omission failure,
    and zero semantic encoder delta, then requested three test-infrastructure hardenings:
    cleanup on normalizer failure, pinned hashes for the immutable reference goldens, and an
@@ -2440,8 +2442,8 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    record, while additional property records remain allowed by the established contract.
    Regression controls reject duplicate caps, changed caps, an unsupported NV16
    advertisement, and an omitted supported NV16 format. Both suite tests remain green.
-   This remediation changes the release-time correctness gate itself and must remain
-   unmerged until final independent confirmation.
+   This remediation changed the release-time correctness gate itself and was merged
+   after final independent confirmation.
 
 ### Gate decoder 10-bit caps on available GStreamer formats
 
