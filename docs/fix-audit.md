@@ -46,11 +46,19 @@ reported outcome* — written by the same account that authored the fix, so on i
 proves a result was recorded, not, circularly, that a review happened. The session id is
 the primary evidence; the commit is its timestamp.
 
-**Where an id is absent, the row says which of two things is true**, and never blurs
-them: either no independent review was dispatched at all (the `31ee8bd` and packet-arena
-rows — a genuine gap), or a review is believed to have run but no session id was located
-by the session-history lookup that recovered the five above (the crop-meta row). Neither
-is described as unrecoverable-in-principle.
+**Where an id is absent it is because no independent review was dispatched** — for the
+`31ee8bd`, packet-arena and crop-meta rows alike. That is a genuine gap in the first two
+cases and a deliberate design choice in the third, but in none of them is a missing id
+explained away as a lookup failure.
+
+An earlier revision of this paragraph offered a second category — "a review is believed
+to have run but no session id was located" — and filed the crop-meta row under it. That
+was unfounded, and independent review said so. Nothing supports a crop-meta review having
+been dispatched: unlike every other reviewed area in this ledger it has no
+`docs: record independent review confirmation …` commit, PR #8 carries zero comments and
+zero reviews, and its own row never claimed a reviewer in the first place. Inventing a
+charitable reason for a missing id is the same defect as inventing the id, so the
+category is withdrawn rather than left standing with one speculative member.
 
 Exactly one further session id survives in this effort's notepads,
 `ses_fac74f97affeefZQ5y2zbRJ4vZ`, and it is recorded here only so it is not later
@@ -1023,12 +1031,15 @@ produce a false green. Detailed native output is retained by Meson in
 5. **Reviewer verdict** — `confirmed`. The proof is the compiler itself: the parent
    fails the blocking trixie/GCC-14 leg and the fix passes both blocking legs, so
    the verdict rests on a reproducible CI gate rather than on a reviewer's judgement.
-   *No reviewer session id was located for this row. No separate independent-agent
-   review of it is claimed in the first place — it is a one-line pointer-type
-   correction whose acceptance criterion is the blocking matrix gate, and the gate is
-   reproducible evidence in a way a reviewer's opinion would not be. The
-   session-history lookup that recovered the PR #3, #4 and #16 reviewer ids surfaced
-   none for PR #8; PR #8's GitHub thread carries no comments or reviews either.*
+   *No reviewer session exists, because no independent review was dispatched for this
+   row — and none is claimed. That is deliberate rather than an oversight: this is a
+   one-line pointer-type correction whose acceptance criterion is the blocking matrix
+   gate, which is reproducible evidence in a way a reviewer's opinion would not be.
+   Three independent signals agree that no review ran: there is no
+   `docs: record independent review confirmation …` commit for it, unlike every other
+   reviewed area in this ledger; PR #8 carries zero comments and zero reviews; and its
+   single commit was merged without a review artifact of any kind. The `confirmed`
+   verdict above therefore rests on the CI gate, not on a reviewer.*
 
 ### FIX-6 — MPP config key correctness and checked setters
 
