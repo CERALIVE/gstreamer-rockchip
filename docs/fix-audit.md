@@ -2197,9 +2197,13 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    invokes the full parity script on every build.
 4. **MPP ABI closure** — unchanged: test/workflow/golden selection only; no production
    source or MPP call changed.
-5. **Reviewer verdict** — `needs-human-review`. This remediation changes the release-time
-   correctness gate itself and must remain unmerged until an independent reviewer confirms
-   the fail-closed workflow and both capability branches.
+5. **Reviewer verdict** — `needs-human-review`. The first independent review confirmed the
+   mock wiring, exit-77 propagation, capability selection, explicit wrong-omission failure,
+   and zero semantic encoder delta, then requested three test-infrastructure hardenings:
+   cleanup on normalizer failure, pinned hashes for the immutable reference goldens, and an
+   explicit main-ref release guard. Those corrections are applied and await re-review. This
+   remediation changes the release-time correctness gate itself and must remain unmerged
+   until that independent re-review completes.
 
 ### Gate decoder 10-bit caps on available GStreamer formats
 
