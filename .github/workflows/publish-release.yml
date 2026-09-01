@@ -54,6 +54,14 @@ jobs:
       channel: ${{ inputs.release_type }}
       source_date_epoch: ${{ steps.version.outputs.source_date_epoch }}
     steps:
+      - name: Require the main release ref
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "ERROR: releases may run only from refs/heads/main, not $GITHUB_REF" >&2
+            exit 1
+          fi
+
       # fetch-depth 0 is load-bearing: the counter is derived from existing
       # tags, and a shallow checkout would see none and propose `+ceralive.1`
       # over a release that already exists.
