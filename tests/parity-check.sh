@@ -10,6 +10,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly ROOT
 readonly RADXA_GOLDEN_DIR="$ROOT/tests/golden/radxa-1.14-4"
 readonly FORK_GOLDEN_DIR="$ROOT/tests/golden/fork-baseline"
+readonly FORK_NO_NV16_GOLDEN_DIR="$ROOT/tests/golden/fork-no-nv16-10le40"
 readonly ELEMENTS=(mpph264enc mpph265enc mppvideodec mppjpegdec)
 
 normalize() {
@@ -154,8 +155,48 @@ golden_for() {
   local element=$1
   case "$element" in
     mpph264enc | mpph265enc) printf '%s\n' "$FORK_GOLDEN_DIR/$element.golden" ;;
-    *) printf '%s\n' "$RADXA_GOLDEN_DIR/$element.golden" ;;
+    mppvideodec | mppjpegdec)
+      if [[ -n "${PARITY_CONFIG_H:-}" ]] && ! config_has HAVE_NV16_10LE40; then
+        printf '%s\n' "$FORK_NO_NV16_GOLDEN_DIR/$element.golden"
+      else
+        printf '%s\n' "$RADXA_GOLDEN_DIR/$element.golden"
+      fi
+      ;;
   esac
+}
+
+config_has() {
+  local macro=$1
+  grep -Eq \
+    "^[[:space:]]*#[[:space:]]*define[[:space:]]+${macro}[[:space:]]+1([[:space:]]|$)" \
+    "$PARITY_CONFIG_H"
+}
+
+check_decoder_capabilities() {
+  local element=$1 actual=$2
+  local macro format caps
+
+  [[ -n "${PARITY_CONFIG_H:-}" ]] || return 0
+  [[ "$element" == mppvideodec || "$element" == mppjpegdec ]] || return 0
+  if ! caps=$(grep '^src_caps=' "$actual"); then
+    echo "parity: $element has no normalized src caps" >&2
+    return 1
+  fi
+
+  while read -r macro format; do
+    if config_has "$macro"; then
+      if [[ "$caps" != *"(string)$format"* ]]; then
+        echo "parity: $element omits $format although $macro is defined" >&2
+        return 1
+      fi
+    elif [[ "$caps" == *"(string)$format"* ]]; then
+      echo "parity: $element advertises $format although $macro is not defined" >&2
+      return 1
+    fi
+  done <<'EOF'
+HAVE_NV12_10LE40 NV12_10LE40
+HAVE_NV16_10LE40 NV16_10LE40
+EOF
 }
 
 check_source_contract() {
@@ -206,6 +247,7 @@ compare_element() {
     echo "parity: mppjpegdec src caps no longer contain NV12" >&2
     return 1
   fi
+  check_decoder_capabilities "$element" "$actual"
 
   while IFS= read -r line; do
     if ! grep -Fqx "$line" "$actual"; then
@@ -221,6 +263,18 @@ if [[ "${1:-}" == "--normalize" ]]; then
   [[ $# -eq 2 ]] || { echo "usage: $0 --normalize ELEMENT" >&2; exit 2; }
   normalize "$2"
   exit 0
+fi
+
+if [[ -n "${PARITY_CONFIG_H:-}" ]]; then
+  if [[ ! -r "$PARITY_CONFIG_H" ]]; then
+    echo "parity: PARITY_CONFIG_H is not readable: $PARITY_CONFIG_H" >&2
+    exit 1
+  fi
+  nv12_10le40=no
+  nv16_10le40=no
+  config_has HAVE_NV12_10LE40 && nv12_10le40=yes
+  config_has HAVE_NV16_10LE40 && nv16_10le40=yes
+  echo "parity: decoder build capabilities from $PARITY_CONFIG_H: HAVE_NV12_10LE40=$nv12_10le40 HAVE_NV16_10LE40=$nv16_10le40"
 fi
 
 check_source_contract \
@@ -253,4 +307,4 @@ for element in "${ELEMENTS[@]}"; do
   compare_element "$element"
 done
 
-echo "PASS fork encoder and Radxa 1.14-4 decoder runtime parity"
+echo "PASS fork encoder and capability-aware Radxa 1.14-4 decoder runtime parity"
