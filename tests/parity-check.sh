@@ -16,9 +16,10 @@ readonly ELEMENTS=(mpph264enc mpph265enc mppvideodec mppjpegdec)
 normalize() {
   local element=$1
   local input
+  local rc=0
   input=$(mktemp)
   cat > "$input"
-  python3 - "$element" "$input" <<'PY'
+  python3 - "$element" "$input" <<'PY' || rc=$?
 import re
 import sys
 
@@ -130,6 +131,7 @@ for name in sorted(properties):
         print(f"property.{name}.enum_nicks={','.join(enum_nicks)}")
 PY
   rm -f "$input"
+  return "$rc"
 }
 
 emit_inspect() {
@@ -199,6 +201,40 @@ HAVE_NV16_10LE40 NV16_10LE40
 EOF
 }
 
+check_golden_capabilities() {
+  local element=$1 golden=$2
+  local macro format caps
+
+  [[ -n "${PARITY_CONFIG_H:-}" ]] || return 0
+  [[ "$element" == mppvideodec || "$element" == mppjpegdec ]] || return 0
+  if ! caps=$(grep '^src_caps=' "$golden"); then
+    echo "parity: $golden has no normalized src caps" >&2
+    return 1
+  fi
+
+  while read -r macro format; do
+    if config_has "$macro"; then
+      if [[ "$caps" != *"(string)$format"* ]]; then
+        echo "parity: $golden omits $format although $macro is defined" >&2
+        return 1
+      fi
+    elif [[ "$caps" == *"(string)$format"* ]]; then
+      echo "parity: $golden contains $format although $macro is not defined" >&2
+      return 1
+    fi
+  done <<'EOF'
+HAVE_NV12_10LE40 NV12_10LE40
+HAVE_NV16_10LE40 NV16_10LE40
+EOF
+}
+
+check_reference_golden_hashes() {
+  if ! (cd "$RADXA_GOLDEN_DIR" && sha256sum -c decoder.sha256 >/dev/null); then
+    echo "parity: immutable Radxa decoder golden hash mismatch" >&2
+    return 1
+  fi
+}
+
 check_source_contract() {
   local contract=$1 golden_dir=$2 label=$3
   local element expected golden key needle
@@ -232,6 +268,7 @@ compare_element() {
   emit_inspect "$element" > "$raw"
   normalize "$element" < "$raw" > "$actual"
   golden=$(golden_for "$element")
+  check_golden_capabilities "$element" "$golden"
   grep -v '^#' "$golden" | grep -v '^$' > "$expected"
 
   rank=$(grep '^rank=' "$actual" | cut -d= -f2)
@@ -277,6 +314,7 @@ if [[ -n "${PARITY_CONFIG_H:-}" ]]; then
   echo "parity: decoder build capabilities from $PARITY_CONFIG_H: HAVE_NV12_10LE40=$nv12_10le40 HAVE_NV16_10LE40=$nv16_10le40"
 fi
 
+check_reference_golden_hashes
 check_source_contract \
   "$RADXA_GOLDEN_DIR/source-contract.tsv" \
   "$RADXA_GOLDEN_DIR" \

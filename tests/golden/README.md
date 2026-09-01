@@ -5,6 +5,8 @@ encoders. `radxa-1.14-4/` remains the immutable reference capture for the two
 decoder elements and is selected when the build defines `HAVE_NV16_10LE40`.
 `fork-no-nv16-10le40/` is selected from the Meson-generated `config.h` when that
 capability is absent, as it is in both current CI suites.
+`radxa-1.14-4/decoder.sha256` pins the two immutable decoder captures and is
+verified before either source or runtime parity runs.
 
 The encoder lineages intentionally differ on three GObject property names:
 
