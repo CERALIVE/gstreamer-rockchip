@@ -60,12 +60,23 @@ suite="$(sed -n 's/^VERSION_CODENAME=//p' /etc/os-release)"
 printf 'dpkg architecture: %s\n' "$(dpkg --print-architecture)"
 printf 'package under test: %s\n' "${deb}"
 
+# `grep -c` exits 1 for a legitimate count of zero and >1 for a real error, so a
+# bare `|| true` would report a BROKEN package query as a clean container --
+# turning the assertion below into a rubber stamp. Discriminate the two.
+assert_no_gstreamer() {
+	local when="$1" list count rc
+	list="$(dpkg-query -W -f='${binary:Package}\n' 2>/dev/null || true)"
+	count="$(printf '%s\n' "${list}" | grep -c gstreamer)" || rc=$?
+	rc="${rc:-0}"
+	[ "${rc}" -le 1 ] || fail "could not enumerate installed packages ${when} (grep exit ${rc})"
+	printf 'gstreamer packages installed %s: %s\n' "${when}" "${count}"
+	[ "${count}" = "0" ] \
+		|| fail "${count} gstreamer package(s) present ${when}; the closure check below would be vacuous"
+}
+
 step "baseline: the container must carry NOTHING GStreamer"
 apt-get update -qq
-baseline="$(dpkg-query -W -f='${binary:Package}\n' 2>/dev/null | grep -c gstreamer || true)"
-printf 'gstreamer packages installed: %s\n' "${baseline}"
-[ "${baseline}" = "0" ] \
-	|| fail "the container is not clean: ${baseline} gstreamer package(s) already installed"
+assert_no_gstreamer "at baseline"
 
 step "install ONLY the two pinned runtime libraries the device image installs"
 runtime_debs=()
@@ -77,14 +88,21 @@ for pattern in 'librockchip-mpp1_*.deb' 'librga2_*.deb'; do
 done
 apt-get install -y --no-install-recommends "${runtime_debs[@]}"
 
-after_runtime="$(dpkg-query -W -f='${binary:Package}\n' | grep -c gstreamer || true)"
-[ "${after_runtime}" = "0" ] \
-	|| fail "the pinned runtime libraries pulled in GStreamer; the closure check below would be vacuous"
+assert_no_gstreamer "after the pinned runtime libraries"
 
 step "install the release .deb"
 apt-get install -y "${deb}"
 dpkg-query -W -f='installed: ${binary:Package} ${Version} ${Architecture}\n' "${PACKAGE}"
 
+# SCOPE, stated rather than implied: apt installs the DECLARED Depends, so this
+# oracle catches a dependency that is missing outright -- proven with a negative
+# control, where the previously under-declared package installed cleanly here and
+# then showed five unresolved SONAMEs. What it cannot catch is a library that is
+# undeclared but arrives anyway as a transitive dependency of a declared one.
+# That case is covered statically instead: packaging/package-contract.sh derives
+# the plugins' NEEDED set from the staged tree and refuses any SONAME the
+# declared Depends does not supply. The two gates are complementary; neither
+# alone closes under-declaration.
 step "oracle 1 -- dependency closure: ldd every installed plugin, zero 'not found'"
 mapfile -t plugins < <(dpkg -L "${PACKAGE}" | grep -E '\.so$' | sort)
 printf 'plugins installed: %s\n' "${#plugins[@]}"

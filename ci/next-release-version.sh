@@ -37,6 +37,15 @@ if [ -z "${base}" ]; then
 	exit 1
 fi
 
+# A shallow clone carries no tags, so the loop below would find nothing and this
+# script would confidently propose `+ceralive.1` over an existing release. Refuse
+# rather than answer wrongly: the caller's fetch depth is part of the contract.
+if [ "$(git -C "${root}" rev-parse --is-shallow-repository)" = "true" ]; then
+	echo "next-release-version: refusing to derive a counter from a shallow repository" >&2
+	echo "  check out with fetch-depth: 0 so the existing release tags are present" >&2
+	exit 1
+fi
+
 highest=0
 while IFS= read -r tag; do
 	[ -n "${tag}" ] || continue
@@ -44,9 +53,12 @@ while IFS= read -r tag; do
 	# `git tag --list` uses fnmatch, so its `*` would also accept `1+ceralive.2-rc1`.
 	# Re-check the whole tag against an anchored regex before trusting the counter.
 	[[ "${tag}" =~ ^${base//./\\.}\+ceralive\.[0-9]+$ ]] || continue
-	if [ "${counter}" -gt "${highest}" ]; then
+	# `10#` is load-bearing. The regex admits a zero-padded counter, and bash reads
+	# a leading zero as octal -- a hand-made `+ceralive.08` tag would abort the next
+	# release with "value too great for base" rather than producing `.09`.
+	if [ "$((10#${counter}))" -gt "$((10#${highest}))" ]; then
 		highest="${counter}"
 	fi
 done < <(git -C "${root}" tag --list "${base}+ceralive.*")
 
-printf '%s+ceralive.%s\n' "${base}" "$((highest + 1))"
+printf '%s+ceralive.%s\n' "${base}" "$((10#${highest} + 1))"

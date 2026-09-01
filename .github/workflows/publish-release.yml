@@ -269,13 +269,19 @@ jobs:
           deb="dist/gstreamer1.0-rockchip-ceralive_${CERALIVE_GSTREAMER_ROCKCHIP_VERSION}_arm64.deb"
           [ -f "${deb}" ] || { echo "ERROR: ${deb} was not produced" >&2; exit 1; }
           ( cd dist && sha256sum "$(basename "${deb}")" > "$(basename "${deb}").sha256" )
-          mapfile -t assets < <(find dist -maxdepth 1 -type f | sort)
-          printf 'release assets:\n'
-          printf '  %s\n' "${assets[@]}"
-          if [ "${#assets[@]}" -ne 2 ]; then
-            echo "ERROR: dist must hold exactly the .deb and its .sha256, found ${#assets[@]}" >&2
+          # Set EQUALITY, not a count plus a spot check: counting to two and
+          # confirming the .deb exists would happily accept the .deb plus any
+          # stray file as the release payload.
+          expected="$(printf '%s\n%s\n' "$(basename "${deb}")" "$(basename "${deb}").sha256" | sort)"
+          actual="$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)"
+          if [ "${actual}" != "${expected}" ]; then
+            echo "ERROR: dist must hold exactly the .deb and its .sha256" >&2
+            { echo "expected:"; printf '%s\n' "${expected}" | sed 's/^/  /'; } >&2
+            { echo "actual:";   printf '%s\n' "${actual}"   | sed 's/^/  /'; } >&2
             exit 1
           fi
+          echo "release assets:"
+          printf '%s\n' "${actual}" | sed 's/^/  /'
           cat "${deb}.sha256"
 
       - name: Record the package control fields
@@ -375,10 +381,10 @@ jobs:
         run: |
           set -euo pipefail
           deb="dist/gstreamer1.0-rockchip-ceralive_${{ needs.resolve.outputs.version }}_arm64.deb"
-          mapfile -t assets < <(find dist -maxdepth 1 -type f | sort)
-          printf '  %s\n' "${assets[@]}"
-          [ "${#assets[@]}" -eq 2 ] || { echo "ERROR: expected exactly 2 assets" >&2; exit 1; }
-          if [ ! -f "${deb}" ] || [ ! -f "${deb}.sha256" ]; then
+          expected="$(printf '%s\n%s\n' "$(basename "${deb}")" "$(basename "${deb}").sha256" | sort)"
+          actual="$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)"
+          printf '%s\n' "${actual}" | sed 's/^/  /'
+          if [ "${actual}" != "${expected}" ]; then
             echo "ERROR: the .deb / .sha256 pair is not the asset set" >&2
             exit 1
           fi
