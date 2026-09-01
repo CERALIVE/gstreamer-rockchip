@@ -2201,9 +2201,14 @@ correction row below; the `d27ae92` oldest-orphan evidence remains valid.
    mock wiring, exit-77 propagation, capability selection, explicit wrong-omission failure,
    and zero semantic encoder delta, then requested three test-infrastructure hardenings:
    cleanup on normalizer failure, pinned hashes for the immutable reference goldens, and an
-   explicit main-ref release guard. Those corrections are applied and await re-review. This
-   remediation changes the release-time correctness gate itself and must remain unmerged
-   until that independent re-review completes.
+   explicit main-ref release guard. Round 2 confirmed those corrections and found one
+   remaining comparator edge case: a second normalized `src_caps=` record could coexist
+   with the exact baseline record. Caps keys now require exactly one byte-exact normalized
+   record, while additional property records remain allowed by the established contract.
+   Regression controls reject duplicate caps, changed caps, an unsupported NV16
+   advertisement, and an omitted supported NV16 format. Both suite tests remain green.
+   This remediation changes the release-time correctness gate itself and must remain
+   unmerged until final independent confirmation.
 
 ### Gate decoder 10-bit caps on available GStreamer formats
 
