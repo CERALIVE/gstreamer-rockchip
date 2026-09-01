@@ -24,6 +24,14 @@ invent identifiers, each reviewed row below names the concrete artifacts that *a
 verifiable — the PR whose thread carries the review, and the `docs:` commit in which
 that review's outcome was recorded. Those two together are the review-trail record.
 
+**What those two artifacts do and do not prove.** A cited `docs:` commit is the ledger's
+*record of a reported review outcome*. It is written by the same account that authored the
+fix, so on its own it proves that a review result was recorded — not, circularly, that the
+review happened. It is cited as the timestamped record, and the PR thread it names is the
+place the review itself sits. Read the pair together; neither half is independent proof
+alone. Rows that need a stronger claim than that must say what was independently verified
+and how, rather than leaning on the citation.
+
 Exactly one session id survives anywhere in this effort's notepads,
 `ses_fac74f97affeefZQ5y2zbRJ4vZ`, and it is recorded here only so it is not later
 mistaken for a valid one. It belongs to a **self-directed** explore-agent review of
@@ -238,7 +246,7 @@ the same feature flags CI and `debian/rules` use
 5. **Reviewer verdict** — `confirmed`. Independently reviewed by a separate
    agent/model (oracle), dispatched by the orchestrator; confirmed via patch-ID
    comparison and `git range-diff` against the fetched upstream source. The
-   review record landed in `e991775b0a80a4b36722d202a95c99b0d19e0446`
+   reported review outcome was recorded in `e991775b0a80a4b36722d202a95c99b0d19e0446`
    ("docs: record independent review confirmation on cherry-pick evidence rows").
    Author-side pre-review, superseded by the above and retained as context: diff is
    5 insertions / 8 deletions confined to `gst_mpp_dec_update_video_info`, touching
@@ -288,7 +296,7 @@ the same feature flags CI and `debian/rules` use
 5. **Reviewer verdict** — `confirmed`. Independently reviewed by a separate
    agent/model (oracle), dispatched by the orchestrator; confirmed via patch-ID
    comparison and `git range-diff` against the fetched upstream source. The
-   review record landed in `e991775b0a80a4b36722d202a95c99b0d19e0446`
+   reported review outcome was recorded in `e991775b0a80a4b36722d202a95c99b0d19e0446`
    ("docs: record independent review confirmation on cherry-pick evidence rows").
    Author-side pre-review, superseded by the above and retained as context: the
    added `GST_MPP_DEC_MAX_PENDING_FRAMES` trim branch re-fetches the frame list
@@ -448,7 +456,7 @@ the same feature flags CI and `debian/rules` use
    agent/model (oracle), dispatched by the orchestrator: confirmed that `7ffd7f4`
    was already an ancestor of the fork baseline and that no frame cap was
    reintroduced — the commit adds regression evidence, not new production logic.
-   The review record landed in `de535020b116f78919c1c5060d95fca622b4ad75`
+   The reported review outcome was recorded in `de535020b116f78919c1c5060d95fca622b4ad75`
    ("docs: record independent review confirmation on decoder port evidence rows").
    Author-side pre-review, superseded by the above and retained as context: the
    test has both controls (three buffer-full responses followed by success, and a
@@ -518,7 +526,7 @@ the same feature flags CI and `debian/rules` use
    handoff against the pinned MPP 1.5.0-1 source (`Mpp::put_packet()` branches on
    `mpp_packet_get_buffer()`) and confirmed exactly one release authority on every
    success/error path across `gstmppvideodec.c` and `gstmppjpegdec.c` — no
-   double-free, no leak. The review record landed in
+   double-free, no leak. The reported review outcome was recorded in
    `de535020b116f78919c1c5060d95fca622b4ad75` ("docs: record independent review
    confirmation on decoder port evidence rows").
    Author-side pre-review, superseded by the above and retained as context: both
@@ -1478,26 +1486,33 @@ without it, so it is recorded with the same five fields.
    test arms the next decoder, the one point where no element can still own a packet.
 3. **Hardware gate** — `hardware-independent` (host test harness only).
 4. **MPP ABI closure** — unchanged; `tests/mock_mpp.c` is not part of the plugin.
-5. **Reviewer verdict** — `confirmed`. **Verdict corrected — the previous
-   `needs-human-review` / "Reviewer == author" text was stale, not accurate.** This
-   row was written before PR #10's independent review rounds ran, and was never
-   updated once they did. The two orchestrator-dispatched independent oracle rounds
-   recorded on the FIX-8 and FIX-11 rows above cover this prerequisite directly:
-   round 1 found the leak this fix's deferred-reclaim design left behind, which is
-   the finding the follow-up row immediately below records and closes. A review that
-   found a real defect in this exact code is by construction not a self-review of it.
-   The review record landed in `6b71fcc802538eb38383200123b09e09cf03ca32`
-   ("docs: finalize independent review record for RC-drop and IDR sync-point").
+5. **Reviewer verdict** — `needs-human-review`. Reviewer == author for this row's own
+   evidence, and it stays that way.
 
-   Scope of the confirmation, stated precisely: the use-after-free fix in
-   `53ea3879…` is confirmed, and the leak it introduced is confirmed *fixed* by
-   `ac08b130bab5fca95a3c40f36970c0a01bfa5139` and evidenced in the follow-up row.
-   Neither round claimed sanitizer-verified leak-freedom — LeakSanitizer needs
-   `ptrace` and cannot run under this workspace's user-mode QEMU — so the
-   deterministic arena counter and its kill-mutant are the portable evidence.
-   *Reviewer session ID not recoverable — the PR review trail at
-   <https://github.com/CERALIVE/gstreamer-rockchip/pull/10> plus commit
-   `6b71fcc802538eb38383200123b09e09cf03ca32` are the review-trail record.*
+   **An upgrade to `confirmed` was proposed during the ledger-integrity pass and
+   REJECTED on independent review.** The argument for it was that PR #10's two
+   orchestrator-dispatched oracle rounds must have covered this prerequisite, since
+   round 1 found the leak this fix's deferred-reclaim design left behind. That argument
+   does not hold: `6b71fcc802538eb38383200123b09e09cf03ca32` changes only the FIX-8 and
+   FIX-11 rows, and reporting a leak in the mock's teardown path is not the same as
+   reviewing this row's use-after-free fix and its evidence. Accepting it would have
+   been an inference dressed as a verdict — precisely the failure this pass exists to
+   remove — so the row keeps the weaker, accurate verdict.
+
+   What is genuinely established, and no more: an independent round did examine the
+   surrounding teardown code and did find a real leak there; that leak is fixed by
+   `ac08b130bab5fca95a3c40f36970c0a01bfa5139` and evidenced in the follow-up row
+   immediately below. The use-after-free fix in `53ea3879…` itself carries no
+   independent verdict.
+
+   Bounding the exposure rather than leaving it open-ended: `tests/mock_mpp.c` is
+   test-only and ships in no package, and field 4 above records the plugin ABI as
+   untouched. No sanitizer-verified leak-freedom is claimed here — LeakSanitizer needs
+   `ptrace` and cannot run under this workspace's user-mode QEMU — so the deterministic
+   arena counter and its kill-mutant are the evidence, and they are author-produced.
+   *Reviewer session ID not applicable — no independent review of this row was
+   dispatched. Related review context: the PR thread at
+   <https://github.com/CERALIVE/gstreamer-rockchip/pull/10>.*
 
 ### Prerequisite follow-up — the deferred reclaim leaked the last test's arena
 
