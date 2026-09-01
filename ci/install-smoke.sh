@@ -135,8 +135,12 @@ printf 'runtime %s\n' "$(gst-inspect-1.0 --version | sed -n '2p')"
 inspect_out="$(gst-inspect-1.0 --plugin rockchipmpp)"
 printf '%s\n' "${inspect_out}"
 
-grep -qE "^[[:space:]]*Filename:[[:space:]]*${PLUGIN_SO}\$" <<<"${inspect_out}" \
-	|| fail "gst-inspect loaded a rockchipmpp plugin from somewhere other than ${PLUGIN_SO}"
+# gst-inspect prints its plugin details column-aligned and WITHOUT a colon
+# ("Filename    /usr/lib/..."), so field-extract and compare literally rather
+# than pattern-matching a punctuation shape that does not exist.
+loaded_from="$(awk '$1 == "Filename" { print $2; exit }' <<<"${inspect_out}")"
+[ "${loaded_from}" = "${PLUGIN_SO}" ] \
+	|| fail "gst-inspect loaded rockchipmpp from '${loaded_from}', not ${PLUGIN_SO}"
 
 # Close the loop: the plugin GStreamer just loaded is the one THIS package owns.
 owner="$(dpkg -S "${PLUGIN_SO}" | cut -d: -f1)"
