@@ -81,6 +81,20 @@ gst_mpp_rga_real_blit (rga_info_t * src, rga_info_t * dst, gpointer user_data)
 
 #ifdef GST_MPP_RGA_ENABLE_IM2D
 static gint
+gst_mpp_rga_real_configure_im2d (guint core_mask, gint priority)
+{
+  IM_STATUS status;
+
+  if (core_mask != 0) {
+    status = imconfig (IM_CONFIG_SCHEDULER_CORE, core_mask);
+    if (status <= IM_STATUS_FAILED)
+      return status;
+  }
+
+  return imconfig (IM_CONFIG_PRIORITY, priority);
+}
+
+static gint
 gst_mpp_rga_real_process (const GstMppRgaIm2dRequest * request,
     gpointer user_data)
 {
@@ -103,13 +117,8 @@ gst_mpp_rga_real_process (const GstMppRgaIm2dRequest * request,
   IM_STATUS status;
 
   (void) user_data;
-  if (request->core_mask != 0) {
-    status = imconfig (IM_CONFIG_SCHEDULER_CORE, request->core_mask);
-    if (status <= IM_STATUS_FAILED)
-      return status;
-  }
-
-  status = imconfig (IM_CONFIG_PRIORITY, request->priority);
+  status = gst_mpp_rga_real_configure_im2d (request->core_mask,
+      request->priority);
   if (status <= IM_STATUS_FAILED)
     return status;
 
@@ -123,6 +132,56 @@ gst_mpp_rga_real_process (const GstMppRgaIm2dRequest * request,
   return improcess (src, dst, pat, src_rect, dst_rect, pat_rect,
       request->usage | IM_SYNC);
 }
+
+static gint
+gst_mpp_rga_real_composite (const GstMppRgaIm2dCompositeRequest * request,
+    gpointer user_data)
+{
+  const GstMppRgaIm2dRequest *transform = &request->transform;
+  rga_buffer_t source;
+  rga_buffer_t output;
+  rga_buffer_t pat;
+  im_rect source_rect = {
+    transform->src_x,
+    transform->src_y,
+    transform->src_rect_width,
+    transform->src_rect_height,
+  };
+  im_rect output_rect = {
+    transform->dst_x,
+    transform->dst_y,
+    transform->dst_rect_width,
+    transform->dst_rect_height,
+  };
+  im_rect pat_rect = {
+    request->pat_x,
+    request->pat_y,
+    request->pat_rect_width,
+    request->pat_rect_height,
+  };
+  IM_STATUS status;
+
+  (void) user_data;
+  status = gst_mpp_rga_real_configure_im2d (transform->core_mask,
+      transform->priority);
+  if (status <= IM_STATUS_FAILED)
+    return status;
+
+  source = wrapbuffer_fd (transform->src_fd, transform->src_width,
+      transform->src_height, transform->src_format, transform->src_wstride,
+      transform->src_hstride);
+  source.global_alpha = request->src_alpha;
+  output = wrapbuffer_fd (transform->dst_fd, transform->dst_width,
+      transform->dst_height, transform->dst_format, transform->dst_wstride,
+      transform->dst_hstride);
+  pat = wrapbuffer_fd (request->pat_fd, request->pat_width,
+      request->pat_height, request->pat_format, request->pat_wstride,
+      request->pat_hstride);
+  pat.global_alpha = request->pat_alpha;
+
+  return improcess (source, output, pat, source_rect, output_rect, pat_rect,
+      transform->usage | IM_SYNC);
+}
 #endif
 
 static const GstMppRgaBackendOps gst_mpp_rga_real_ops = {
@@ -131,6 +190,7 @@ static const GstMppRgaBackendOps gst_mpp_rga_real_ops = {
   .blit = gst_mpp_rga_real_blit,
 #ifdef GST_MPP_RGA_ENABLE_IM2D
   .process = gst_mpp_rga_real_process,
+  .composite = gst_mpp_rga_real_composite,
 #endif
 };
 
@@ -347,6 +407,32 @@ gst_mpp_rga_backend_process (GstMppRgaBackend * backend,
   return gst_mpp_rga_backend_finish (backend, &key, ret, blit_errno, ret > 0);
 }
 
+GstMppRgaResult
+gst_mpp_rga_backend_composite (GstMppRgaBackend * backend,
+    GstVideoFormat in_format, GstVideoFormat out_format,
+    const GstMppRgaIm2dCompositeRequest * request)
+{
+  GstMppRgaTupleKey key;
+  GstMppRgaResult result;
+  gint ret;
+  gint blit_errno;
+
+  g_return_val_if_fail (backend != NULL, GST_MPP_RGA_UNAVAILABLE);
+  g_return_val_if_fail (request != NULL, GST_MPP_RGA_LAYOUT_REJECTED);
+  if (!backend->ops.composite)
+    return GST_MPP_RGA_UNAVAILABLE;
+
+  result = gst_mpp_rga_backend_begin (backend, GST_MPP_RGA_OP_COMPOSITE,
+      in_format, out_format, &key);
+  if (result != GST_MPP_RGA_SUCCESS)
+    return result;
+
+  errno = 0;
+  ret = backend->ops.composite (request, backend->user_data);
+  blit_errno = errno;
+  return gst_mpp_rga_backend_finish (backend, &key, ret, blit_errno, ret > 0);
+}
+
 guint
 gst_mpp_rga_backend_tuple_failures (GstMppRgaBackend * backend,
     GstMppRgaOperation operation, GstVideoFormat in_format,
@@ -380,6 +466,10 @@ gst_mpp_rga_operation_name (GstMppRgaOperation operation)
       return "jpeg-convert";
     case GST_MPP_RGA_OP_CONVERT:
       return "rgaconvert";
+    case GST_MPP_RGA_OP_COMPOSITOR_COPY:
+      return "rgacompositor-copy";
+    case GST_MPP_RGA_OP_COMPOSITE:
+      return "rgacompositor";
     default:
       return "unknown";
   }

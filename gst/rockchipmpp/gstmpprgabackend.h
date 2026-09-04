@@ -25,6 +25,8 @@ typedef enum
   GST_MPP_RGA_OP_DECODE_CONVERT,
   GST_MPP_RGA_OP_JPEG_CONVERT,
   GST_MPP_RGA_OP_CONVERT,
+  GST_MPP_RGA_OP_COMPOSITOR_COPY,
+  GST_MPP_RGA_OP_COMPOSITE,
 } GstMppRgaOperation;
 
 typedef enum
@@ -77,11 +79,30 @@ typedef struct
 
 typedef struct
 {
+  GstMppRgaIm2dRequest transform;
+  gint pat_fd;
+  gint pat_width;
+  gint pat_height;
+  gint pat_wstride;
+  gint pat_hstride;
+  RgaSURF_FORMAT pat_format;
+  gint pat_x;
+  gint pat_y;
+  gint pat_rect_width;
+  gint pat_rect_height;
+  guint8 src_alpha;
+  guint8 pat_alpha;
+} GstMppRgaIm2dCompositeRequest;
+
+typedef struct
+{
   gboolean (*probe) (gpointer user_data, GstMppRgaDriverVersion * version,
       gint * error_number);
   gint (*init) (gpointer user_data);
   gint (*blit) (rga_info_t * src, rga_info_t * dst, gpointer user_data);
   gint (*process) (const GstMppRgaIm2dRequest * request, gpointer user_data);
+  gint (*composite) (const GstMppRgaIm2dCompositeRequest * request,
+      gpointer user_data);
 } GstMppRgaBackendOps;
 
 typedef struct _GstMppRgaBackend GstMppRgaBackend;
@@ -97,6 +118,9 @@ GstMppRgaResult gst_mpp_rga_backend_blit (GstMppRgaBackend * backend,
 GstMppRgaResult gst_mpp_rga_backend_process (GstMppRgaBackend * backend,
     GstMppRgaOperation operation, GstVideoFormat in_format,
     GstVideoFormat out_format, const GstMppRgaIm2dRequest * request);
+GstMppRgaResult gst_mpp_rga_backend_composite (GstMppRgaBackend * backend,
+    GstVideoFormat in_format, GstVideoFormat out_format,
+    const GstMppRgaIm2dCompositeRequest * request);
 guint gst_mpp_rga_backend_tuple_failures (GstMppRgaBackend * backend,
     GstMppRgaOperation operation, GstVideoFormat in_format,
     GstVideoFormat out_format);
