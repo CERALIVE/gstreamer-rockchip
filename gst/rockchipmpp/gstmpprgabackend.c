@@ -103,9 +103,11 @@ gst_mpp_rga_real_process (const GstMppRgaIm2dRequest * request,
   IM_STATUS status;
 
   (void) user_data;
-  status = imconfig (IM_CONFIG_SCHEDULER_CORE, request->core_mask);
-  if (status <= IM_STATUS_FAILED)
-    return status;
+  if (request->core_mask != 0) {
+    status = imconfig (IM_CONFIG_SCHEDULER_CORE, request->core_mask);
+    if (status <= IM_STATUS_FAILED)
+      return status;
+  }
 
   status = imconfig (IM_CONFIG_PRIORITY, request->priority);
   if (status <= IM_STATUS_FAILED)
