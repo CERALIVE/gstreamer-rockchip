@@ -53,7 +53,7 @@ install_deb() {
 
 journal_count() {
 	local since=$1 pattern=$2
-	board_sudo "journalctl --since '$since' --no-pager -o cat | grep -cF '$pattern' || true"
+	board_sudo "journalctl --since '$since' --no-pager -o cat | grep -v 'COMMAND=/usr/bin/bash -lc' | grep -cF '$pattern' || true"
 }
 
 new_report_dir() {
