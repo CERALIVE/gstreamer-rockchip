@@ -591,6 +591,10 @@ GST_START_TEST (test_allocation_offers_and_accepts_dmabuf_pool)
           decide));
   gst_query_parse_nth_allocation_pool (decide, 0, &pool, &size, &min, &max);
   fail_unless (pool == downstream_pool);
+  config = gst_buffer_pool_get_config (pool);
+  gst_buffer_pool_config_get_allocator (config, &pool_allocator, &params);
+  fail_unless (pool_allocator == allocator);
+  gst_structure_free (config);
 
   gst_object_unref (downstream_pool);
   gst_query_unref (decide);

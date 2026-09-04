@@ -1015,6 +1015,22 @@ gst_rga_convert_decide_allocation (GstBaseTransform * transform,
     gst_object_unref (pool);
   }
 
+  if (memory != GST_RGA_MEMORY_SYSTEM &&
+      gst_query_get_n_allocation_params (query) == 0 &&
+      gst_query_get_n_allocation_pools (query) > 0) {
+    GstAllocationParams params;
+    GstAllocator *allocator = NULL;
+    GstBufferPool *pool;
+    GstStructure *config;
+
+    gst_query_parse_nth_allocation_pool (query, 0, &pool, NULL, NULL, NULL);
+    config = gst_buffer_pool_get_config (pool);
+    gst_buffer_pool_config_get_allocator (config, &allocator, &params);
+    if (allocator)
+      gst_query_add_allocation_param (query, allocator, &params);
+    gst_structure_free (config);
+  }
+
   return GST_BASE_TRANSFORM_CLASS (parent_class)->decide_allocation (transform,
       query);
 }
