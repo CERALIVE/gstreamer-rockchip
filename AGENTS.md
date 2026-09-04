@@ -11,11 +11,12 @@ This repository supplies the RK3588 hardware elements used by `cerastream`:
 
 ```text
 capture -> rgaconvert -> mpph264enc/mpph265enc -> cerastream transport
+primary + secondary -> rgacompositor -> mpph264enc/mpph265enc
 compressed input -> mppvideodec/mppjpegdec -> program graph
 ```
 
-The package remains a complete plugin set. The factory contract is **sized for
-eleven** entries; **ten are built today** and the eleventh slot is reserved:
+The package remains a complete plugin set. The factory contract contains
+**eleven built entries** with no reserved slots:
 
 | # | Factory | Plugin | Registration expectation |
 |---|---|---|---|
@@ -29,7 +30,7 @@ eleven** entries; **ten are built today** and the eleventh slot is reserved:
 | 8 | `kmssrc` | `kmssrc` | Registers unconditionally. |
 | 9 | `rkximagesink` | `rkximage` | Registers unconditionally. |
 | 10 | `rgaconvert` | `rockchiprga` | Registers unconditionally at rank `NONE`; activation is gated at NULL→READY. |
-| 11 | `rgacompositor` | `rockchiprga` | **RESERVED — NOT BUILT.** No source exists in this tree; the slot is held so the count moves once, when that element lands. |
+| 11 | `rgacompositor` | `rockchiprga` | Registers unconditionally at rank `NONE`; activation is gated at NULL→READY. |
 
 `mppvp8enc`'s absence on RK3588 is a **silicon fact, not a registration
 failure**: the SoC has no VEPU2 VP8 block, the historical Radxa package behaves
@@ -37,20 +38,16 @@ identically on the same board, and `d1-runtime-parity.sh` scores it
 EXPECTED-ABSENT rather than failing. Do not "fix" it and do not remove it — it
 registers on the SoCs that do carry the block.
 
-`rgacompositor` is a FUTURE element. Nothing in this repository implements it;
-reserving slot 11 records the intended shape so a later PR adds an element
-without re-litigating the frozen count. Do not create it on the strength of
-this row.
-
 CeraLive deeply validates the four MPP factories used by the engine plus
-`rgaconvert`; the remaining five retain build-and-registration coverage.
+`rgaconvert` and `rgacompositor`; the remaining five retain
+build-and-registration coverage.
 
 ## Repository map
 
 | Area | Location |
 |---|---|
 | MPP encoder/decoder plugin | `gst/rockchipmpp/` |
-| RGA 2D converter plugin | `gst/rockchiprga/` |
+| RGA 2D converter/compositor plugin | `gst/rockchiprga/` |
 | RGA backend, tuple health, conversion counters | `gst/rockchipmpp/gstmpprga*.c`, `gstmppconversionstats.c` |
 | RGA ↔ MPP interaction reference | `docs/RGA-MPP-INTERACTION.md` |
 | KMS source | `gst/kmssrc/` |
@@ -134,17 +131,18 @@ The following are compatibility contracts, not cleanup opportunities:
 
 - **Plugin filenames:** `libgstrockchipmpp.so` remains unchanged — the image's
   sysext exclusion globs and its MPP runtime-contract test key on that exact
-  name. The RGA converter ships alongside it as `libgstrockchiprga.so`, in the
-  same package and the same plugin directory; both names are frozen.
+  name. The RGA converter and compositor ship alongside it as
+  `libgstrockchiprga.so`, in the same package and the same plugin directory;
+  both names are frozen.
 - **Package prefix/name:** Rockchip packages retain the
   `gstreamer1.0-rockchip` prefix; this fork ships
   `gstreamer1.0-rockchip-ceralive` and replaces
   `gstreamer1.0-rockchip1` plus `belabox-gstreamer1.0-rockchip`.
-- **Factory set:** the eleven-slot table under **Role** is the contract. The ten
-  built factories continue to register on the platforms named in their
-  expectation column, with `mppvp8enc` EXPECTED-ABSENT on RK3588 and slot 11
-  reserved. Registering fewer than the ten built factories is a defect;
-  registering an unlisted factory is a contract change.
+- **Factory set:** the eleven-entry table under **Role** is the contract. All
+  eleven factories continue to register on the platforms named in their
+  expectation column, with `mppvp8enc` EXPECTED-ABSENT on RK3588. Registering
+  fewer factories than the SoC can carry is a defect; registering an unlisted
+  factory is a contract change.
 - **Encoder properties used by the engine:** `bitrate`, `bitrate-min`,
   `bitrate-max`, `zero-copy-pkt`, `rc-mode`, `qp-max`, `gop`, `width`, and
   `height` keep their names, types, defaults, ranges, and enum nicks. The
@@ -163,9 +161,10 @@ The following are compatibility contracts, not cleanup opportunities:
   contract is `DTS = PTS`. The read-only `encoder-restarts` counter is additive.
 - **RGA conversion:** `/dev/rga` must pass the driver-version ioctl before use;
   librga init alone is never sufficient. Blit health is isolated per operation
-  and format pair. CPU copy remains compiled but is debug-only behind
-  `GST_MPP_ALLOW_CPU_COPY=1`; normal operation fails negotiation instead. The
-  three read-only conversion counters are additive element properties.
+  and format pair. MPP/`rgaconvert` CPU staging remains debug-only behind
+  `GST_MPP_ALLOW_CPU_COPY=1`; `rgacompositor` has no CPU pixel path at all.
+  Normal operation fails negotiation instead. The three read-only conversion
+  counters are additive element properties.
 - **`rgaconvert` properties used by the engine:** the six transform properties
   keep their names, types, defaults, ranges, and enum/flag nicks. A consumer
   graph names them literally, so a rename is a cross-repository migration.
@@ -192,6 +191,42 @@ The following are compatibility contracts, not cleanup opportunities:
   caps, including the width/height swap that 90°/270° rotation forces; it is
   never a property. The factory registers at rank `NONE` and never autoplugs;
   activation, not registration, is what a missing `/dev/rga` blocks.
+
+- **`rgacompositor` element and pad properties:** the element is a
+  `GstVideoAggregator` with request pads `sink_%u`, capped at `sink_0` and
+  `sink_1` in v1. Its per-pad contract is:
+
+  | Property | Type | Default | Range / meaning |
+  |---|---|---|---|
+  | `xpos` | int | `0` | `0`–`G_MAXINT`; custom-layout left edge |
+  | `ypos` | int | `0` | `0`–`G_MAXINT`; custom-layout top edge |
+  | `width` | int | `0` | `0`–`G_MAXINT`; custom requires a positive even value |
+  | `height` | int | `0` | `0`–`G_MAXINT`; custom requires a positive even value |
+  | `alpha` | double | `1.0` | `0.0`–`1.0`; global alpha when the pad is composited |
+  | `zorder` | uint | request index | Lower values render first; ties use pad index |
+
+  Element property `layout` is enum `GstRgaCompositorLayout`, default
+  `pip-top-right`, with nicks `pip-top-right`, `pip-top-left`,
+  `pip-bottom-right`, `pip-bottom-left`, `pbp-left-right`, `pbp-top-bottom`, and
+  `custom`. PiP makes `sink_0` the full output and scales `sink_1` to half of
+  each output axis (one-quarter area), inset by an even-aligned 5% margin. PbP
+  splits the output into even-aligned left/right or top/bottom halves. `custom`
+  uses each pad's four geometry properties verbatim and rejects zero, odd, or
+  out-of-bounds rectangles.
+
+  `sink_0` and output are progressive NV12 DMA-BUF; `sink_1` is progressive
+  BGRA DMA-BUF. The asymmetric input contract is required by librga's
+  NV12-output three-channel blend: the NV12 accumulator is the source/dst and
+  the RGB overlay is the `pat` channel. Upstream `rgaconvert` supplies BGRA when
+  a secondary source starts as YUV. Two inputs run one primary `improcess`
+  copy/scale followed by one geometry-aware composite pass; output allocation
+  uses the same 16-aligned dma-heap allocator as `rgaconvert`. With only
+  `sink_0` connected and output caps unchanged, the input buffer is passed
+  through by reference with no RGA or CPU pixel operation. The element exposes
+  `conversion-fallback-frames`, `conversion-dropped-frames`, and
+  `layout-rejections` through `gstmppconversionstats.c`; fallback remains zero
+  because no CPU path exists. Its rank and READY failure contract match
+  `rgaconvert`.
 
 `tests/parity-check.sh`, `tests/golden/`, `packaging/package-contract.sh`, and
 the board drills are the executable authorities. Update a frozen contract only
@@ -284,11 +319,11 @@ this fork. See `README.md` for the public maintainer notice.
 ## Anti-patterns
 
 - Do not rename `libgstrockchipmpp.so`, `libgstrockchiprga.so`, or the package
-  prefix, and do not split the RGA converter into a second `.deb`: the release
+  prefix, and do not split the RGA elements into a second `.deb`: the release
   publishes exactly one archive.
 - Do not remove unused factories to reduce the package.
-- Do not implement `rgacompositor` because slot 11 names it. The slot is a
-  reservation, not a specification.
+- Do not extend `rgacompositor` beyond two sink pads or add a CPU compositor;
+  v1 is deliberately one primary plus one secondary on librga.
 - Do not treat `mppvp8enc`'s absence on RK3588 as a bug to fix or as a drill
   failure to suppress. It is silicon, it reproduces on the Radxa package, and
   d1 scores it explicitly.

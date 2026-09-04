@@ -1,7 +1,7 @@
 # CeraLive gstreamer-rockchip
 
 GStreamer plugins for Rockchip MPP hardware encode/decode on RK3588 devices.
-This public CeraLive fork preserves the complete nine-factory plugin set while
+This public CeraLive fork preserves the complete eleven-factory plugin set while
 maintaining and validating the H.264/H.265 encoder and decoder paths used by the
 CeraLive streaming stack.
 
@@ -17,7 +17,8 @@ The fork keeps the plugin filename `libgstrockchipmpp.so` and replaces the
 historical `gstreamer1.0-rockchip1` and `belabox-gstreamer1.0-rockchip` packages.
 Its four engine-critical elements are `mpph264enc`, `mpph265enc`,
 `mppvideodec`, and `mppjpegdec`. Five additional upstream factories remain part
-of the package and registration contract.
+of the package and registration contract; `rgaconvert` and `rgacompositor` add
+the two first-party librga factories.
 
 ## Build
 
@@ -67,13 +68,23 @@ element returns to NULL. CPU frame copying is disabled in production; setting
 continues to force conversion refusal. Without an available 2D path, conversion
 fails with `GST_FLOW_NOT_NEGOTIATED` rather than silently copying on the CPU.
 
-The separate `rockchiprga` plugin registers `rgaconvert` at rank `NONE` for
-explicit engine selection. It performs scale, crop, color conversion, rotation,
-and flip as one librga `improcess` operation over DMA-BUF input and output.
-Negotiated src caps select output geometry, including the natural width/height
-swap for 90° and 270° rotation. System-memory staging remains debug-only behind
-the same `GST_MPP_ALLOW_CPU_COPY=1` switch, and NULL→READY fails with a typed
-error when `/dev/rga` does not pass the shared driver-version trial.
+The separate `rockchiprga` plugin registers `rgaconvert` and `rgacompositor` at
+rank `NONE` for explicit engine selection. `rgaconvert` performs scale, crop,
+color conversion, rotation, and flip as one librga `improcess` operation over
+DMA-BUF input and output. Negotiated src caps select output geometry, including
+the natural width/height swap for 90° and 270° rotation. System-memory staging
+remains debug-only behind the same `GST_MPP_ALLOW_CPU_COPY=1` switch.
+
+`rgacompositor` accepts at most two progressive DMA-BUF request pads: an NV12
+primary and a BGRA overlay, producing NV12. The RGB overlay is required by
+librga's NV12-output three-channel blend; `rgaconvert` can normalize a YUV
+secondary to BGRA upstream. The compositor offers four corner-PiP presets, two
+side-by-side PbP presets, and raw custom pad rectangles, with per-pad alpha and
+z-order. A two-input frame uses one primary copy/scale and one geometry-aware
+librga composite pass; a lone primary is passed through without an RGA or CPU
+pixel operation. Both factories remain discoverable without hardware, but
+NULL→READY fails with a typed error when `/dev/rga` does not pass the shared
+driver-version trial.
 
 ## Upstream lineage and credits
 

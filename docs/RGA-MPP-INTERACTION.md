@@ -27,12 +27,20 @@ share a single availability decision and a single health table:
 | `mppvideodec` output conversion | legacy `c_RkRgaBlit` | `decode-convert` |
 | `mppjpegdec` output conversion | legacy `c_RkRgaBlit` | `jpeg-convert` |
 | `rgaconvert` | im2d `improcess` | `rgaconvert` |
+| `rgacompositor` primary copy/scale | im2d `improcess` | `rgacompositor-copy` |
+| `rgacompositor` secondary blend | geometry-aware im2d `improcess` composite | `rgacompositor` |
 
 `gstmpprgabackend.c` owns both. `gst_mpp_rga_backend_blit()` and
-`gst_mpp_rga_backend_process()` differ only in which op they invoke; they enter
-through the same `gst_mpp_rga_backend_begin()` and leave through the same
-`gst_mpp_rga_backend_finish()`, so availability, tuple health, `ENODEV`
-handling and counters behave identically whichever API ran.
+`gst_mpp_rga_backend_process()` / `gst_mpp_rga_backend_composite()` differ only
+in which op they invoke; they enter through the same
+`gst_mpp_rga_backend_begin()` and leave through the same
+`gst_mpp_rga_backend_finish()`, so availability, tuple health, and `ENODEV`
+handling behave identically whichever API ran. The composite helper uses
+`improcess` because librga 2.2.0's C `imcomposite` macro has no rectangle
+arguments; `improcess` is the geometry-bearing primitive behind the same blend
+mode and keeps scale, placement, and alpha in one hardware pass. For NV12
+output, librga requires the NV12 accumulator on the source/dst channels and the
+BGRA overlay on the `pat` channel.
 
 The two APIs differ in one respect that matters to a caller: the legacy blit
 reports success as `ret >= 0`, while `improcess` returns an `IM_STATUS` whose
@@ -92,12 +100,12 @@ one memory, that memory is DMA-BUF, and its offset is zero. Anything else falls
 back to mapping the buffer and handing RGA a virtual address — and on the
 encoder path that is already the degraded case.
 
-`rgaconvert` is stricter, because `wrapbuffer_fd()` has **no plane-offset
-argument**. A direct import is honest only for a single zero-offset DMA-BUF whose
-`GstVideoMeta` describes the standard linear plane relationship for its pixel and
-vertical strides. Multi-fd and offset layouts that cannot be represented are
-counted as `layout-rejections` and refused, never silently flattened into a
-wrong-looking frame.
+`rgaconvert` and `rgacompositor` are stricter, because `wrapbuffer_fd()` has
+**no plane-offset argument**. A direct import is honest only for a single
+zero-offset DMA-BUF whose `GstVideoMeta` describes the standard linear layout:
+two related planes for NV12 or one packed plane for BGRA. Multi-fd and offset
+layouts that cannot be represented are counted as `layout-rejections` and
+refused, never silently flattened into a wrong-looking frame.
 
 ### Strides cross the boundary in different units
 
@@ -136,6 +144,13 @@ Its pools round width and height up to 16 (`GST_RGA_DMA_HEAP_ALIGNMENT`), and
 allocates a buffer RGA can address. This is distinct from, and must not be
 confused with, the MPP encoder's own 1080→1088 alignment, which remains its own
 runtime contract.
+
+`rgacompositor` always selects that same shared dma-heap allocator for its
+output pool. It cannot write through a system-memory allocation and has no
+debug staging path. The one-input case is different: when only `sink_0` has a
+frame and its NV12 caps match the output, `create_output_buffer` returns a
+reference to that input buffer, so neither a pool allocation nor an RGA pass is
+needed for that frame.
 
 ## Demotion semantics
 
@@ -208,6 +223,21 @@ would miss frame deadlines silently.
   `GST_FLOW_NOT_NEGOTIATED` unless `GST_MPP_ALLOW_CPU_COPY=1` permits DMA-BUF
   staging; a staged frame increments `conversion-fallback-frames` once.
 
+### `rgacompositor` — two inputs, no CPU substitute
+
+- **NULL→READY** performs the same trial as `rgaconvert`; failure is
+  `GST_ELEMENT_ERROR (RESOURCE, NOT_FOUND)` while the factory remains registered.
+- **Caps** admit a progressive NV12 DMA-BUF primary, progressive BGRA DMA-BUF
+  overlay, and progressive NV12 DMA-BUF output. A pad or output buffer that
+  does not describe one zero-offset linear allocation with the format's
+  expected plane count is a layout rejection.
+- **Pad count** is capped at two (`sink_0`, `sink_1`). A third request is refused.
+- **Per frame**, two inputs issue exactly one background `improcess` and one
+  composite operation. A rejected rectangle or backend failure returns
+  `GST_FLOW_NOT_NEGOTIATED`; no environment variable enables a CPU substitute.
+- **Primary only** returns the original `sink_0` buffer by reference when caps
+  match, with zero conversion or composite calls.
+
 ## `mppjpegdec` tries MPP's own post-processor first
 
 MJPEG decode does **not** reach for RGA first. `gst_mpp_jpeg_dec_set_format()`
@@ -255,6 +285,9 @@ submitted, and names why.
 | `rgaconvert` | YUY2 | NV12 | im2d | mapped | *not yet measured* |
 | `rgaconvert` | NV24 | any | im2d | **refused** — not in the element's caps | n/a, by construction |
 | `rgaconvert` | NV12_10LE40 / P010 | any | im2d | **refused** at caps — 10-bit is out of scope | n/a, by construction |
+| `rgacompositor` | NV12 + BGRA DMA-BUF | NV12 DMA-BUF | im2d | one primary copy/scale + one three-channel composite pass | *not yet measured* |
+| `rgacompositor` | NV12 DMA-BUF × 1 | NV12 DMA-BUF | passthrough | matching `sink_0` buffer forwarded by reference | *not yet measured* |
+| `rgacompositor` | system memory / wrong pad-role format | NV12 DMA-BUF | none | **refused** at caps; no CPU path | n/a, by construction |
 | `mpph26xenc` | NV16 | NV12 | legacy blit | mapped | *not yet measured* |
 | `mpph26xenc` | BGR | NV12 | legacy blit | mapped | *not yet measured* |
 | `mpph26xenc` | RGB16 | NV12 | legacy blit | mapped; MPP's own RGB16 is not trusted, see below | *not yet measured* |
@@ -281,8 +314,8 @@ Two entries in the table need their reason stated once rather than rediscovered:
 ## Counters
 
 Three read-only `guint64` properties on `mpph264enc`, `mpph265enc`,
-`mppjpegenc`, `mppvideodec`, `mppjpegdec` and `rgaconvert`, all implemented once
-in `gstmppconversionstats.c`:
+`mppjpegenc`, `mppvideodec`, `mppjpegdec`, `rgaconvert`, and `rgacompositor`, all
+implemented once in `gstmppconversionstats.c`:
 
 | Property | Increments when |
 |---|---|
@@ -302,6 +335,7 @@ with no counters as a clean run.
 ```sh
 # Did the backend actually come up, and against which driver version?
 GST_DEBUG=mpprgabackend:4 gst-inspect-1.0 rgaconvert >/dev/null
+GST_DEBUG=mpprgabackend:4 gst-inspect-1.0 rgacompositor >/dev/null
 
 # Per-run conversion accounting for an encode graph.
 GST_DEBUG=mppenc:5 gst-launch-1.0 … 2>&1 | grep 'conversion summary'
