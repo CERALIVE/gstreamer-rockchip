@@ -13,13 +13,10 @@
 # write the padding, and the byte-for-byte comparison against the unpadded
 # software reference would measure the padding instead of the conversion.
 #
-# The hardware leg takes DMA-BUF on both sides. Input arrives that way because
-# rgaconvert proposes a dma-heap pool upstream and videotestsrc allocates from
-# it; output is requested through the `memory:DMABuf` caps feature, which is
-# what makes the element allocate a DMA-BUF output pool rather than refuse a
-# system-memory one. `GST_MPP_ALLOW_CPU_COPY` is deliberately NOT set, so a cell
-# that cannot take the silicon path fails negotiation and is recorded as a real
-# failure instead of quietly measuring a CPU copy.
+# GStreamer 1.22 videotestsrc does not honour a downstream DMA-BUF allocation
+# proposal. The board helper therefore imports the generated source bytes into a
+# dma-heap allocation and pushes one explicitly annotated DMA-BUF through appsrc.
+# It also observes the DUT output buffer and refuses non-DMA-BUF memory.
 #
 # PSNR is a fidelity measure, not an equality test: RGA's fixed-function chroma
 # resampling does not match libgstvideo's, so an exact match is not expected on
@@ -34,12 +31,17 @@ source "$ROOT/tests/board/board-lib.sh"
 
 : "${FORK_DEB:?FORK_DEB must name the CeraLive arm64 .deb}"
 readonly PSNR_MIN="${D5_PSNR_MIN:-30}"
+readonly BUILD_IMAGE="${BOARD_BUILD_IMAGE:-localhost/gstrk-bookworm-arm64}"
 readonly SRC_WIDTH=1280
 readonly SRC_HEIGHT=720
 readonly SRC_CAPS="width=$SRC_WIDTH,height=$SRC_HEIGHT,framerate=30/1"
 
 command -v python3 >/dev/null 2>&1 || {
 	echo 'FAIL: python3 is required to score the PSNR matrix' >&2
+	exit 1
+}
+command -v podman >/dev/null 2>&1 || {
+	echo 'FAIL: podman is required for the arm64 DMA-BUF helper build' >&2
 	exit 1
 }
 
@@ -49,12 +51,19 @@ board_preflight
 install_deb "$FORK_DEB"
 
 remote_scratch="/tmp/ceralive-rgaconvert-matrix-$$"
+helper_dir=$(mktemp -d)
 # shellcheck disable=SC2317
 cleanup() {
 	board_ssh "rm -rf '$remote_scratch'" >/dev/null 2>&1 || true
+	rm -rf "$helper_dir"
 }
 trap cleanup EXIT INT TERM
 board_ssh "mkdir -p '$remote_scratch'"
+podman run --rm --platform linux/arm64 --userns=keep-id \
+	-v "$ROOT:/src:ro" -v "$helper_dir:/out" "$BUILD_IMAGE" bash -lc \
+	'gcc -std=c11 -Wall -Wextra -Werror /src/tests/board/dmabuf-rgaconvert.c -o /out/dmabuf-rgaconvert $(pkg-config --cflags --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-allocators-1.0 gstreamer-video-1.0)'
+board_scp "$helper_dir/dmabuf-rgaconvert" "$BOARD_TARGET:$remote_scratch/dmabuf-rgaconvert"
+board_ssh "chmod 0755 '$remote_scratch/dmabuf-rgaconvert'"
 
 printf 'psnr_min_db=%s\n' "$PSNR_MIN"
 board_ssh 'test -c /dev/rga' || {
@@ -62,7 +71,7 @@ board_ssh 'test -c /dev/rga' || {
 	seal_report FAIL || true
 	exit 1
 }
-for element in rgaconvert videotestsrc videoconvert videoscale videocrop videoflip filesink; do
+for element in rgaconvert videotestsrc rawvideoparse videoconvert videoscale videocrop videoflip filesink; do
 	board_ssh "GST_DEBUG=0 gst-inspect-1.0 '$element' >/dev/null" || {
 		echo "FAIL: required element unavailable on the board: $element"
 		seal_report FAIL || true
@@ -134,20 +143,22 @@ record_cell() {
 # summary at all — an absence the caller scores as a failed cell.
 read_conversion_counters() {
 	local log=$1 summary
-	summary=$(grep -F 'conversion summary:' "$log" | tail -1 || true)
+	summary=$(grep -E '^DUT_FALLBACK=[0-9]+ DUT_DROPPED=[0-9]+ DUT_LAYOUT_REJECTIONS=[0-9]+$' "$log" | tail -1 || true)
 	[[ -n "$summary" ]] || return 1
-	sed -nE 's/.*fallback=([0-9]+) dropped=([0-9]+) layout-rejections=([0-9]+).*/\1 \2 \3/p' \
+	sed -nE 's/DUT_FALLBACK=([0-9]+) DUT_DROPPED=([0-9]+) DUT_LAYOUT_REJECTIONS=([0-9]+)/\1 \2 \3/p' \
 		<<<"$summary"
 }
 
 run_cell() {
 	local operation=$1 in_format=$2 out_format=$3
+	local parse_format=${in_format,,}
 	local label="$operation-$in_format-to-$out_format"
-	local props="" reference_filter="videoconvert" out_w out_h
+	local reference_filter="videoconvert" out_w out_h
 	local hw_log="$REPORT_DIR/$label.hw.log"
 	local ref_log="$REPORT_DIR/$label.ref.log"
 	local hw_raw="$REPORT_DIR/$label.hw.raw"
 	local ref_raw="$REPORT_DIR/$label.ref.raw"
+	local remote_input="$remote_scratch/$label.input.raw"
 	local counters fallback dropped rejections psnr_line luma chroma worst
 
 	case "$operation" in
@@ -160,12 +171,10 @@ run_cell() {
 			;;
 		crop)
 			out_w=1024 out_h=576
-			props="crop-x=64 crop-y=48 crop-w=1024 crop-h=576"
 			reference_filter="videocrop left=64 right=192 top=48 bottom=96 ! videoconvert"
 			;;
 		rotate)
 			out_w=$SRC_HEIGHT out_h=$SRC_WIDTH
-			props="rotation=90"
 			reference_filter="videoflip method=clockwise ! videoconvert"
 			;;
 		*)
@@ -173,17 +182,34 @@ run_cell() {
 			return 1
 			;;
 	esac
+	if [[ "$in_format" == NV16 && ("$operation" == crop || "$operation" == rotate) ]]; then
+		reference_filter="videoconvert ! video/x-raw,format=I420 ! $reference_filter"
+	fi
 
 	printf '\n== cell %s -> %s (%sx%s) ==\n' "$label" "$out_format" "$out_w" "$out_h"
 
-	if ! board_ssh "GST_DEBUG_NO_COLOR=1 GST_DEBUG=rgaconvert:5 timeout 60 gst-launch-1.0 -e videotestsrc num-buffers=1 pattern=smpte100 ! video/x-raw,format=$in_format,$SRC_CAPS ! rgaconvert $props ! video/x-raw\\(memory:DMABuf\\),format=$out_format,width=$out_w,height=$out_h ! filesink location='$remote_scratch/$label.hw.raw'" \
+	if ! board_ssh "timeout 60 gst-launch-1.0 -e videotestsrc num-buffers=1 pattern=smpte100 ! video/x-raw,format=$in_format,$SRC_CAPS ! filesink location='$remote_input'" \
+		>"$REPORT_DIR/$label.source.log" 2>&1; then
+		record_cell "$operation" "$in_format" "$out_format" "$out_w" "$out_h" \
+			FAIL n/a n/a n/a n/a 'source frame generation failed'
+		return 1
+	fi
+
+	if ! board_ssh "GST_DEBUG_NO_COLOR=1 GST_DEBUG=rgaconvert:5 timeout 60 '$remote_scratch/dmabuf-rgaconvert' '$remote_input' '$in_format' '$remote_scratch/$label.hw.raw' '$out_format' '$out_w' '$out_h' '$operation'" \
 		>"$hw_log" 2>&1; then
 		record_cell "$operation" "$in_format" "$out_format" "$out_w" "$out_h" \
 			FAIL n/a n/a n/a n/a 'hardware pipeline failed'
 		return 1
 	fi
 
-	if ! board_ssh "timeout 60 gst-launch-1.0 -e videotestsrc num-buffers=1 pattern=smpte100 ! video/x-raw,format=$in_format,$SRC_CAPS ! $reference_filter ! video/x-raw,format=$out_format,width=$out_w,height=$out_h ! filesink location='$remote_scratch/$label.ref.raw'" \
+	if ! grep -q '^INPUT_DMABUF=1 INPUT_MEMORIES=1$' "$hw_log" ||
+		! grep -q '^OUTPUT_SEEN=1 OUTPUT_DMABUF=1$' "$hw_log"; then
+		record_cell "$operation" "$in_format" "$out_format" "$out_w" "$out_h" \
+			FAIL n/a n/a n/a n/a 'DUT input/output was not one DMA-BUF'
+		return 1
+	fi
+
+	if ! board_ssh "timeout 60 gst-launch-1.0 -e filesrc location='$remote_input' ! rawvideoparse format=$parse_format width=$SRC_WIDTH height=$SRC_HEIGHT framerate=1/1 ! $reference_filter ! video/x-raw,format=$out_format,width=$out_w,height=$out_h ! filesink location='$remote_scratch/$label.ref.raw'" \
 		>"$ref_log" 2>&1; then
 		record_cell "$operation" "$in_format" "$out_format" "$out_w" "$out_h" \
 			FAIL n/a n/a n/a n/a 'software reference pipeline failed'
