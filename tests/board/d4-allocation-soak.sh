@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # 136 s allocation-contract soak: live bitrate, geometry and temporal-SVC
 # changes while the encoder exercises its DMA-BUF/RGA allocation path.
+#
+# PASS additionally requires that the 2D path under test really was the
+# trial-verified librga backend. The soak runs with the backend's own debug
+# category enabled and demands its successful-probe line, because "no error
+# appeared" is not evidence a backend was available — a run on a board with no
+# /dev/rga at all is equally quiet, and would otherwise soak nothing and pass.
+#
+# The three conversion counters are read off the live encoder object rather than
+# scraped from logs, and all three must be zero: a soak that silently degraded
+# to CPU copying still completes its 136 seconds and still reports four applied
+# changes.
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -95,6 +106,9 @@ main (int argc, char **argv)
   GError *error = NULL;
   GstBus *bus;
   GstElement *identity;
+  guint64 fallback = 0;
+  guint64 dropped = 0;
+  guint64 rejections = 0;
   Soak soak = { 0 };
   Change changes[] = {
     { &soak, 30, 3500000, 1280, 720, 2 },
@@ -141,6 +155,15 @@ main (int argc, char **argv)
   gst_element_set_state (soak.pipeline, GST_STATE_NULL);
   g_print ("AU_COUNT=%" G_GUINT64_FORMAT "\n", soak.buffers);
   g_print ("PIPELINE_ERRORS=%u\n", soak.failed ? 1 : 0);
+
+  g_object_get (soak.encoder,
+      "conversion-fallback-frames", &fallback,
+      "conversion-dropped-frames", &dropped,
+      "layout-rejections", &rejections, NULL);
+  g_print ("CONVERSION_FALLBACK=%" G_GUINT64_FORMAT "\n", fallback);
+  g_print ("CONVERSION_DROPPED=%" G_GUINT64_FORMAT "\n", dropped);
+  g_print ("LAYOUT_REJECTIONS=%" G_GUINT64_FORMAT "\n", rejections);
+
   gst_object_unref (soak.encoder);
   gst_object_unref (soak.pipeline);
   g_main_loop_unref (soak.loop);
@@ -154,7 +177,7 @@ board_ssh 'chmod 0755 /tmp/ceralive-allocation-soak'
 
 since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 soak_log="$REPORT_DIR/soak.log"
-if ! board_ssh 'timeout 155 /tmp/ceralive-allocation-soak' 2>&1 | tee "$soak_log"; then
+if ! board_ssh 'GST_DEBUG_NO_COLOR=1 GST_DEBUG=mpprgabackend:4,mppenc:5 timeout 155 /tmp/ceralive-allocation-soak' 2>&1 | tee "$soak_log"; then
 	result=1
 else
 	result=0
@@ -169,6 +192,29 @@ board_ssh 'rm -f /tmp/ceralive-allocation-soak'
 [[ "$rga_blit" -eq 0 && "$rga_api" -eq 0 ]] || result=1
 [[ $(grep -c '^CHANGE ' "$soak_log" || true) -eq 4 ]] || result=1
 grep -q '^PIPELINE_ERRORS=0$' "$soak_log" || result=1
+
+rga_probe=$(grep -F 'RGA driver probe succeeded' "$soak_log" | tail -1 || true)
+printf 'rga_backend_probe=%s\n' "${rga_probe:-MISSING}"
+if [[ -z "$rga_probe" ]]; then
+	echo 'FAIL: no trial-verified librga probe in the measured window'
+	result=1
+fi
+if grep -qE 'RGA probe failed|is below required 1\.2\.4' "$soak_log"; then
+	echo 'FAIL: the librga backend rejected /dev/rga during the soak'
+	result=1
+fi
+
+for counter in CONVERSION_FALLBACK CONVERSION_DROPPED LAYOUT_REJECTIONS; do
+	value=$(sed -nE "s/^${counter}=([0-9]+)$/\\1/p" "$soak_log" | tail -1)
+	printf '%s=%s\n' "$counter" "${value:-MISSING}"
+	if [[ -z "$value" ]]; then
+		echo "FAIL: the encoder reported no $counter value"
+		result=1
+	elif [[ "$value" -ne 0 ]]; then
+		echo "FAIL: $counter is $value, expected 0"
+		result=1
+	fi
+done
 
 if [[ "$result" -ne 0 ]]; then
 	seal_report FAIL || true

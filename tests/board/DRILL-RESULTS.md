@@ -22,6 +22,53 @@ The d1, d2, and d4 triage classifications describe regression provenance only;
 their acceptance criteria still failed and their verdicts remain **FAIL**. d3
 remains **INCONCLUSIVE** and does not authorize either stride implementation.
 
+## Criteria revision — the librga backend and `rgaconvert`
+
+The acceptance criteria for d1, d2 and d4 were reworked, and d5 was added, after
+the trial-verified librga backend and the `rgaconvert` element landed. **A
+criteria change does not carry a verdict forward.** Every row below is therefore
+**NOT-RUN**: the results in the section above were produced by the previous
+criteria and say nothing about the current ones.
+
+| Drill | Verdict under the current criteria | What the run must establish |
+|---|---|---|
+| d1 runtime parity/registration | **NOT-RUN** | Nine unconditional factories register, `rgaconvert` among them, and `mppvp8enc` matches its per-SoC expectation: EXPECTED-ABSENT on an `rk3588` board, PRESENT-REQUIRED elsewhere. |
+| d2 Radxa/fork A/B | **NOT-RUN** | H.265 primary and H.264 secondary each deliver 300/300 access units, zero `RGA_BLIT fail` journal lines, and `conversion-fallback-frames = 0` from the fork encoder's own counter summary. |
+| d3 Main10 stride A/B | **INCONCLUSIVE**, carried forward unchanged | Criteria unchanged; see the verification note below. |
+| d4 136-second allocation soak | **NOT-RUN** | The full 136 s window on a trial-verified librga backend, four applied changes, no pipeline errors, and all three conversion counters zero. |
+| d5 `rgaconvert` conversion matrix | **NOT-RUN** | Twelve cells — {CSC, scale, crop, rotate} × {NV12→NV16, NV16→NV12, BGR→NV12} — each at or above the PSNR floor against its software reference, with no cell leaving the silicon path. |
+
+### d5 cell matrix
+
+Twelve cells, no verdicts. These are filled by a board that actually executes
+`d5-rgaconvert-matrix.sh`; the script writes the same table to `matrix.tsv` in
+its report directory. Recording a measured dB here without a transcript behind
+it is the one thing this file exists to prevent.
+
+| Operation | NV12 → NV16 | NV16 → NV12 | BGR → NV12 |
+|---|---|---|---|
+| CSC (1280×720) | NOT-RUN | NOT-RUN | NOT-RUN |
+| Scale (→ 640×480) | NOT-RUN | NOT-RUN | NOT-RUN |
+| Crop (→ 1024×576) | NOT-RUN | NOT-RUN | NOT-RUN |
+| Rotate 90° (→ 720×1280) | NOT-RUN | NOT-RUN | NOT-RUN |
+
+The default PSNR floor is 30 dB, overridable through `D5_PSNR_MIN`. Luma and
+chroma are scored separately and the cell takes the worse of the two; a cell
+that cannot negotiate the silicon path fails outright rather than being scored.
+
+### d3 verification note
+
+d3 was re-examined against this revision and is **unaffected**, deliberately
+rather than by omission. It patches a single stride expression in
+`gst/rockchipmpp/gstmpp.c`, which still occurs exactly once and was last touched
+by the upstream `31ee8bd8` port, not by any RGA work. Its subject is 10-bit
+Main10 decode through `mppvideodec`, and 10-bit formats are outside the RGA
+scope entirely — `rgaconvert` refuses them at caps. Its scratch build now also
+compiles the `rockchiprga` plugin, but it copies and loads only
+`libgstrockchipmpp.so`, so the element under test is unchanged. Its criteria and
+its **INCONCLUSIVE** verdict therefore stand as recorded, and it remains
+report-only: no stride edit follows from it.
+
 ## Untested hardware scope
 
 The vendor-6.1 kernel-track drill was never executed. No vendor-6.1 board exists

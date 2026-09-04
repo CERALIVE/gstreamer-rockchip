@@ -10,21 +10,49 @@ fix ledger for the RK3588 encode/decode path.
 This repository supplies the RK3588 hardware elements used by `cerastream`:
 
 ```text
-capture -> mpph264enc/mpph265enc -> cerastream transport
+capture -> rgaconvert -> mpph264enc/mpph265enc -> cerastream transport
 compressed input -> mppvideodec/mppjpegdec -> program graph
 ```
 
-The package remains a complete plugin set. All nine factories must continue to
-build and register: `mpph264enc`, `mpph265enc`, `mppvp8enc`, `mppjpegenc`,
-`mppvideodec`, `mppjpegdec`, `mppvpxalphadecodebin`, `kmssrc`, and
-`rkximagesink`. CeraLive deeply validates the four factories used by the engine;
-the other five retain build-and-registration coverage.
+The package remains a complete plugin set. The factory contract is **sized for
+eleven** entries; **ten are built today** and the eleventh slot is reserved:
+
+| # | Factory | Plugin | Registration expectation |
+|---|---|---|---|
+| 1 | `mpph264enc` | `rockchipmpp` | Registers where `gst_mpp_enc_supported()` finds a VPU. |
+| 2 | `mpph265enc` | `rockchipmpp` | Registers where `gst_mpp_enc_supported()` finds a VPU. |
+| 3 | `mppvp8enc` | `rockchipmpp` | Registers only on SoCs with a VEPU2 VP8 encoder. **RK3588: EXPECTED-ABSENT.** |
+| 4 | `mppjpegenc` | `rockchipmpp` | Registers where `gst_mpp_enc_supported()` finds a VPU. |
+| 5 | `mppvideodec` | `rockchipmpp` | Registers unconditionally. |
+| 6 | `mppjpegdec` | `rockchipmpp` | Registers unconditionally, rank 257. |
+| 7 | `mppvpxalphadecodebin` | `rockchipmpp` | Registers on GStreamer ≥ 1.19. |
+| 8 | `kmssrc` | `kmssrc` | Registers unconditionally. |
+| 9 | `rkximagesink` | `rkximage` | Registers unconditionally. |
+| 10 | `rgaconvert` | `rockchiprga` | Registers unconditionally at rank `NONE`; activation is gated at NULL→READY. |
+| 11 | `rgacompositor` | `rockchiprga` | **RESERVED — NOT BUILT.** No source exists in this tree; the slot is held so the count moves once, when that element lands. |
+
+`mppvp8enc`'s absence on RK3588 is a **silicon fact, not a registration
+failure**: the SoC has no VEPU2 VP8 block, the historical Radxa package behaves
+identically on the same board, and `d1-runtime-parity.sh` scores it
+EXPECTED-ABSENT rather than failing. Do not "fix" it and do not remove it — it
+registers on the SoCs that do carry the block.
+
+`rgacompositor` is a FUTURE element. Nothing in this repository implements it;
+reserving slot 11 records the intended shape so a later PR adds an element
+without re-litigating the frozen count. Do not create it on the strength of
+this row.
+
+CeraLive deeply validates the four MPP factories used by the engine plus
+`rgaconvert`; the remaining five retain build-and-registration coverage.
 
 ## Repository map
 
 | Area | Location |
 |---|---|
 | MPP encoder/decoder plugin | `gst/rockchipmpp/` |
+| RGA 2D converter plugin | `gst/rockchiprga/` |
+| RGA backend, tuple health, conversion counters | `gst/rockchipmpp/gstmpprga*.c`, `gstmppconversionstats.c` |
+| RGA ↔ MPP interaction reference | `docs/RGA-MPP-INTERACTION.md` |
 | KMS source | `gst/kmssrc/` |
 | Rockchip X11/KMS sink | `gst/rkximage/` |
 | Hardware-independent tests | `tests/` |
@@ -103,12 +131,19 @@ The complete red/green, MPP-ABI, hardware-gate, and independent-review record is
 
 The following are compatibility contracts, not cleanup opportunities:
 
-- **Plugin filename:** `libgstrockchipmpp.so` remains unchanged.
+- **Plugin filenames:** `libgstrockchipmpp.so` remains unchanged — the image's
+  sysext exclusion globs and its MPP runtime-contract test key on that exact
+  name. The RGA converter ships alongside it as `libgstrockchiprga.so`, in the
+  same package and the same plugin directory; both names are frozen.
 - **Package prefix/name:** Rockchip packages retain the
   `gstreamer1.0-rockchip` prefix; this fork ships
   `gstreamer1.0-rockchip-ceralive` and replaces
   `gstreamer1.0-rockchip1` plus `belabox-gstreamer1.0-rockchip`.
-- **Factory set:** all nine factories listed under **Role** continue to register.
+- **Factory set:** the eleven-slot table under **Role** is the contract. The ten
+  built factories continue to register on the platforms named in their
+  expectation column, with `mppvp8enc` EXPECTED-ABSENT on RK3588 and slot 11
+  reserved. Registering fewer than the ten built factories is a defect;
+  registering an unlisted factory is a contract change.
 - **Encoder properties used by the engine:** `bitrate`, `bitrate-min`,
   `bitrate-max`, `zero-copy-pkt`, `rc-mode`, `qp-max`, `gop`, `width`, and
   `height` keep their names, types, defaults, ranges, and enum nicks. The
@@ -125,6 +160,32 @@ The following are compatibility contracts, not cleanup opportunities:
   and format pair. CPU copy remains compiled but is debug-only behind
   `GST_MPP_ALLOW_CPU_COPY=1`; normal operation fails negotiation instead. The
   three read-only conversion counters are additive element properties.
+- **`rgaconvert` properties used by the engine:** the six transform properties
+  keep their names, types, defaults, ranges, and enum/flag nicks. A consumer
+  graph names them literally, so a rename is a cross-repository migration.
+
+  | Property | Type | Default | Range / nicks |
+  |---|---|---|---|
+  | `rotation` | enum `GstRgaRotation` | `0` | nicks `0`, `90`, `180`, `270` — clockwise |
+  | `hflip` | boolean | `FALSE` | — |
+  | `vflip` | boolean | `FALSE` | — |
+  | `core-mask` | flags `GstRgaCoreMask` | `auto` | nicks `auto`, `rga3-core0`, `rga3-core1`, `rga2` |
+  | `priority` | int | `0` | `0`–`6` |
+  | `crop-x` / `crop-y` | uint | `0` | `0`–`G_MAXUINT`, input crop origin |
+  | `crop-w` / `crop-h` | uint | `0` | `0`–`G_MAXUINT`; **zero means "the remaining extent"**, not "an empty crop" |
+
+  `crop-{x,y,w,h}` are four separate properties by design — an operator sets
+  only the edges it wants and leaves the rest at the default. Zero width or
+  height is therefore load-bearing: it selects the remainder of the input, so
+  the default property set is a full-frame no-crop conversion.
+
+  `rgaconvert` also carries the same three read-only counters as the MPP
+  elements — `conversion-fallback-frames`, `conversion-dropped-frames`,
+  `layout-rejections` — with identical semantics, because all three elements
+  share `gstmppconversionstats.c`. Output geometry comes from negotiated src
+  caps, including the width/height swap that 90°/270° rotation forces; it is
+  never a property. The factory registers at rank `NONE` and never autoplugs;
+  activation, not registration, is what a missing `/dev/rga` blocks.
 
 `tests/parity-check.sh`, `tests/golden/`, `packaging/package-contract.sh`, and
 the board drills are the executable authorities. Update a frozen contract only
@@ -141,20 +202,25 @@ The board suite is deliberately outside Meson:
 
 | Drill | Hardware claim |
 |---|---|
-| `d1-runtime-parity.sh` | Package installation, all-nine registration, four-element golden contract. |
-| `d2-radxa-fork-ab.sh` | Radxa/fork 60 s encode A/B, 300/300 AUs, SPS geometry/profile/level, no RGA entry. |
+| `d1-runtime-parity.sh` | Package installation, registration of every built factory the board's SoC can carry, four-element golden contract. `mppvp8enc` is scored EXPECTED-ABSENT on an `rk3588` board and PRESENT-REQUIRED elsewhere. |
+| `d2-radxa-fork-ab.sh` | Radxa/fork encode A/B over **H.265 primary and H.264 secondary**: 300/300 AUs per codec, SPS geometry/profile/level, zero `RGA_BLIT fail`, and `conversion-fallback-frames = 0` on the fork variant. |
 | `d3-main10-stride-ab.sh` | Report-only Main10 current-vs-`*8/pixel_stride0` frame-checksum experiment. |
-| `d4-allocation-soak.sh` | 136 s DMA allocation soak with live bitrate, resolution, and temporal-SVC changes. |
+| `d4-allocation-soak.sh` | 136 s DMA allocation soak with live bitrate, resolution, and temporal-SVC changes, run **on a trial-verified librga backend** and scored on the three conversion counters. |
+| `d5-rgaconvert-matrix.sh` | `rgaconvert` conversion matrix — {CSC, scale, crop, rotate} × representative format pairs, each cell measured as PSNR against a software reference of the same operation. |
 
 The latest executed verdicts and their hardware scope are recorded in
 [`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md). That tracked
 summary preserves failed and inconclusive outcomes; it is not a substitute for
-the retained raw transcripts.
+the retained raw transcripts. A criteria change does not carry an old verdict
+forward: when a drill's acceptance criteria are reworked, its prior result
+becomes history and the drill is **not yet run** under the new criteria until a
+board actually executes it.
 
 Every script requires `CERALIVE_BOARD_TEST=1` and otherwise exits 77. Board
 identity is supplied only through `BOARD_IP`, `BOARD_SSH_USER`, and
 `BOARD_SSH_PASS`; repository files never locate credentials or reference a
-workspace parent. d1/d2/d4 also take package paths through environment variables.
+workspace parent. d1/d2/d4/d5 also take package paths through environment
+variables.
 
 ### The suite proves
 
@@ -163,9 +229,17 @@ workspace parent. d1/d2/d4 also take package paths through environment variables
 - Registration/property/caps/rank behavior and the finite runtime observations
   scored by each completed drill.
 - For d2/d4, zero matching `RGA_BLIT fail` and `rga_api version` journal lines in
-  the measured window.
+  the measured window, and `conversion-fallback-frames = 0` read from the
+  element's own end-of-run counter summary — never inferred from silence.
 - For d3, only the enum written by its frame-count/checksum/error oracle:
   `CURRENT_CORRECT`, `ALTERNATIVE_CORRECT`, or `INCONCLUSIVE`.
+- For d4, that the backend under test is the trial-verified librga one: the
+  `mpprgabackend` probe logged a driver version at or above the 1.2.4 floor in
+  that run. A run whose log carries no such probe line FAILS; availability is
+  never assumed from the absence of an error.
+- For d5, only the measured PSNR of each executed cell against its software
+  reference. An unexecuted cell is `NOT-RUN`; it is never scored from a
+  neighbouring cell, from a previous drill, or from the element's own logs.
 
 ### The suite does NOT prove
 
@@ -181,6 +255,11 @@ workspace parent. d1/d2/d4 also take package paths through environment variables
   and counters substitute only for the specific properties they assert.
 - A result from an unreachable board. Such a run is `SKIPPED-unreachable` with an
   attempt transcript, never PASS.
+- That d5's PSNR threshold means bit-exactness. RGA is a fixed-function 2D
+  engine and its chroma resampling does not match libgstvideo's; a passing cell
+  says the hardware result is faithful to the reference at the recorded dB, not
+  that the two are identical. A cell that RGA cannot perform at all fails
+  negotiation instead, which is a distinct, separately recorded outcome.
 
 ## Licensing and credits
 
@@ -188,7 +267,8 @@ The project remains LGPL-2.1. Keep `COPYING`, source headers, and
 `packaging/copyright` intact. Copyright holders represented in the shipped tree
 are Rockchip Electronics Co., Ltd.; Collabora Ltd.; Igalia; and Julien Moutte.
 Igalia and Julien Moutte are scoped to `gst/rkximage/`, not the MPP plugin;
-CERALIVE owns the new RGA backend, tuple-health, and conversion-counter files.
+CERALIVE owns the new RGA backend, tuple-health, and conversion-counter files
+and the whole of `gst/rockchiprga/`.
 
 Provenance credits are distinct: Rockchip originated the plugin family, JeffyCN
 maintains the audited upstream line, BELABOX rebased and carried the downstream
@@ -197,8 +277,15 @@ this fork. See `README.md` for the public maintainer notice.
 
 ## Anti-patterns
 
-- Do not rename `libgstrockchipmpp.so` or the package prefix.
+- Do not rename `libgstrockchipmpp.so`, `libgstrockchiprga.so`, or the package
+  prefix, and do not split the RGA converter into a second `.deb`: the release
+  publishes exactly one archive.
 - Do not remove unused factories to reduce the package.
+- Do not implement `rgacompositor` because slot 11 names it. The slot is a
+  reservation, not a specification.
+- Do not treat `mppvp8enc`'s absence on RK3588 as a bug to fix or as a drill
+  failure to suppress. It is silicon, it reproduces on the Radxa package, and
+  d1 scores it explicitly.
 - Do not rename `bitrate` back to `bps` or add a legacy alias here.
 - Do not change Main10 stride semantics on static-analysis confidence alone.
 - Do not treat plugin registration success as proof all factories registered;

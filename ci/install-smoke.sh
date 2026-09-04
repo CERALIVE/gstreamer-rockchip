@@ -2,12 +2,13 @@
 # Clean-container install smoke for gstreamer1.0-rockchip-ceralive.
 #
 # Runs INSIDE a fresh `debian:<suite>-slim` arm64 container. It is the producer
-# side of the two questions a device actually asks of this package:
+# side of the questions a device actually asks of this package:
 #
 #   1. is the dependency closure COMPLETE?  -> `ldd`, zero "not found"
-#   2. does the plugin actually LOAD?       -> `gst-inspect-1.0 --plugin rockchipmpp`
+#   2. does the MPP plugin actually LOAD?   -> `gst-inspect-1.0 --plugin rockchipmpp`
+#   3. does the RGA plugin actually LOAD?   -> `gst-inspect-1.0 --plugin rockchiprga`
 #
-# Both are needed, and neither substitutes for the other. `apt-get install`
+# All are needed, and none substitutes for another. `apt-get install`
 # succeeding proves only that the DECLARED dependencies resolve, never that they
 # are SUFFICIENT: a package with an under-declared Depends installs cleanly on a
 # bare container and then shows five unresolved SONAMEs. That failure shipped
@@ -36,14 +37,22 @@ runtime_dir="$(readlink -f "${runtime_arg}")"
 readonly PACKAGE="gstreamer1.0-rockchip-ceralive"
 readonly TRIPLET="aarch64-linux-gnu"
 readonly PLUGIN_SO="/usr/lib/${TRIPLET}/gstreamer-1.0/libgstrockchipmpp.so"
-# The build enables rkximage + rockchipmpp + kmssrc, so the package ships three
-# plugins and no more. Asserting the count turns a silently dropped plugin --
-# meson's `auto` features fail that way -- into a red smoke.
-readonly EXPECT_PLUGIN_COUNT=3
+readonly RGA_PLUGIN_SO="/usr/lib/${TRIPLET}/gstreamer-1.0/libgstrockchiprga.so"
+# The build enables rkximage + rockchipmpp + kmssrc + rga, so the package ships
+# four plugins and no more. Asserting the count turns a silently dropped plugin
+# -- meson's `auto` features fail that way -- into a red smoke.
+readonly EXPECT_PLUGIN_COUNT=4
 # Decoders register unconditionally (gst_mpp_video_dec_register / _jpeg_dec_).
 # These are the F13 runtime proof: the package built on the target suite must
 # LOAD on the suite under test, including trixie's GStreamer 1.26.
 readonly REQUIRED_FACTORIES="mppvideodec mppjpegdec"
+# rgaconvert also registers unconditionally, at rank NONE. It lives in a
+# DIFFERENT plugin, so it is asserted against its own gst-inspect output rather
+# than added to the list above -- and it is a REQUIRED registration even in a
+# container with no /dev/rga, because the device gates ACTIVATION, not
+# registration. A container-absent factory here would mean the plugin loaded
+# element-less.
+readonly RGA_REQUIRED_FACTORIES="rgaconvert"
 # Encoders gate themselves on gst_mpp_enc_supported(), which needs a Rockchip
 # VPU. They are REPORTED here, never asserted -- CI has no board, and
 # tests/parity-check.sh applies the same off-board rule.
@@ -134,8 +143,10 @@ mapfile -t plugins < <(dpkg -L "${PACKAGE}" | grep -E '\.so$' | sort)
 printf 'plugins installed: %s\n' "${#plugins[@]}"
 [ "${#plugins[@]}" -eq "${EXPECT_PLUGIN_COUNT}" ] \
 	|| fail "expected ${EXPECT_PLUGIN_COUNT} plugin .so files, dpkg -L lists ${#plugins[@]}: ${plugins[*]}"
-printf '%s\n' "${plugins[@]}" | grep -qxF "${PLUGIN_SO}" \
-	|| fail "the FROZEN plugin path ${PLUGIN_SO} is not installed"
+for frozen in "${PLUGIN_SO}" "${RGA_PLUGIN_SO}"; do
+	printf '%s\n' "${plugins[@]}" | grep -qxF "${frozen}" \
+		|| fail "the FROZEN plugin path ${frozen} is not installed"
+done
 
 unresolved=0
 for so in "${plugins[@]}"; do
@@ -186,6 +197,26 @@ for factory in ${REQUIRED_FACTORIES}; do
 	printf 'factory registered: %s\n' "${factory}"
 done
 
+step "oracle 3 -- the RGA plugin LOADS and carries its element"
+rga_inspect_out="$(gst-inspect-1.0 --plugin rockchiprga)"
+printf '%s\n' "${rga_inspect_out}"
+rga_loaded_from="$(awk '$1 == "Filename" { print $2; exit }' <<<"${rga_inspect_out}")"
+rga_loaded_real="$(readlink -f "${rga_loaded_from}")"
+rga_expect_real="$(readlink -f "${RGA_PLUGIN_SO}")"
+printf 'gst-inspect loaded: %s -> %s\n' "${rga_loaded_from}" "${rga_loaded_real}"
+[ "${rga_loaded_real}" = "${rga_expect_real}" ] \
+	|| fail "gst-inspect loaded rockchiprga from '${rga_loaded_from}' (${rga_loaded_real}), not ${RGA_PLUGIN_SO} (${rga_expect_real})"
+
+rga_owner="$(dpkg -S "${RGA_PLUGIN_SO}" | cut -d: -f1)"
+[ "${rga_owner}" = "${PACKAGE}" ] \
+	|| fail "${RGA_PLUGIN_SO} is owned by ${rga_owner}, not ${PACKAGE}"
+
+for factory in ${RGA_REQUIRED_FACTORIES}; do
+	grep -qE "^[[:space:]]+${factory}:" <<<"${rga_inspect_out}" \
+		|| fail "factory ${factory} did not register -- the RGA plugin loaded but is element-less"
+	printf 'factory registered: %s\n' "${factory}"
+done
+
 step "hardware-gated factories (reported, not asserted)"
 for factory in ${HARDWARE_GATED_FACTORIES}; do
 	if grep -qE "^[[:space:]]+${factory}:" <<<"${inspect_out}"; then
@@ -195,5 +226,5 @@ for factory in ${HARDWARE_GATED_FACTORIES}; do
 	fi
 done
 
-printf '\ninstall-smoke: OK (%s -- closure complete, plugin loads, %s registered)\n' \
-	"${suite}" "${REQUIRED_FACTORIES}"
+printf '\ninstall-smoke: OK (%s -- closure complete, both plugins load, %s %s registered)\n' \
+	"${suite}" "${REQUIRED_FACTORIES}" "${RGA_REQUIRED_FACTORIES}"
