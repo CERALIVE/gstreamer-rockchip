@@ -28,7 +28,7 @@ board_ssh "dpkg-query -W -f='package=\${Package}\nversion=\${Version}\narchitect
 
 readonly -a FACTORIES=(
 	mpph264enc mpph265enc mppjpegenc mppvideodec mppjpegdec
-	mppvpxalphadecodebin kmssrc rkximagesink rgaconvert
+	mppvpxalphadecodebin kmssrc rkximagesink rgaconvert rgacompositor
 )
 readonly SOC_GATED_FACTORY=mppvp8enc
 

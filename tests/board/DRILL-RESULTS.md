@@ -32,7 +32,7 @@ criteria and say nothing about the current ones.
 
 | Drill | Verdict under the current criteria | What the run must establish |
 |---|---|---|
-| d1 runtime parity/registration | **NOT-RUN** | Nine unconditional factories register, `rgaconvert` among them, and `mppvp8enc` matches its per-SoC expectation: EXPECTED-ABSENT on an `rk3588` board, PRESENT-REQUIRED elsewhere. |
+| d1 runtime parity/registration | **NOT-RUN** | Ten board-required factories register, including both `rgaconvert` and `rgacompositor`, and `mppvp8enc` matches its per-SoC expectation: EXPECTED-ABSENT on an `rk3588` board, PRESENT-REQUIRED elsewhere. |
 | d2 Radxa/fork A/B | **NOT-RUN** | H.265 primary and H.264 secondary each deliver 300/300 access units, zero `RGA_BLIT fail` journal lines, and `conversion-fallback-frames = 0` from the fork encoder's own counter summary. |
 | d3 Main10 stride A/B | **INCONCLUSIVE**, carried forward unchanged | Criteria unchanged; see the verification note below. |
 | d4 136-second allocation soak | **NOT-RUN** | The full 136 s window on a trial-verified librga backend, four applied changes, no pipeline errors, and all three conversion counters zero. |
