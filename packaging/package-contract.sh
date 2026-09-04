@@ -33,9 +33,9 @@ readonly EXPECT_PACKAGE="gstreamer1.0-rockchip-ceralive"
 # key on this filename and on the package-name prefix, by exact name.
 readonly EXPECT_PLUGIN_SO="libgstrockchipmpp.so"
 # Also FROZEN, and shipped in the SAME package: the release publishes exactly one
-# .deb, so the RGA converter has nowhere else to go. cerastream names rgaconvert
-# literally in its RK3588 capture graph, so an install that silently lacks this
-# file is a device that cannot normalize capture.
+# .deb, so the RGA elements have nowhere else to go. cerastream names their
+# factories literally in its RK3588 graphs, so an install that silently lacks
+# this file cannot normalize capture or compose two sources.
 readonly EXPECT_RGA_PLUGIN_SO="libgstrockchiprga.so"
 readonly EXPECT_ARCH="arm64"
 readonly EXPECT_TRIPLET="aarch64-linux-gnu"
@@ -45,7 +45,7 @@ readonly EXPECT_RGA_PLUGIN_PATH="${EXPECT_PLUGIN_DIR}/${EXPECT_RGA_PLUGIN_SO}"
 readonly DEP5_FORMAT="https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/"
 readonly SOURCE_URL="https://github.com/CERALIVE/gstreamer-rockchip"
 readonly EXPECT_DEPENDS="libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, libglib2.0-0, libc6 (>= 2.36), libdrm2, libx11-6, librockchip-mpp1, librga2"
-# Every SONAME the three shipped plugins link, mapped to the Debian package that
+# Every SONAME the four shipped plugins link, mapped to the Debian package that
 # supplies it. Resolved with `dpkg -S` on the arm64 build container, not guessed.
 # The staged check below re-derives the plugins' NEEDED set and refuses anything
 # this table does not cover, so a new link-time dependency cannot reach a release
@@ -168,6 +168,10 @@ grep -qF "library('gstrockchipmpp'," "${root}/gst/rockchipmpp/meson.build" \
 	|| fail "the MPP plugin library name is FROZEN as gstrockchipmpp (${EXPECT_PLUGIN_SO})"
 grep -qF "library('gstrockchiprga'," "${root}/gst/rockchiprga/meson.build" \
 	|| fail "the RGA plugin library name is FROZEN as gstrockchiprga (${EXPECT_RGA_PLUGIN_SO})"
+grep -qF 'gst_element_register (plugin, "rgaconvert"' "${root}/gst/rockchiprga/gstrockchiprga.c" \
+	|| fail "rockchiprga must register rgaconvert"
+grep -qF 'gst_element_register (plugin, "rgacompositor"' "${root}/gst/rockchiprga/gstrockchiprga.c" \
+	|| fail "rockchiprga must register rgacompositor"
 grep -qF "install_dir : plugins_install_dir," "${root}/gst/rockchiprga/meson.build" \
 	|| fail "the RGA plugin must install into plugins_install_dir alongside ${EXPECT_PLUGIN_SO}"
 # The RGA plugin is reached through a conditional subdir, so an enabled -Drga is

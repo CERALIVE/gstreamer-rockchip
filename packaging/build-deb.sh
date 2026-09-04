@@ -27,7 +27,7 @@ rm -rf "${build_dir}" "${stage_dir}"
 # RGA conversion inside the MPP plugin, AND it is what builds the separate
 # rockchiprga plugin at all (gst/meson.build descends into it only when librga
 # is found and the feature is not disabled). Left on `auto` in a container
-# without librga, the package would silently ship without rgaconvert.
+# without librga, the package would silently ship without either RGA factory.
 meson setup "${build_dir}" "${root}" \
 	--prefix=/usr \
 	--libdir="lib/${triplet}" \
@@ -75,8 +75,8 @@ gstreamer1.0-rockchip-ceralive (${version}) unstable; urgency=medium
     verified fix ledger recorded in docs/fix-audit.md.
   * Replaces gstreamer1.0-rockchip1 and belabox-gstreamer1.0-rockchip on the
     device image; the plugin filename libgstrockchipmpp.so is unchanged.
-  * Ships the rockchiprga plugin (libgstrockchiprga.so) providing the rgaconvert
-    2D scale/crop/colour-convert/rotate element, in this same package.
+  * Ships the rockchiprga plugin (libgstrockchiprga.so) providing rgaconvert and
+    the two-input rgacompositor PiP/PbP element, in this same package.
 
  -- CERALIVE <contact@ceralive.tv>  ${changelog_date}
 EOF
@@ -135,7 +135,7 @@ License: LGPL-2.1
 Description: CeraLive-hardened GStreamer plugins for Rockchip RK3588
  The RK3588 hardware encode/decode elements the CeraLive streaming engine runs
  on: mpph264enc, mpph265enc, mppvideodec and mppjpegdec, plus the rgaconvert 2D
- converter, backed by the Rockchip MPP and RGA libraries.
+ converter and rgacompositor PiP/PbP mixer, backed by Rockchip MPP and RGA.
  .
  This is the CeraLive fork of the Rockchip plugin set. It exists so the elements
  the device streams with are under first-party control: every change it carries
