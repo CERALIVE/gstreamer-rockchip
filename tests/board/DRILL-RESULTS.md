@@ -74,3 +74,33 @@ report-only: no stride edit follows from it.
 The vendor-6.1 kernel-track drill was never executed. No vendor-6.1 board exists
 in the fleet; only the mainline 7.2 track above was tested. These results must
 not be generalized to that untested kernel track.
+
+## 2026-09-04 — multi_rga BOARD GATE A (Orange Pi 5+)
+
+The reachable Orange Pi 5+ ran `7.2.0-ceralive-rk3588 #3` from slot A with
+`rk3588-media-island v2026.9.2` / patch-series commit `365b2463294019e3d4e2d5718a787c2055f4ab59`.
+The installed package reported `gstreamer1.0-rockchip-ceralive
+1.14.4+ceralive.1`; its source includes AUTO fix `38dadefa`, DMA-BUF allocation
+fix `e95c9174`, and d5 harness fix `b724da59`. The board's post-release island
+rotation-validation fix is `97b7b1c`. Rock 5B+ remained BLOCKED-ON-OPERATOR at
+100% ICMP loss and produced no result.
+
+| Drill | Verdict under current criteria | Measured result |
+|---|---|---|
+| d2 Radxa/fork A/B | **PASS** | Radxa and fork each delivered H.265 300/300 then H.264 300/300 AUs. Fork summaries for both codecs were fallback=0, dropped=0, layout-rejections=0; journal counts were `RGA_BLIT fail=0`, `rga_api version=0`. Raw transcript: `test-results/board/d2-radxa-fork-ab-20260904T110439Z/`. |
+| d4 136-second allocation soak | **FAIL — pre-existing live-TSVC defect** | Exact pre-flip geometry execution cannot pass the first transition because mainline supplies no `/dev/rga`, and CPU-copy debug mode cannot scale. A same-geometry, RGA-disabled control isolated the crash: tsvc2 applied at 30 s, tsvc3 at 60 s, then libmpp logged `h264e_dpb: find_cpb_frame can not find match frm 0` and SIGABRTed. Draining around geometry/ref-cfg changes did not repair libmpp's internal CPB state and was reverted. This code predates the RGA effort; the new driver only made the previously unrun d4 geometry path reachable. Raw hardware reruns: `test-results/board/d4-allocation-soak-20260904T132648Z/` and `test-results/board/d4-allocation-soak-20260904T133029Z/`; isolated control: root evidence `tmp/todo26-orange/d4-temporal-only-control.txt`. |
+| d5 `rgaconvert`, strict floor 40 dB | **FAIL — 6/12 quality cells** | The corrected helper uses explicit dma-heap/appsrc input, verifies DMA-BUF on both DUT pads, and every final cell reports fallback=0, dropped=0, layout-rejections=0. A driver-validation bug initially rejected quarter-turn destination axes; island fix `97b7b1c` restored both YUV rotation cells. Six cells pass and six execute on silicon but remain below 40 dB. Raw transcript: `test-results/board/d5-rgaconvert-matrix-20260904T133931Z/`. |
+
+### Executed d5 matrix (`D5_PSNR_MIN=40`)
+
+| Operation | NV12 → NV16 | NV16 → NV12 | BGR → NV12 |
+|---|---|---|---|
+| CSC (1280×720) | PASS — inf | PASS — inf | FAIL — 22.65 dB |
+| Scale (→ 640×480) | FAIL — 22.69 dB | FAIL — 22.69 dB | FAIL — 22.66 dB |
+| Crop (→ 1024×576) | PASS — inf | PASS — 45.24 dB | FAIL — 34.30 dB |
+| Rotate 90° (→ 720×1280) | PASS — 40.80 dB | PASS — 45.24 dB | FAIL — 22.65 dB |
+
+These are real final verdicts. d4 is a libmpp live-TSVC crash independent of
+RGA conversion. d5's former DMA-BUF/fallback and rotate-submit failures are
+fixed; the six remaining failures are confirmed zero-fallback hardware quality
+results and must not be softened into harness failures.
