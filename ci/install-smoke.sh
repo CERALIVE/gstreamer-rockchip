@@ -46,13 +46,11 @@ readonly EXPECT_PLUGIN_COUNT=4
 # These are the F13 runtime proof: the package built on the target suite must
 # LOAD on the suite under test, including trixie's GStreamer 1.26.
 readonly REQUIRED_FACTORIES="mppvideodec mppjpegdec"
-# rgaconvert also registers unconditionally, at rank NONE. It lives in a
-# DIFFERENT plugin, so it is asserted against its own gst-inspect output rather
-# than added to the list above -- and it is a REQUIRED registration even in a
-# container with no /dev/rga, because the device gates ACTIVATION, not
-# registration. A container-absent factory here would mean the plugin loaded
-# element-less.
-readonly RGA_REQUIRED_FACTORIES="rgaconvert"
+# Both RGA factories register unconditionally at rank NONE. They live in a
+# DIFFERENT plugin, so they are asserted against its own gst-inspect output
+# rather than added to the list above -- and both remain REQUIRED in a container
+# with no /dev/rga, because the device gates ACTIVATION, not registration.
+readonly RGA_REQUIRED_FACTORIES="rgaconvert rgacompositor"
 # Encoders gate themselves on gst_mpp_enc_supported(), which needs a Rockchip
 # VPU. They are REPORTED here, never asserted -- CI has no board, and
 # tests/parity-check.sh applies the same off-board rule.
@@ -197,7 +195,7 @@ for factory in ${REQUIRED_FACTORIES}; do
 	printf 'factory registered: %s\n' "${factory}"
 done
 
-step "oracle 3 -- the RGA plugin LOADS and carries its element"
+step "oracle 3 -- the RGA plugin LOADS and carries both elements"
 rga_inspect_out="$(gst-inspect-1.0 --plugin rockchiprga)"
 printf '%s\n' "${rga_inspect_out}"
 rga_loaded_from="$(awk '$1 == "Filename" { print $2; exit }' <<<"${rga_inspect_out}")"
