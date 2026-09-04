@@ -89,9 +89,9 @@ struct _GstMppEnc
   guint bps_min;
   guint bps_max;
 
-  gint fps_out;           /* output framerate numerator (0 = same as input) */
-  gint drop_mode;         /* MppEncRcDropFrmMode: 0=disabled, 1=normal, 2=pskip */
-  guint drop_threshold;   /* % over bps_max that triggers drop (default 50) */
+  gint fps_out;                 /* output framerate numerator (0 = same as input) */
+  gint drop_mode;               /* MppEncRcDropFrmMode: 0=disabled, 1=normal, 2=pskip */
+  guint drop_threshold;         /* % over bps_max that triggers drop (default 50) */
 
   /* Rolling intra refresh: spreads I-macroblocks across frames instead of
    * periodic IDR spikes. 0 = disabled, else number of MB rows refreshed per
@@ -100,17 +100,17 @@ struct _GstMppEnc
 
   /* Super-frame handling: bound the size of a single coded frame so a scene
    * cut / keyframe cannot spike the send buffer. */
-  gint super_mode;        /* MppEncRcSuperFrameMode: 0=none, 1=drop, 2=reenc */
-  guint super_i_thd;      /* I-frame size threshold in bytes (0 = auto) */
-  guint super_p_thd;      /* P-frame size threshold in bytes (0 = auto) */
+  gint super_mode;              /* MppEncRcSuperFrameMode: 0=none, 1=drop, 2=reenc */
+  guint super_i_thd;            /* I-frame size threshold in bytes (0 = auto) */
+  guint super_p_thd;            /* P-frame size threshold in bytes (0 = auto) */
 
   /* De-breathing: smooths the GOP bitrate "breathing" oscillation. */
   gboolean debreath;
-  guint debreath_strength; /* [0, 35] */
+  guint debreath_strength;      /* [0, 35] */
 
   /* Content-adaptive tuning. */
-  gint scene_mode;        /* 0=default, 1=ipc, 2=ipc-ptz */
-  guint anti_flicker;     /* temporal anti-flicker strength [0, 3], 0 = off */
+  gint scene_mode;              /* 0=default, 1=ipc, 2=ipc-ptz */
+  guint anti_flicker;           /* temporal anti-flicker strength [0, 3], 0 = off */
 
   gboolean zero_copy_pkt;
 
@@ -139,6 +139,15 @@ struct _GstMppEnc
    * repeat on every apply; latching it keeps a rejection from being lost in the
    * window between the write and the MPP_ENC_SET_CFG that would report it. */
   gboolean cfg_error;
+
+  guint restart_attempts;
+  gint64 restart_window_started;
+  guint64 encoder_restarts;
+  gboolean restarting;
+
+  /* Force-key-unit events from either pad converge on the next submitted
+   * frame, where MPP can honour the request without racing the input queue. */
+  gint force_idr_pending;
 
   MppFrame mpp_frame;
 

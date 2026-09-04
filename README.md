@@ -45,6 +45,10 @@ Hardware-independent tests use the mock MPP seam. RK3588-only acceptance is in
 See [`AGENTS.md`](AGENTS.md) for the exact proof boundary, frozen contracts, and
 contribution rules.
 
+Encoder latency, bounded context recovery, colorimetry/VUI configuration,
+forced-IDR handling, and the PTS/DTS contract are documented in
+[`docs/ENCODER-RUNTIME-CONTRACT.md`](docs/ENCODER-RUNTIME-CONTRACT.md).
+
 ## RGA conversion safety
 
 The MPP encoder and decoders treat librga as available only after `/dev/rga`

@@ -53,6 +53,24 @@ test('rockchipmpp GstHarness factories and caps', mpp_harness,
   workdir : meson.project_build_root(),
   is_parallel : false)
 
+foreach encoder_test : ['enc-latency', 'enc-restart', 'enc-colorimetry', 'idr-nal']
+  encoder_exe = executable(encoder_test, '../../tests/check/' + encoder_test + '.c',
+    c_args : gst_rockchip_args,
+    include_directories : configinc,
+    dependencies : [gst_dep, gstvideo_dep, gstcheck_dep, mpp_dep],
+    link_with : mock_mpp)
+  test('rockchipmpp ' + encoder_test, encoder_exe,
+    depends : [rockchipmpp, mock_mpp],
+    env : [
+      'GST_PLUGIN_PATH=' + meson.project_build_root() / 'gst/rockchipmpp',
+      'MPP_MOCK_LOG=' + meson.project_build_root() / ('mpp-mock-' + encoder_test + '.log'),
+      'LD_PRELOAD=' + meson.project_build_root() / 'gst/rockchipmpp/libmppmock.so',
+      'GST_MPP_ALLOW_CPU_COPY=1',
+    ],
+    workdir : meson.project_build_root(),
+    is_parallel : false)
+endforeach
+
 mpp_allocator_seam = executable('mpp-allocator-seam',
   ['../../tests/mpp_allocator_seam.c', 'gstmppallocator.c'],
   c_args : [gst_rockchip_args, '-Wextra'],

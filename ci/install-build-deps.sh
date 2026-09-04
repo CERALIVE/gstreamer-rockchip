@@ -32,6 +32,7 @@ apt-get install -y --no-install-recommends \
   pkg-config \
   python3 \
   gstreamer1.0-tools \
+  gstreamer1.0-plugins-base \
   libgstreamer1.0-dev \
   libgstreamer-plugins-base1.0-dev \
   libglib2.0-dev \

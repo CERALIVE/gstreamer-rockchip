@@ -59,6 +59,7 @@ CeraLive deeply validates the four MPP factories used by the engine plus
 | Board-gated drills | `tests/board/` |
 | Runtime parity goldens | `tests/golden/` |
 | Per-fix evidence ledger | `docs/fix-audit.md` |
+| Encoder latency/recovery/color/VUI/IDR/DTS contract | `docs/ENCODER-RUNTIME-CONTRACT.md` |
 | Debian package contract | `packaging/` |
 | Target suite and MPP/RGA pins | `ci/` |
 
@@ -155,6 +156,11 @@ The following are compatibility contracts, not cleanup opportunities:
 - **Caps and allocation:** existing golden caps are additive-only. The MPP
   encoder's DMA-BUF pool, 1080-to-1088 `GstVideoAlignment`, and DMA32 allocator
   request are runtime contracts.
+- **Encoder runtime hygiene:** latency follows the tracked pending depth;
+  non-timeout MPP failures get at most three context restarts per ten seconds;
+  explicit sink colorimetry reaches MPP VUI config without guessing absent
+  values; both force-key-unit directions request IDR; and the no-B-frame output
+  contract is `DTS = PTS`. The read-only `encoder-restarts` counter is additive.
 - **RGA conversion:** `/dev/rga` must pass the driver-version ioctl before use;
   librga init alone is never sufficient. Blit health is isolated per operation
   and format pair. CPU copy remains compiled but is debug-only behind

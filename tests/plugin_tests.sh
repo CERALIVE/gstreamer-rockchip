@@ -22,6 +22,8 @@ for property in conversion-fallback-frames conversion-dropped-frames layout-reje
   grep -q "$property" "$tmpdir/mpph264.inspect"
   grep -q "$property" "$tmpdir/mppjpeg.inspect"
 done
+grep -q 'encoder-restarts' "$tmpdir/mpph264.inspect"
+grep -q 'encoder-restarts' "$tmpdir/mpph265.inspect"
 sh "$MESON_SOURCE_ROOT/tests/parity_with_mock.sh" \
   "$MESON_BUILD_ROOT" "$MESON_SOURCE_ROOT"
 

@@ -28,6 +28,8 @@
 
 #include <string.h>
 
+#include <gst/video/video-event.h>
+
 #include "gstmppallocator.h"
 #include "gstmppenc.h"
 
@@ -98,6 +100,9 @@ G_DEFINE_ABSTRACT_TYPE (GstMppEnc, gst_mpp_enc, GST_TYPE_VIDEO_ENCODER);
 #define DEFAULT_PROP_NUM_TEMPORAL_LAYERS 0      /* Off (flat IPPP) */
 #define DEFAULT_PROP_ZERO_COPY_PKT TRUE
 
+#define MPP_ENC_RESTART_BUDGET 3
+#define MPP_ENC_RESTART_WINDOW_US (10 * G_USEC_PER_SEC)
+
 /* Input isn't ARM AFBC by default */
 static GstVideoFormat DEFAULT_PROP_ARM_AFBC = FALSE;
 
@@ -138,6 +143,7 @@ enum
   PROP_CONVERSION_FALLBACK_FRAMES,
   PROP_CONVERSION_DROPPED_FRAMES,
   PROP_LAYOUT_REJECTIONS,
+  PROP_ENCODER_RESTARTS,
   PROP_LAST,
 };
 
@@ -530,6 +536,9 @@ gst_mpp_enc_get_property (GObject * object,
         g_value_set_uint64 (value, stats.layout_rejections);
       break;
     }
+    case PROP_ENCODER_RESTARTS:
+      g_value_set_uint64 (value, self->encoder_restarts);
+      break;
     default:
       invalid = TRUE;
       break;
@@ -609,6 +618,108 @@ gst_mpp_enc_effective_fps_out (const GstMppEncPropertiesSnapshot * properties)
 {
   return gst_mpp_enc_effective_fps (properties->fps_out, properties->fps_n,
       properties->fps_d);
+}
+
+static void
+gst_mpp_enc_update_latency (GstVideoEncoder * encoder, gint fps_n, gint fps_d)
+{
+  gint pending_depth = MAX (GST_MPP_ENC_PENDING (encoder), 0);
+  GstClockTime frame_duration;
+  GstClockTime latency;
+
+  if (fps_n <= 0 || fps_d <= 0) {
+    fps_n = DEFAULT_FPS;
+    fps_d = 1;
+  }
+
+  frame_duration = gst_util_uint64_scale (GST_SECOND, fps_d, fps_n);
+  latency = gst_util_uint64_scale (frame_duration, 1 + pending_depth, 1);
+  gst_video_encoder_set_latency (encoder, latency, latency);
+}
+
+static gboolean
+gst_mpp_enc_apply_colorimetry (GstMppEnc * self,
+    const GstVideoColorimetry * colorimetry)
+{
+  gint colorspace, primaries, transfer, range;
+
+  if (colorimetry->range == GST_VIDEO_COLOR_RANGE_UNKNOWN &&
+      colorimetry->matrix == GST_VIDEO_COLOR_MATRIX_UNKNOWN &&
+      colorimetry->transfer == GST_VIDEO_TRANSFER_UNKNOWN &&
+      colorimetry->primaries == GST_VIDEO_COLOR_PRIMARIES_UNKNOWN)
+    return TRUE;
+
+  switch (colorimetry->matrix) {
+    case GST_VIDEO_COLOR_MATRIX_BT601:
+      colorspace = MPP_FRAME_SPC_SMPTE170M;
+      break;
+    case GST_VIDEO_COLOR_MATRIX_BT709:
+      colorspace = MPP_FRAME_SPC_BT709;
+      break;
+    case GST_VIDEO_COLOR_MATRIX_BT2020:
+      colorspace = MPP_FRAME_SPC_BT2020_NCL;
+      break;
+    default:
+      GST_WARNING_OBJECT (self, "unsupported color matrix %d; omitting VUI",
+          colorimetry->matrix);
+      return TRUE;
+  }
+
+  switch (colorimetry->primaries) {
+    case GST_VIDEO_COLOR_PRIMARIES_BT709:
+      primaries = MPP_FRAME_PRI_BT709;
+      break;
+    case GST_VIDEO_COLOR_PRIMARIES_BT470BG:
+      primaries = MPP_FRAME_PRI_BT470BG;
+      break;
+    case GST_VIDEO_COLOR_PRIMARIES_SMPTE170M:
+      primaries = MPP_FRAME_PRI_SMPTE170M;
+      break;
+    case GST_VIDEO_COLOR_PRIMARIES_BT2020:
+      primaries = MPP_FRAME_PRI_BT2020;
+      break;
+    default:
+      GST_WARNING_OBJECT (self, "unsupported color primaries %d; omitting VUI",
+          colorimetry->primaries);
+      return TRUE;
+  }
+
+  switch (colorimetry->transfer) {
+    case GST_VIDEO_TRANSFER_BT601:
+      transfer = MPP_FRAME_TRC_SMPTE170M;
+      break;
+    case GST_VIDEO_TRANSFER_BT709:
+      transfer = MPP_FRAME_TRC_BT709;
+      break;
+    case GST_VIDEO_TRANSFER_BT2020_10:
+      transfer = MPP_FRAME_TRC_BT2020_10;
+      break;
+    case GST_VIDEO_TRANSFER_BT2020_12:
+      transfer = MPP_FRAME_TRC_BT2020_12;
+      break;
+    default:
+      GST_WARNING_OBJECT (self, "unsupported color transfer %d; omitting VUI",
+          colorimetry->transfer);
+      return TRUE;
+  }
+
+  switch (colorimetry->range) {
+    case GST_VIDEO_COLOR_RANGE_0_255:
+      range = MPP_FRAME_RANGE_JPEG;
+      break;
+    case GST_VIDEO_COLOR_RANGE_16_235:
+      range = MPP_FRAME_RANGE_MPEG;
+      break;
+    default:
+      GST_WARNING_OBJECT (self, "unsupported color range %d; omitting VUI",
+          colorimetry->range);
+      return TRUE;
+  }
+
+  return gst_mpp_enc_cfg_set_s32 (self, "prep:colorspace", colorspace) &&
+      gst_mpp_enc_cfg_set_s32 (self, "prep:colorprim", primaries) &&
+      gst_mpp_enc_cfg_set_s32 (self, "prep:colortrc", transfer) &&
+      gst_mpp_enc_cfg_set_s32 (self, "prep:range", range);
 }
 
 /*
@@ -1045,6 +1156,11 @@ gst_mpp_enc_apply_properties_full (GstVideoEncoder * encoder,
     return FALSE;
   }
 
+  if (properties.fps_out > 0)
+    gst_mpp_enc_update_latency (encoder, properties.fps_out, 1);
+  else
+    gst_mpp_enc_update_latency (encoder, properties.fps_n, properties.fps_d);
+
   return TRUE;
 }
 
@@ -1081,6 +1197,131 @@ static gboolean gst_mpp_enc_send_frame_locked (GstVideoEncoder * encoder);
 static gboolean gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder);
 
 #define MPP_ENC_DRAIN_NO_PROGRESS_US (100 * 1000)
+
+static gboolean
+gst_mpp_enc_configure_context (GstMppEnc * self)
+{
+  MppPollType timeout = MPP_POLL_NON_BLOCK;
+
+  if (self->mpi->control (self->mpp_ctx, MPP_SET_INPUT_TIMEOUT, &timeout))
+    return FALSE;
+  timeout = 1;
+  if (self->mpi->control (self->mpp_ctx, MPP_SET_OUTPUT_TIMEOUT, &timeout))
+    return FALSE;
+  return mpp_init (self->mpp_ctx, MPP_CTX_ENC, self->mpp_type) == MPP_OK;
+}
+
+static void
+gst_mpp_enc_discard_submitted_frames (GstVideoEncoder * encoder)
+{
+  GstMppEnc *self = GST_MPP_ENC (encoder);
+  gint submitted = GST_MPP_ENC_PENDING (encoder) - g_list_length (self->frames);
+
+  while (submitted-- > 0) {
+    GstVideoCodecFrame *frame = gst_video_encoder_get_oldest_frame (encoder);
+    if (!frame)
+      break;
+    gst_buffer_replace (&frame->output_buffer, NULL);
+    gst_video_encoder_finish_frame (encoder, frame);
+  }
+  GST_MPP_ENC_SET_PENDING (encoder, g_list_length (self->frames));
+  GST_MPP_ENC_BROADCAST (encoder);
+}
+
+static gboolean
+gst_mpp_enc_restart_context (GstVideoEncoder * encoder, const gchar * operation,
+    MPP_RET error)
+{
+  GstMppEnc *self = GST_MPP_ENC (encoder);
+  gint64 now = g_get_monotonic_time ();
+  MppPacket packet = NULL;
+  gint64 deadline;
+  guint layers;
+
+  if (!self->restart_window_started ||
+      now - self->restart_window_started >= MPP_ENC_RESTART_WINDOW_US) {
+    self->restart_window_started = now;
+    self->restart_attempts = 0;
+  }
+
+  if (self->restart_attempts >= MPP_ENC_RESTART_BUDGET) {
+    GST_ELEMENT_ERROR (self, STREAM, ENCODE,
+        ("encoder restart budget exhausted"),
+        ("%s returned MPP error %d", operation, error));
+    self->task_ret = GST_FLOW_ERROR;
+    return FALSE;
+  }
+
+  self->restart_attempts++;
+  self->restarting = TRUE;
+  self->mpi->reset (self->mpp_ctx);
+
+  deadline = g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
+  while (g_get_monotonic_time () < deadline) {
+    MPP_RET ret = self->mpi->encode_get_packet (self->mpp_ctx, &packet);
+    if (ret == MPP_ERR_TIMEOUT || ret != MPP_OK)
+      break;
+    if (!packet) {
+      g_usleep (1000);
+      continue;
+    }
+    {
+      MppFrame input_frame;
+      MppMeta meta = mpp_packet_get_meta (packet);
+      if (!mpp_meta_get_frame (meta, KEY_INPUT_FRAME, &input_frame))
+        mpp_frame_deinit (&input_frame);
+    }
+    mpp_packet_deinit (&packet);
+  }
+  gst_mpp_enc_discard_submitted_frames (encoder);
+
+  mpp_destroy (self->mpp_ctx);
+  self->mpp_ctx = NULL;
+  self->mpi = NULL;
+  if (mpp_create (&self->mpp_ctx, &self->mpi) ||
+      !gst_mpp_enc_configure_context (self) ||
+      self->mpi->control (self->mpp_ctx, MPP_ENC_SET_CFG, self->mpp_cfg)) {
+    GST_ELEMENT_ERROR (self, STREAM, ENCODE, ("failed to restart MPP encoder"),
+        ("%s returned MPP error %d", operation, error));
+    self->task_ret = GST_FLOW_ERROR;
+    self->restarting = FALSE;
+    return FALSE;
+  }
+
+  self->mpi->control (self->mpp_ctx, MPP_ENC_SET_SEI_CFG, &self->sei_mode);
+  self->mpi->control (self->mpp_ctx, MPP_ENC_SET_HEADER_MODE,
+      &self->header_mode);
+  GST_MPP_ENC_PROP_LOCK (encoder);
+  layers = self->num_temporal_layers;
+  self->encoder_restarts++;
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+  if (layers >= 2)
+    self->mpi->control (self->mpp_ctx, MPP_ENC_SET_REF_CFG, self->ref_cfg);
+  else
+    self->mpi->control (self->mpp_ctx, MPP_ENC_SET_REF_CFG, NULL);
+
+  gst_mpp_enc_update_latency (encoder, GST_VIDEO_INFO_FPS_N (&self->info),
+      GST_VIDEO_INFO_FPS_D (&self->info));
+  self->restarting = FALSE;
+  GST_WARNING_OBJECT (self, "restarted MPP encoder after %s error %d (%u/%u)",
+      operation, error, self->restart_attempts, MPP_ENC_RESTART_BUDGET);
+  return TRUE;
+}
+
+static gboolean
+gst_mpp_enc_handle_runtime_error (GstVideoEncoder * encoder,
+    const gchar * operation, MPP_RET error)
+{
+  GstMppEnc *self = GST_MPP_ENC (encoder);
+
+  if (error == MPP_ERR_TIMEOUT || error == MPP_NOK)
+    return FALSE;
+  if (self->restarting || GST_MPP_ENC_FLUSHING (encoder)) {
+    self->task_ret = GST_FLOW_ERROR;
+    return FALSE;
+  }
+  return gst_mpp_enc_restart_context (encoder, operation, error);
+}
 
 static void
 gst_mpp_enc_stop_task (GstVideoEncoder * encoder, gboolean drain)
@@ -1181,7 +1422,6 @@ static gboolean
 gst_mpp_enc_start (GstVideoEncoder * encoder)
 {
   GstMppEnc *self = GST_MPP_ENC (encoder);
-  MppPollType timeout;
 
   GST_DEBUG_OBJECT (self, "starting");
 
@@ -1196,16 +1436,7 @@ gst_mpp_enc_start (GstVideoEncoder * encoder)
   if (mpp_create (&self->mpp_ctx, &self->mpi))
     goto err_unref_alloc;
 
-  timeout = MPP_POLL_NON_BLOCK;
-  if (self->mpi->control (self->mpp_ctx, MPP_SET_INPUT_TIMEOUT, &timeout))
-    goto err_destroy_mpp;
-
-  /* 1ms timeout for polling */
-  timeout = 1;
-  if (self->mpi->control (self->mpp_ctx, MPP_SET_OUTPUT_TIMEOUT, &timeout))
-    goto err_destroy_mpp;
-
-  if (mpp_init (self->mpp_ctx, MPP_CTX_ENC, self->mpp_type))
+  if (!gst_mpp_enc_configure_context (self))
     goto err_destroy_mpp;
 
   if (mpp_frame_init (&self->mpp_frame))
@@ -1226,6 +1457,10 @@ gst_mpp_enc_start (GstVideoEncoder * encoder)
   g_atomic_int_set (&self->flushing, FALSE);
   GST_MPP_ENC_SET_PENDING (encoder, 0);
   self->frames = NULL;
+  self->restart_attempts = 0;
+  self->restart_window_started = 0;
+  self->restarting = FALSE;
+  g_atomic_int_set (&self->force_idr_pending, FALSE);
 
   g_mutex_init (&self->mutex);
 
@@ -1334,11 +1569,14 @@ gst_mpp_enc_set_format (GstVideoEncoder * encoder, GstVideoCodecState * state)
   MppFrameFormat format;
   gint width, height, hstride, vstride, rotation, prop_width, prop_height;
   gboolean arm_afbc;
+  gboolean had_old_state;
+  gboolean has_colorimetry;
 
   GST_DEBUG_OBJECT (self, "setting format: %" GST_PTR_FORMAT, state->caps);
 
   GST_MPP_ENC_PROP_LOCK (encoder);
   old_state = self->input_state;
+  had_old_state = old_state != NULL;
   if (old_state && gst_caps_is_strictly_equal (old_state->caps, state->caps)) {
     GST_MPP_ENC_PROP_UNLOCK (encoder);
     return TRUE;
@@ -1364,6 +1602,23 @@ gst_mpp_enc_set_format (GstVideoEncoder * encoder, GstVideoCodecState * state)
   GST_MPP_ENC_PROP_UNLOCK (encoder);
 
   *info = state->info;
+
+  has_colorimetry =
+      gst_structure_has_field (gst_caps_get_structure (state->caps, 0),
+      "colorimetry");
+  if (!has_colorimetry && had_old_state) {
+    mpp_enc_cfg_deinit (self->mpp_cfg);
+    self->mpp_cfg = NULL;
+    if (mpp_enc_cfg_init (&self->mpp_cfg) ||
+        self->mpi->control (self->mpp_ctx, MPP_ENC_GET_CFG, self->mpp_cfg))
+      return FALSE;
+    self->cfg_error = FALSE;
+  }
+
+  if (has_colorimetry &&
+      !gst_mpp_enc_apply_colorimetry (self,
+          &GST_VIDEO_INFO_COLORIMETRY (&state->info)))
+    return FALSE;
 
   if (!gst_mpp_enc_video_info_align (info))
     return FALSE;
@@ -1608,6 +1863,9 @@ gst_mpp_enc_apply_pending_resolution (GstVideoEncoder * encoder)
   if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_CFG, self->mpp_cfg))
     return FALSE;
 
+  gst_mpp_enc_update_latency (encoder, GST_VIDEO_INFO_FPS_N (info),
+      GST_VIDEO_INFO_FPS_D (info));
+
   /* Renegotiate the encoded caps so downstream sees the new resolution.
    * set_src_caps() overwrites width/height from self->info and takes ownership
    * of the caps (via gst_video_encoder_set_output_state), so hand it a writable
@@ -1761,9 +2019,12 @@ gst_mpp_enc_convert (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
   strides_changed = src_hstride != GST_MPP_VIDEO_INFO_HSTRIDE (&self->info) ||
       src_vstride != GST_MPP_VIDEO_INFO_VSTRIDE (&self->info);
   gst_mpp_enc_apply_strides (encoder, src_hstride, src_vstride);
-  if (strides_changed && self->mpi->control (self->mpp_ctx, MPP_ENC_SET_CFG,
-          self->mpp_cfg))
-    goto err;
+  if (strides_changed) {
+    if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_CFG, self->mpp_cfg))
+      goto err;
+    gst_mpp_enc_update_latency (encoder, GST_VIDEO_INFO_FPS_N (&self->info),
+        GST_VIDEO_INFO_FPS_D (&self->info));
+  }
 
   /*
    * Invariant: out_mem names a reference this function still owns. Appending
@@ -1891,6 +2152,7 @@ gst_mpp_enc_send_frame_locked (GstVideoEncoder * encoder)
   MppFrame mframe;
   MppBuffer mbuf;
   gboolean keyframe;
+  MPP_RET ret;
   guint32 frame_number;
 
   if (!self->frames)
@@ -1908,12 +2170,15 @@ gst_mpp_enc_send_frame_locked (GstVideoEncoder * encoder)
   frame_number = GPOINTER_TO_UINT (g_list_nth_data (self->frames, 0));
   frame = gst_video_encoder_get_frame (encoder, frame_number);
 
-  keyframe = GST_VIDEO_CODEC_FRAME_IS_FORCE_KEYFRAME (frame);
+  keyframe = GST_VIDEO_CODEC_FRAME_IS_FORCE_KEYFRAME (frame) ||
+      g_atomic_int_get (&self->force_idr_pending);
   if (keyframe) {
     GST_INFO_OBJECT (self, "forcing keyframe");
 
     if (self->mpi->control (self->mpp_ctx, MPP_ENC_SET_IDR_FRAME, NULL))
       GST_WARNING_OBJECT (self, "failed to set keyframe request");
+    else
+      g_atomic_int_set (&self->force_idr_pending, FALSE);
   }
 
   /* HACK: Get the converted input buffer from frame->output_buffer */
@@ -1923,8 +2188,10 @@ gst_mpp_enc_send_frame_locked (GstVideoEncoder * encoder)
 
   gst_video_codec_frame_unref (frame);
 
-  if (self->mpi->encode_put_frame (self->mpp_ctx, mframe)) {
+  ret = self->mpi->encode_put_frame (self->mpp_ctx, mframe);
+  if (ret != MPP_OK) {
     mpp_frame_deinit (&mframe);
+    gst_mpp_enc_handle_runtime_error (encoder, "mpp_encode_put_frame", ret);
     return FALSE;
   }
 
@@ -1947,12 +2214,20 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
   RK_S32 output_intra;
   gint pkt_size;
   gboolean zero_copy_pkt;
+  MppEncHeaderMode header_mode;
+  MPP_RET ret;
 
   GST_MPP_ENC_PROP_LOCK (encoder);
   zero_copy_pkt = self->zero_copy_pkt;
+  header_mode = self->header_mode;
   GST_MPP_ENC_PROP_UNLOCK (encoder);
 
-  self->mpi->encode_get_packet (self->mpp_ctx, &mpkt);
+  mpkt = NULL;
+  ret = self->mpi->encode_get_packet (self->mpp_ctx, &mpkt);
+  if (ret != MPP_OK) {
+    gst_mpp_enc_handle_runtime_error (encoder, "mpp_encode_get_packet", ret);
+    return FALSE;
+  }
   if (!mpkt)
     return FALSE;
 
@@ -2023,6 +2298,14 @@ gst_mpp_enc_poll_packet_locked (GstVideoEncoder * encoder)
     GST_VIDEO_CODEC_FRAME_SET_SYNC_POINT (frame);
   else
     GST_VIDEO_CODEC_FRAME_UNSET_SYNC_POINT (frame);
+
+  if (output_intra && header_mode == MPP_ENC_HEADER_MODE_EACH_IDR)
+    GST_BUFFER_FLAG_SET (frame->output_buffer, GST_BUFFER_FLAG_HEADER);
+
+  /* MPP's IP-only encoder has no reorder queue: presentation and decode order
+   * are identical, so expose the contract instead of inheriting an unset DTS. */
+  frame->dts = frame->pts;
+  GST_BUFFER_DTS (frame->output_buffer) = frame->pts;
 
   GST_DEBUG_OBJECT (self, "finish frame ts=%" GST_TIME_FORMAT,
       GST_TIME_ARGS (frame->pts));
@@ -2208,6 +2491,22 @@ gst_mpp_enc_change_state (GstElement * element, GstStateChange transition)
   return GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
 }
 
+static gboolean
+gst_mpp_enc_sink_event (GstVideoEncoder * encoder, GstEvent * event)
+{
+  if (gst_video_event_is_force_key_unit (event))
+    g_atomic_int_set (&GST_MPP_ENC (encoder)->force_idr_pending, TRUE);
+  return GST_VIDEO_ENCODER_CLASS (parent_class)->sink_event (encoder, event);
+}
+
+static gboolean
+gst_mpp_enc_src_event (GstVideoEncoder * encoder, GstEvent * event)
+{
+  if (gst_video_event_is_force_key_unit (event))
+    g_atomic_int_set (&GST_MPP_ENC (encoder)->force_idr_pending, TRUE);
+  return GST_VIDEO_ENCODER_CLASS (parent_class)->src_event (encoder, event);
+}
+
 static void
 gst_mpp_enc_finalize (GObject * object)
 {
@@ -2381,6 +2680,8 @@ gst_mpp_enc_class_init (GstMppEncClass * klass)
   encoder_class->propose_allocation =
       GST_DEBUG_FUNCPTR (gst_mpp_enc_propose_allocation);
   encoder_class->handle_frame = GST_DEBUG_FUNCPTR (gst_mpp_enc_handle_frame);
+  encoder_class->sink_event = GST_DEBUG_FUNCPTR (gst_mpp_enc_sink_event);
+  encoder_class->src_event = GST_DEBUG_FUNCPTR (gst_mpp_enc_src_event);
 
   gobject_class->set_property = GST_DEBUG_FUNCPTR (gst_mpp_enc_set_property);
   gobject_class->get_property = GST_DEBUG_FUNCPTR (gst_mpp_enc_get_property);
@@ -2412,6 +2713,10 @@ gst_mpp_enc_class_init (GstMppEncClass * klass)
       g_param_spec_uint64 ("layout-rejections", "Layout rejections",
           "Frames rejected for an unsupported conversion layout", 0,
           G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_ENCODER_RESTARTS,
+      g_param_spec_uint64 ("encoder-restarts", "Encoder restarts",
+          "Successful bounded MPP context restarts", 0, G_MAXUINT64, 0,
+          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (gobject_class, PROP_HEADER_MODE,
       g_param_spec_enum ("header-mode", "Header mode",
