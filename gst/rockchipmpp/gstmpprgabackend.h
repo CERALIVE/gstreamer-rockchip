@@ -11,7 +11,7 @@
 #define __GST_MPP_RGA_BACKEND_H__
 
 #include <gst/video/video.h>
-#include "gstmppconversionstats.h"
+#include "gstmppconversionstats.h"      // IWYU pragma: export
 #ifdef HAVE_RGA
 #include <rga/RgaApi.h>
 #endif
@@ -24,6 +24,7 @@ typedef enum
   GST_MPP_RGA_OP_ENCODE_CONVERT,
   GST_MPP_RGA_OP_DECODE_CONVERT,
   GST_MPP_RGA_OP_JPEG_CONVERT,
+  GST_MPP_RGA_OP_CONVERT,
 } GstMppRgaOperation;
 
 typedef enum
@@ -49,10 +50,38 @@ typedef struct
 
 typedef struct
 {
+  gint src_fd;
+  gint src_width;
+  gint src_height;
+  gint src_wstride;
+  gint src_hstride;
+  RgaSURF_FORMAT src_format;
+  gint dst_fd;
+  gint dst_width;
+  gint dst_height;
+  gint dst_wstride;
+  gint dst_hstride;
+  RgaSURF_FORMAT dst_format;
+  gint src_x;
+  gint src_y;
+  gint src_rect_width;
+  gint src_rect_height;
+  gint dst_x;
+  gint dst_y;
+  gint dst_rect_width;
+  gint dst_rect_height;
+  gint usage;
+  guint core_mask;
+  gint priority;
+} GstMppRgaIm2dRequest;
+
+typedef struct
+{
   gboolean (*probe) (gpointer user_data, GstMppRgaDriverVersion * version,
       gint * error_number);
   gint (*init) (gpointer user_data);
   gint (*blit) (rga_info_t * src, rga_info_t * dst, gpointer user_data);
+  gint (*process) (const GstMppRgaIm2dRequest * request, gpointer user_data);
 } GstMppRgaBackendOps;
 
 typedef struct _GstMppRgaBackend GstMppRgaBackend;
@@ -65,6 +94,9 @@ GstMppRgaBackend *gst_mpp_rga_backend_get_default (void);
 GstMppRgaResult gst_mpp_rga_backend_blit (GstMppRgaBackend * backend,
     GstMppRgaOperation operation, GstVideoFormat in_format,
     GstVideoFormat out_format, rga_info_t * src, rga_info_t * dst);
+GstMppRgaResult gst_mpp_rga_backend_process (GstMppRgaBackend * backend,
+    GstMppRgaOperation operation, GstVideoFormat in_format,
+    GstVideoFormat out_format, const GstMppRgaIm2dRequest * request);
 guint gst_mpp_rga_backend_tuple_failures (GstMppRgaBackend * backend,
     GstMppRgaOperation operation, GstVideoFormat in_format,
     GstVideoFormat out_format);

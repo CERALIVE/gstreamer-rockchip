@@ -63,6 +63,14 @@ element returns to NULL. CPU frame copying is disabled in production; setting
 continues to force conversion refusal. Without an available 2D path, conversion
 fails with `GST_FLOW_NOT_NEGOTIATED` rather than silently copying on the CPU.
 
+The separate `rockchiprga` plugin registers `rgaconvert` at rank `NONE` for
+explicit engine selection. It performs scale, crop, color conversion, rotation,
+and flip as one librga `improcess` operation over DMA-BUF input and output.
+Negotiated src caps select output geometry, including the natural width/height
+swap for 90° and 270° rotation. System-memory staging remains debug-only behind
+the same `GST_MPP_ALLOW_CPU_COPY=1` switch, and NULL→READY fails with a typed
+error when `/dev/rga` does not pass the shared driver-version trial.
+
 ## Upstream lineage and credits
 
 This repository descends from the Rockchip plugin code through the JeffyCN,

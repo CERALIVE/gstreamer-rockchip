@@ -46,6 +46,9 @@ Files: gst/rockchipmpp/gstmppconversionstats.c
        gst/rockchipmpp/gstmpprgabackend.h
        gst/rockchipmpp/gstmpprgatuple.c
        gst/rockchipmpp/gstmpprgatuple.h
+       gst/rockchiprga/gstrgaconvert.c
+       gst/rockchiprga/gstrgaconvert.h
+       gst/rockchiprga/gstrockchiprga.c
 Copyright: 2026 CERALIVE <contact@ceralive.tv>
 License: LGPL-2.1
 

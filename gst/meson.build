@@ -3,3 +3,7 @@ foreach plugin : ['rkximage', 'rockchipmpp', 'kmssrc']
     subdir(plugin)
   endif
 endforeach
+
+if rga_dep.found() and not get_option('rga').disabled()
+  subdir('rockchiprga')
+endif

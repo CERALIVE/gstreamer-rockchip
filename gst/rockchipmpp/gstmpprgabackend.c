@@ -21,6 +21,10 @@
 #include "gstmpprgatuple.h"
 
 #ifdef HAVE_RGA
+#ifdef GST_MPP_RGA_ENABLE_IM2D
+#include <rga/im2d.h>
+#endif
+
 #define GST_MPP_RGA_DEVICE "/dev/rga"
 #ifndef RGA_IOC_GET_DRVIER_VERSION
 #define RGA_IOC_GET_DRVIER_VERSION _IOR ('r', 1, GstMppRgaDriverVersion)
@@ -75,10 +79,57 @@ gst_mpp_rga_real_blit (rga_info_t * src, rga_info_t * dst, gpointer user_data)
   return c_RkRgaBlit (src, dst, NULL);
 }
 
+#ifdef GST_MPP_RGA_ENABLE_IM2D
+static gint
+gst_mpp_rga_real_process (const GstMppRgaIm2dRequest * request,
+    gpointer user_data)
+{
+  rga_buffer_t src;
+  rga_buffer_t dst;
+  rga_buffer_t pat = { 0, };
+  im_rect src_rect = {
+    request->src_x,
+    request->src_y,
+    request->src_rect_width,
+    request->src_rect_height,
+  };
+  im_rect dst_rect = {
+    request->dst_x,
+    request->dst_y,
+    request->dst_rect_width,
+    request->dst_rect_height,
+  };
+  im_rect pat_rect = { 0, };
+  IM_STATUS status;
+
+  (void) user_data;
+  status = imconfig (IM_CONFIG_SCHEDULER_CORE, request->core_mask);
+  if (status <= IM_STATUS_FAILED)
+    return status;
+
+  status = imconfig (IM_CONFIG_PRIORITY, request->priority);
+  if (status <= IM_STATUS_FAILED)
+    return status;
+
+  src = wrapbuffer_fd (request->src_fd, request->src_width,
+      request->src_height, request->src_format, request->src_wstride,
+      request->src_hstride);
+  dst = wrapbuffer_fd (request->dst_fd, request->dst_width,
+      request->dst_height, request->dst_format, request->dst_wstride,
+      request->dst_hstride);
+
+  return improcess (src, dst, pat, src_rect, dst_rect, pat_rect,
+      request->usage | IM_SYNC);
+}
+#endif
+
 static const GstMppRgaBackendOps gst_mpp_rga_real_ops = {
   .probe = gst_mpp_rga_real_probe,
   .init = gst_mpp_rga_real_init,
   .blit = gst_mpp_rga_real_blit,
+#ifdef GST_MPP_RGA_ENABLE_IM2D
+  .process = gst_mpp_rga_real_process,
+#endif
 };
 
 static gboolean
@@ -186,19 +237,14 @@ gst_mpp_rga_backend_get_default (void)
   return g_once (&once, gst_mpp_rga_create_default, NULL);
 }
 
-GstMppRgaResult
-gst_mpp_rga_backend_blit (GstMppRgaBackend * backend,
+static GstMppRgaResult
+gst_mpp_rga_backend_begin (GstMppRgaBackend * backend,
     GstMppRgaOperation operation, GstVideoFormat in_format,
-    GstVideoFormat out_format, rga_info_t * src, rga_info_t * dst)
+    GstVideoFormat out_format, GstMppRgaTupleKey * key)
 {
-  GstMppRgaTupleKey key = {
-    .operation = operation,
-    .in_format = in_format,
-    .out_format = out_format,
-  };
-  gint ret;
-  gint blit_errno;
-  guint failures;
+  key->operation = operation;
+  key->in_format = in_format;
+  key->out_format = out_format;
 
   g_return_val_if_fail (backend != NULL, GST_MPP_RGA_UNAVAILABLE);
 
@@ -211,19 +257,24 @@ gst_mpp_rga_backend_blit (GstMppRgaBackend * backend,
     return GST_MPP_RGA_UNAVAILABLE;
   }
 
-  if (!gst_mpp_rga_tuple_should_try (backend->tuples, &key)) {
+  if (!gst_mpp_rga_tuple_should_try (backend->tuples, key)) {
     g_mutex_unlock (&backend->lock);
     return GST_MPP_RGA_TUPLE_DEMOTED;
   }
   g_mutex_unlock (&backend->lock);
+  return GST_MPP_RGA_SUCCESS;
+}
 
-  errno = 0;
-  ret = backend->ops.blit (src, dst, backend->user_data);
-  blit_errno = errno;
+static GstMppRgaResult
+gst_mpp_rga_backend_finish (GstMppRgaBackend * backend,
+    const GstMppRgaTupleKey * key, gint ret, gint blit_errno,
+    gboolean succeeded)
+{
+  guint failures;
 
   g_mutex_lock (&backend->lock);
-  if (ret >= 0) {
-    gst_mpp_rga_tuple_succeeded (backend->tuples, &key);
+  if (succeeded) {
+    gst_mpp_rga_tuple_succeeded (backend->tuples, key);
     g_mutex_unlock (&backend->lock);
     return GST_MPP_RGA_SUCCESS;
   }
@@ -231,20 +282,67 @@ gst_mpp_rga_backend_blit (GstMppRgaBackend * backend,
   if (ret == -ENODEV || blit_errno == ENODEV) {
     if (backend->available)
       GST_WARNING ("RGA device disappeared during %s",
-          gst_mpp_rga_operation_name (operation));
+          gst_mpp_rga_operation_name (key->operation));
     backend->available = FALSE;
     g_mutex_unlock (&backend->lock);
     return GST_MPP_RGA_DEVICE_LOST;
   }
 
-  if (gst_mpp_rga_tuple_failed (backend->tuples, &key, &failures)) {
+  if (gst_mpp_rga_tuple_failed (backend->tuples, key, &failures)) {
     GST_WARNING ("RGA tuple demoted after %u consecutive failures: %s %s to %s",
-        failures, gst_mpp_rga_operation_name (operation),
-        gst_video_format_to_string (in_format),
-        gst_video_format_to_string (out_format));
+        failures, gst_mpp_rga_operation_name (key->operation),
+        gst_video_format_to_string (key->in_format),
+        gst_video_format_to_string (key->out_format));
   }
   g_mutex_unlock (&backend->lock);
   return GST_MPP_RGA_BLIT_FAILED;
+}
+
+GstMppRgaResult
+gst_mpp_rga_backend_blit (GstMppRgaBackend * backend,
+    GstMppRgaOperation operation, GstVideoFormat in_format,
+    GstVideoFormat out_format, rga_info_t * src, rga_info_t * dst)
+{
+  GstMppRgaTupleKey key;
+  GstMppRgaResult result;
+  gint ret;
+  gint blit_errno;
+
+  result = gst_mpp_rga_backend_begin (backend, operation, in_format,
+      out_format, &key);
+  if (result != GST_MPP_RGA_SUCCESS)
+    return result;
+
+  errno = 0;
+  ret = backend->ops.blit (src, dst, backend->user_data);
+  blit_errno = errno;
+  return gst_mpp_rga_backend_finish (backend, &key, ret, blit_errno, ret >= 0);
+}
+
+GstMppRgaResult
+gst_mpp_rga_backend_process (GstMppRgaBackend * backend,
+    GstMppRgaOperation operation, GstVideoFormat in_format,
+    GstVideoFormat out_format, const GstMppRgaIm2dRequest * request)
+{
+  GstMppRgaTupleKey key;
+  GstMppRgaResult result;
+  gint ret;
+  gint blit_errno;
+
+  g_return_val_if_fail (backend != NULL, GST_MPP_RGA_UNAVAILABLE);
+  g_return_val_if_fail (request != NULL, GST_MPP_RGA_LAYOUT_REJECTED);
+  if (!backend->ops.process)
+    return GST_MPP_RGA_UNAVAILABLE;
+
+  result = gst_mpp_rga_backend_begin (backend, operation, in_format,
+      out_format, &key);
+  if (result != GST_MPP_RGA_SUCCESS)
+    return result;
+
+  errno = 0;
+  ret = backend->ops.process (request, backend->user_data);
+  blit_errno = errno;
+  return gst_mpp_rga_backend_finish (backend, &key, ret, blit_errno, ret > 0);
 }
 
 guint
@@ -278,6 +376,8 @@ gst_mpp_rga_operation_name (GstMppRgaOperation operation)
       return "decode-convert";
     case GST_MPP_RGA_OP_JPEG_CONVERT:
       return "jpeg-convert";
+    case GST_MPP_RGA_OP_CONVERT:
+      return "rgaconvert";
     default:
       return "unknown";
   }
