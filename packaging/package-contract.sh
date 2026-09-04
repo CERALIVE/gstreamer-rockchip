@@ -60,7 +60,7 @@ librga.so.2=librga2"
 # from the tree, not assumed: the scan below fails if gst/ grows a holder that
 # is not in this list, so a new upstream contributor cannot reach a release
 # without a DEP-5 stanza.
-readonly KNOWN_HOLDERS_RE='Rockchip Electronics|Collabora Ltd|Igalia|Julien Moutte'
+readonly KNOWN_HOLDERS_RE='Rockchip Electronics|Collabora Ltd|Igalia|Julien Moutte|CERALIVE'
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 builder="${root}/packaging/build-deb.sh"
@@ -215,6 +215,7 @@ Rockchip Electronics Co., Ltd
 Collabora Ltd.
 Igalia
 Julien Moutte
+CERALIVE <contact@ceralive.tv>
 HOLDERS
 
 if [ "$#" -eq 0 ]; then

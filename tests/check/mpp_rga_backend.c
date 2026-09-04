@@ -1,0 +1,260 @@
+#include <errno.h>
+#include <gst/check/gstcheck.h>
+
+#include "../../gst/rockchipmpp/gstmpprgabackend.h"
+
+int
+c_RkRgaInit (void)
+{
+  return 0;
+}
+
+int
+c_RkRgaBlit (rga_info_t * src, rga_info_t * dst, rga_info_t * src1)
+{
+  (void) src;
+  (void) dst;
+  (void) src1;
+  return 0;
+}
+
+typedef struct
+{
+  gboolean probe_available;
+  gint probe_errno;
+  gint init_result;
+  gint blit_result;
+  gint blit_errno;
+  guint blit_calls;
+  guint32 version_major;
+  guint32 version_minor;
+  guint32 version_revision;
+} FakeRga;
+
+static gboolean
+fake_probe (gpointer user_data, GstMppRgaDriverVersion * version,
+    gint * error_number)
+{
+  FakeRga *fake = user_data;
+
+  if (!fake->probe_available) {
+    *error_number = fake->probe_errno;
+    return FALSE;
+  }
+
+  version->major = fake->version_major ? fake->version_major : 1;
+  version->minor = fake->version_minor ? fake->version_minor : 3;
+  version->revision = fake->version_revision ? fake->version_revision : 11;
+  g_snprintf (version->string, sizeof (version->string), "%u.%u.%u",
+      version->major, version->minor, version->revision);
+  return TRUE;
+}
+
+static gint
+fake_init (gpointer user_data)
+{
+  return ((FakeRga *) user_data)->init_result;
+}
+
+static gint
+fake_blit (rga_info_t * src, rga_info_t * dst, gpointer user_data)
+{
+  FakeRga *fake = user_data;
+
+  (void) src;
+  (void) dst;
+  fake->blit_calls++;
+  errno = fake->blit_errno;
+  return fake->blit_result;
+}
+
+static const GstMppRgaBackendOps fake_ops = {
+  .probe = fake_probe,
+  .init = fake_init,
+  .blit = fake_blit,
+};
+
+static GstMppRgaBackend *
+new_backend (FakeRga * fake)
+{
+  return gst_mpp_rga_backend_new (&fake_ops, fake);
+}
+
+GST_START_TEST (test_unavailable_backend_takes_typed_refusal_path)
+{
+  FakeRga fake = {.probe_errno = ENOENT };
+  GstMppRgaBackend *backend = new_backend (&fake);
+
+  fail_if (gst_mpp_rga_backend_init (backend));
+  fail_unless_equals_int (gst_mpp_rga_backend_blit (backend,
+          GST_MPP_RGA_OP_ENCODE_CONVERT, GST_VIDEO_FORMAT_NV16,
+          GST_VIDEO_FORMAT_NV12, NULL, NULL), GST_MPP_RGA_UNAVAILABLE);
+  fail_unless_equals_int (fake.blit_calls, 0);
+
+  gst_mpp_rga_backend_free (backend);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_old_driver_version_is_unavailable_even_if_librga_init_succeeds)
+{
+  FakeRga fake = {
+    .probe_available = TRUE,
+    .version_major = 1,
+    .version_minor = 2,
+    .version_revision = 3,
+  };
+  GstMppRgaBackend *backend = new_backend (&fake);
+
+  fail_if (gst_mpp_rga_backend_init (backend));
+  fail_unless_equals_int (gst_mpp_rga_backend_blit (backend,
+          GST_MPP_RGA_OP_ENCODE_CONVERT, GST_VIDEO_FORMAT_NV16,
+          GST_VIDEO_FORMAT_NV12, NULL, NULL), GST_MPP_RGA_UNAVAILABLE);
+  fail_unless_equals_int (fake.blit_calls, 0);
+
+  gst_mpp_rga_backend_free (backend);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_librga_init_failure_is_informational_after_probe_success)
+{
+  FakeRga fake = {.probe_available = TRUE,.init_result = -1,.blit_result = 0 };
+  GstMppRgaBackend *backend = new_backend (&fake);
+
+  fail_unless (gst_mpp_rga_backend_init (backend));
+  fail_unless_equals_int (gst_mpp_rga_backend_blit (backend,
+          GST_MPP_RGA_OP_ENCODE_CONVERT, GST_VIDEO_FORMAT_NV16,
+          GST_VIDEO_FORMAT_NV12, NULL, NULL), GST_MPP_RGA_SUCCESS);
+  fail_unless_equals_int (fake.blit_calls, 1);
+
+  gst_mpp_rga_backend_free (backend);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_eight_failures_demote_only_the_exact_tuple)
+{
+  FakeRga fake = {.probe_available = TRUE,.blit_result = -1,.blit_errno = EIO };
+  GstMppRgaBackend *backend = new_backend (&fake);
+  guint i;
+
+  fail_unless (gst_mpp_rga_backend_init (backend));
+  for (i = 0; i < GST_MPP_RGA_DEMOTION_THRESHOLD; i++)
+    fail_unless_equals_int (gst_mpp_rga_backend_blit (backend,
+            GST_MPP_RGA_OP_ENCODE_CONVERT, GST_VIDEO_FORMAT_NV16,
+            GST_VIDEO_FORMAT_NV12, NULL, NULL), GST_MPP_RGA_BLIT_FAILED);
+
+  fail_unless_equals_int (fake.blit_calls, GST_MPP_RGA_DEMOTION_THRESHOLD);
+  fail_unless_equals_int (gst_mpp_rga_backend_blit (backend,
+          GST_MPP_RGA_OP_ENCODE_CONVERT, GST_VIDEO_FORMAT_NV16,
+          GST_VIDEO_FORMAT_NV12, NULL, NULL), GST_MPP_RGA_TUPLE_DEMOTED);
+  fail_unless_equals_int (fake.blit_calls, GST_MPP_RGA_DEMOTION_THRESHOLD);
+
+  fail_unless_equals_int (gst_mpp_rga_backend_blit (backend,
+          GST_MPP_RGA_OP_DECODE_CONVERT, GST_VIDEO_FORMAT_NV16,
+          GST_VIDEO_FORMAT_NV12, NULL, NULL), GST_MPP_RGA_BLIT_FAILED);
+  fail_unless_equals_int (fake.blit_calls,
+      GST_MPP_RGA_DEMOTION_THRESHOLD + 1);
+
+  gst_mpp_rga_backend_free (backend);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_successful_retrial_clears_tuple_demotion)
+{
+  FakeRga fake = {.probe_available = TRUE,.blit_result = -1,.blit_errno = EIO };
+  GstMppRgaBackend *backend = new_backend (&fake);
+  guint i;
+
+  fail_unless (gst_mpp_rga_backend_init (backend));
+  for (i = 0; i < GST_MPP_RGA_DEMOTION_THRESHOLD; i++)
+    gst_mpp_rga_backend_blit (backend, GST_MPP_RGA_OP_ENCODE_CONVERT,
+        GST_VIDEO_FORMAT_BGR, GST_VIDEO_FORMAT_NV12, NULL, NULL);
+
+  for (i = 0; i < GST_MPP_RGA_RETRY_INTERVAL; i++)
+    fail_unless_equals_int (gst_mpp_rga_backend_blit (backend,
+            GST_MPP_RGA_OP_ENCODE_CONVERT, GST_VIDEO_FORMAT_BGR,
+            GST_VIDEO_FORMAT_NV12, NULL, NULL), GST_MPP_RGA_TUPLE_DEMOTED);
+
+  fake.blit_result = 0;
+  fake.blit_errno = 0;
+  fail_unless_equals_int (gst_mpp_rga_backend_blit (backend,
+          GST_MPP_RGA_OP_ENCODE_CONVERT, GST_VIDEO_FORMAT_BGR,
+          GST_VIDEO_FORMAT_NV12, NULL, NULL), GST_MPP_RGA_SUCCESS);
+  fail_unless_equals_int (gst_mpp_rga_backend_tuple_failures (backend,
+          GST_MPP_RGA_OP_ENCODE_CONVERT, GST_VIDEO_FORMAT_BGR,
+          GST_VIDEO_FORMAT_NV12), 0);
+  fail_unless_equals_int (gst_mpp_rga_backend_blit (backend,
+          GST_MPP_RGA_OP_ENCODE_CONVERT, GST_VIDEO_FORMAT_BGR,
+          GST_VIDEO_FORMAT_NV12, NULL, NULL), GST_MPP_RGA_SUCCESS);
+
+  gst_mpp_rga_backend_free (backend);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_enodev_demotes_the_process)
+{
+  FakeRga fake = {
+    .probe_available = TRUE,
+    .blit_result = -1,
+    .blit_errno = ENODEV,
+  };
+  GstMppRgaBackend *backend = new_backend (&fake);
+
+  fail_unless (gst_mpp_rga_backend_init (backend));
+  fail_unless_equals_int (gst_mpp_rga_backend_blit (backend,
+          GST_MPP_RGA_OP_DECODE_CONVERT, GST_VIDEO_FORMAT_NV12,
+          GST_VIDEO_FORMAT_BGRA, NULL, NULL), GST_MPP_RGA_DEVICE_LOST);
+  fail_unless_equals_int (gst_mpp_rga_backend_blit (backend,
+          GST_MPP_RGA_OP_ENCODE_CONVERT, GST_VIDEO_FORMAT_BGR,
+          GST_VIDEO_FORMAT_NV12, NULL, NULL), GST_MPP_RGA_UNAVAILABLE);
+  fail_unless_equals_int (fake.blit_calls, 1);
+
+  gst_mpp_rga_backend_free (backend);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_conversion_counters_and_cpu_copy_env_gate)
+{
+  GstMppConversionStats stats;
+  GstMppConversionStatsSnapshot snapshot;
+
+  gst_mpp_conversion_stats_init (&stats);
+  g_unsetenv ("GST_MPP_ALLOW_CPU_COPY");
+  fail_if (gst_mpp_conversion_finish_without_rga (&stats, TRUE, TRUE));
+  gst_mpp_conversion_stats_layout_rejected (&stats);
+  gst_mpp_conversion_stats_snapshot (&stats, &snapshot);
+  fail_unless_equals_uint64 (snapshot.fallback_frames, 0);
+  fail_unless_equals_uint64 (snapshot.dropped_frames, 1);
+  fail_unless_equals_uint64 (snapshot.layout_rejections, 1);
+
+  g_setenv ("GST_MPP_ALLOW_CPU_COPY", "1", TRUE);
+  fail_unless (gst_mpp_conversion_finish_without_rga (&stats, TRUE, TRUE));
+  gst_mpp_conversion_stats_snapshot (&stats, &snapshot);
+  fail_unless_equals_uint64 (snapshot.fallback_frames, 1);
+  fail_unless_equals_uint64 (snapshot.dropped_frames, 1);
+  fail_unless_equals_uint64 (snapshot.layout_rejections, 1);
+
+  g_unsetenv ("GST_MPP_ALLOW_CPU_COPY");
+  gst_mpp_conversion_stats_clear (&stats);
+}
+GST_END_TEST;
+
+static Suite *
+mpp_rga_backend_suite (void)
+{
+  Suite *suite = suite_create ("mpp_rga_backend");
+  TCase *test_case = tcase_create ("backend");
+
+  tcase_add_test (test_case, test_unavailable_backend_takes_typed_refusal_path);
+  tcase_add_test (test_case,
+      test_old_driver_version_is_unavailable_even_if_librga_init_succeeds);
+  tcase_add_test (test_case,
+      test_librga_init_failure_is_informational_after_probe_success);
+  tcase_add_test (test_case, test_eight_failures_demote_only_the_exact_tuple);
+  tcase_add_test (test_case, test_successful_retrial_clears_tuple_demotion);
+  tcase_add_test (test_case, test_enodev_demotes_the_process);
+  tcase_add_test (test_case, test_conversion_counters_and_cpu_copy_env_gate);
+  suite_add_tcase (suite, test_case);
+  return suite;
+}
+
+GST_CHECK_MAIN (mpp_rga_backend);

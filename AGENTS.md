@@ -120,6 +120,11 @@ The following are compatibility contracts, not cleanup opportunities:
 - **Caps and allocation:** existing golden caps are additive-only. The MPP
   encoder's DMA-BUF pool, 1080-to-1088 `GstVideoAlignment`, and DMA32 allocator
   request are runtime contracts.
+- **RGA conversion:** `/dev/rga` must pass the driver-version ioctl before use;
+  librga init alone is never sufficient. Blit health is isolated per operation
+  and format pair. CPU copy remains compiled but is debug-only behind
+  `GST_MPP_ALLOW_CPU_COPY=1`; normal operation fails negotiation instead. The
+  three read-only conversion counters are additive element properties.
 
 `tests/parity-check.sh`, `tests/golden/`, `packaging/package-contract.sh`, and
 the board drills are the executable authorities. Update a frozen contract only
@@ -182,7 +187,8 @@ workspace parent. d1/d2/d4 also take package paths through environment variables
 The project remains LGPL-2.1. Keep `COPYING`, source headers, and
 `packaging/copyright` intact. Copyright holders represented in the shipped tree
 are Rockchip Electronics Co., Ltd.; Collabora Ltd.; Igalia; and Julien Moutte.
-Igalia and Julien Moutte are scoped to `gst/rkximage/`, not the MPP plugin.
+Igalia and Julien Moutte are scoped to `gst/rkximage/`, not the MPP plugin;
+CERALIVE owns the new RGA backend, tuple-health, and conversion-counter files.
 
 Provenance credits are distinct: Rockchip originated the plugin family, JeffyCN
 maintains the audited upstream line, BELABOX rebased and carried the downstream

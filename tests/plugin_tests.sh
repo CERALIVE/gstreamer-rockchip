@@ -18,6 +18,10 @@ test "$(grep -c '^mpp_create' "$MPP_MOCK_LOG")" -ge 2
 test "$(grep -c '^mpp_init' "$MPP_MOCK_LOG")" -ge 2
 grep -q 'video/x-raw' "$tmpdir/mppjpeg.inspect"
 grep -q 'NV12' "$tmpdir/mppjpeg.inspect"
+for property in conversion-fallback-frames conversion-dropped-frames layout-rejections; do
+  grep -q "$property" "$tmpdir/mpph264.inspect"
+  grep -q "$property" "$tmpdir/mppjpeg.inspect"
+done
 sh "$MESON_SOURCE_ROOT/tests/parity_with_mock.sh" \
   "$MESON_BUILD_ROOT" "$MESON_SOURCE_ROOT"
 

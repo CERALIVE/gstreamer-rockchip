@@ -307,7 +307,10 @@ gst_mpp_jpeg_dec_set_format (GstVideoDecoder * decoder,
 
   if (dst_format != src_format || dst_width != width || dst_height != height) {
     if (!gst_mpp_use_rga ()) {
-      GST_ERROR_OBJECT (self, "unable to convert without RGA");
+      GST_ELEMENT_ERROR (self, CORE, NEGOTIATION,
+          ("no 2D converter available for %s",
+              gst_mpp_rga_operation_name (GST_MPP_RGA_OP_JPEG_CONVERT)),
+          ("RGA disabled"));
       return FALSE;
     }
 
@@ -485,8 +488,7 @@ gst_mpp_jpeg_dec_shutdown (GstVideoDecoder * decoder, gboolean drain,
     }
     if (ret == MPP_OK)
       break;
-    if (!gst_mpp_jpeg_dec_is_poll_timeout (ret,
-            MPP_JPEG_DEC_DRAIN_POLL_MS))
+    if (!gst_mpp_jpeg_dec_is_poll_timeout (ret, MPP_JPEG_DEC_DRAIN_POLL_MS))
       goto error;
   } while (g_get_monotonic_time () < deadline);
 

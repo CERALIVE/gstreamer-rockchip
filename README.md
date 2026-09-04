@@ -45,6 +45,24 @@ Hardware-independent tests use the mock MPP seam. RK3588-only acceptance is in
 See [`AGENTS.md`](AGENTS.md) for the exact proof boundary, frozen contracts, and
 contribution rules.
 
+## RGA conversion safety
+
+The MPP encoder and decoders treat librga as available only after `/dev/rga`
+answers `RGA_IOC_GET_DRVIER_VERSION` with driver version 1.2.4 or newer.
+`c_RkRgaInit()` is retained for compatibility but is not an availability test.
+Eight consecutive failures demote only the operation and input/output format
+tuple that failed; other tuples continue using RGA, and a later trial success
+restores the demoted tuple. `ENODEV` is the only blit failure that disables the
+backend process-wide.
+
+`conversion-fallback-frames`, `conversion-dropped-frames`, and
+`layout-rejections` are read-only counters on the MPP encoder and decoder
+elements. Their final values are also emitted at `GST_DEBUG` level when an
+element returns to NULL. CPU frame copying is disabled in production; setting
+`GST_MPP_ALLOW_CPU_COPY=1` enables that debug-only fallback. `GST_MPP_NO_RGA=1`
+continues to force conversion refusal. Without an available 2D path, conversion
+fails with `GST_FLOW_NOT_NEGOTIATED` rather than silently copying on the CPU.
+
 ## Upstream lineage and credits
 
 This repository descends from the Rockchip plugin code through the JeffyCN,

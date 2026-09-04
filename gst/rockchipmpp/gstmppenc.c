@@ -84,18 +84,18 @@ G_DEFINE_ABSTRACT_TYPE (GstMppEnc, gst_mpp_enc, GST_TYPE_VIDEO_ENCODER);
 #define DEFAULT_PROP_BPS_MAX 0  /* Auto */
 #define DEFAULT_PROP_WIDTH 0    /* Original */
 #define DEFAULT_PROP_HEIGHT 0   /* Original */
-#define DEFAULT_PROP_FPS_OUT 0          /* Same as input */
-#define DEFAULT_PROP_DROP_MODE 0       /* Disabled */
-#define DEFAULT_PROP_DROP_THRESHOLD 50 /* 50% over bps_max */
-#define DEFAULT_PROP_INTRA_REFRESH 0   /* Disabled */
+#define DEFAULT_PROP_FPS_OUT 0  /* Same as input */
+#define DEFAULT_PROP_DROP_MODE 0        /* Disabled */
+#define DEFAULT_PROP_DROP_THRESHOLD 50  /* 50% over bps_max */
+#define DEFAULT_PROP_INTRA_REFRESH 0    /* Disabled */
 #define DEFAULT_PROP_SUPER_MODE MPP_ENC_RC_SUPER_FRM_NONE
-#define DEFAULT_PROP_SUPER_I_THD 0     /* Auto */
-#define DEFAULT_PROP_SUPER_P_THD 0     /* Auto */
+#define DEFAULT_PROP_SUPER_I_THD 0      /* Auto */
+#define DEFAULT_PROP_SUPER_P_THD 0      /* Auto */
 #define DEFAULT_PROP_DEBREATH FALSE
 #define DEFAULT_PROP_DEBREATH_STRENGTH 16
-#define DEFAULT_PROP_SCENE_MODE 0      /* Default */
-#define DEFAULT_PROP_ANTI_FLICKER 0    /* Disabled */
-#define DEFAULT_PROP_NUM_TEMPORAL_LAYERS 0 /* Off (flat IPPP) */
+#define DEFAULT_PROP_SCENE_MODE 0       /* Default */
+#define DEFAULT_PROP_ANTI_FLICKER 0     /* Disabled */
+#define DEFAULT_PROP_NUM_TEMPORAL_LAYERS 0      /* Off (flat IPPP) */
 #define DEFAULT_PROP_ZERO_COPY_PKT TRUE
 
 /* Input isn't ARM AFBC by default */
@@ -135,6 +135,9 @@ enum
   PROP_SCENE_MODE,
   PROP_ANTI_FLICKER,
   PROP_NUM_TEMPORAL_LAYERS,
+  PROP_CONVERSION_FALLBACK_FRAMES,
+  PROP_CONVERSION_DROPPED_FRAMES,
+  PROP_LAYOUT_REJECTIONS,
   PROP_LAST,
 };
 
@@ -144,7 +147,7 @@ gst_mpp_enc_supported (MppCodingType mpp_type)
   MppCtx mpp_ctx;
   MppApi *mpi;
 
-  mpp_set_log_level(MPP_LOG_WARN);
+  mpp_set_log_level (MPP_LOG_WARN);
 
   if (mpp_create (&mpp_ctx, &mpi))
     return FALSE;
@@ -513,6 +516,20 @@ gst_mpp_enc_get_property (GObject * object,
     case PROP_NUM_TEMPORAL_LAYERS:
       g_value_set_uint (value, self->num_temporal_layers);
       break;
+    case PROP_CONVERSION_FALLBACK_FRAMES:
+    case PROP_CONVERSION_DROPPED_FRAMES:
+    case PROP_LAYOUT_REJECTIONS:{
+      GstMppConversionStatsSnapshot stats;
+      gst_mpp_conversion_stats_snapshot (gst_mpp_conversion_stats_get (object),
+          &stats);
+      if (prop_id == PROP_CONVERSION_FALLBACK_FRAMES)
+        g_value_set_uint64 (value, stats.fallback_frames);
+      else if (prop_id == PROP_CONVERSION_DROPPED_FRAMES)
+        g_value_set_uint64 (value, stats.dropped_frames);
+      else
+        g_value_set_uint64 (value, stats.layout_rejections);
+      break;
+    }
     default:
       invalid = TRUE;
       break;
@@ -704,8 +721,7 @@ gst_mpp_enc_snapshot_rate_info (GstVideoEncoder * encoder,
  * behaviour for a hierarchical-P transition.
  */
 static gboolean
-gst_mpp_enc_apply_ref_cfg (GstVideoEncoder * encoder,
-    guint num_temporal_layers)
+gst_mpp_enc_apply_ref_cfg (GstVideoEncoder * encoder, guint num_temporal_layers)
 {
   GstMppEnc *self = GST_MPP_ENC (encoder);
   MppEncRefLtFrmCfg lt_ref[4];
@@ -770,7 +786,8 @@ gst_mpp_enc_apply_ref_cfg (GstVideoEncoder * encoder,
       st_ref[8].is_non_ref = 0;
       st_ref[8].temporal_id = 0;
       st_ref[8].ref_mode = REF_TO_TEMPORAL_LAYER;
-    } break;
+    }
+      break;
     case 3:{
       /* tsvc3: 3 temporal layers. */
       st_cnt = 5;
@@ -789,8 +806,9 @@ gst_mpp_enc_apply_ref_cfg (GstVideoEncoder * encoder,
       st_ref[4].is_non_ref = 0;
       st_ref[4].temporal_id = 0;
       st_ref[4].ref_mode = REF_TO_TEMPORAL_LAYER;
-    } break;
-    default:{                   /* 2 */
+    }
+      break;
+    default:{                  /* 2 */
       /* tsvc2: 2 temporal layers. */
       st_cnt = 3;
       st_ref[0].is_non_ref = 0;
@@ -802,7 +820,8 @@ gst_mpp_enc_apply_ref_cfg (GstVideoEncoder * encoder,
       st_ref[2].is_non_ref = 0;
       st_ref[2].temporal_id = 0;
       st_ref[2].ref_mode = REF_TO_PREV_REF_FRM;
-    } break;
+    }
+      break;
   }
 
   mpp_enc_ref_cfg_set_cfg_cnt (self->ref_cfg, lt_cnt, st_cnt);
@@ -1122,8 +1141,7 @@ gst_mpp_enc_reset (GstVideoEncoder * encoder, gboolean drain, gboolean final)
 
   /* MPP leaves encoder output queued across reset. Drain through the normal
    * output path so stale packets cannot be assigned to the next session. */
-  no_progress_deadline =
-      g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
+  no_progress_deadline = g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
   while (g_get_monotonic_time () < no_progress_deadline) {
     if (gst_mpp_enc_poll_packet_locked (encoder)) {
       no_progress_deadline =
@@ -1134,8 +1152,7 @@ gst_mpp_enc_reset (GstVideoEncoder * encoder, gboolean drain, gboolean final)
   }
 
   result = self->task_ret;
-  fully_drained =
-      GST_MPP_ENC_PENDING (encoder) == 0 && self->frames == NULL;
+  fully_drained = GST_MPP_ENC_PENDING (encoder) == 0 && self->frames == NULL;
   if (drain && !fully_drained) {
     GST_ERROR_OBJECT (self,
         "EOS drain timed out with %d pending and %u unsubmitted frames",
@@ -1370,7 +1387,10 @@ gst_mpp_enc_set_format (GstVideoEncoder * encoder, GstVideoCodecState * state)
       width != GST_VIDEO_INFO_WIDTH (info) ||
       height != GST_VIDEO_INFO_HEIGHT (info)) {
     if (!gst_mpp_use_rga ()) {
-      GST_ERROR_OBJECT (self, "unable to convert without RGA");
+      GST_ELEMENT_ERROR (self, CORE, NEGOTIATION,
+          ("no 2D converter available for %s",
+              gst_mpp_rga_operation_name (GST_MPP_RGA_OP_ENCODE_CONVERT)),
+          ("RGA disabled"));
       return FALSE;
     }
 
@@ -1543,7 +1563,10 @@ gst_mpp_enc_apply_pending_resolution (GstVideoEncoder * encoder)
       width != GST_VIDEO_INFO_WIDTH (info) ||
       height != GST_VIDEO_INFO_HEIGHT (info)) {
     if (!gst_mpp_use_rga ()) {
-      GST_ERROR_OBJECT (self, "unable to rescale without RGA");
+      GST_ELEMENT_ERROR (self, CORE, NEGOTIATION,
+          ("no 2D converter available for %s",
+              gst_mpp_rga_operation_name (GST_MPP_RGA_OP_ENCODE_CONVERT)),
+          ("RGA disabled"));
       return FALSE;
     }
 
@@ -1669,9 +1692,10 @@ gst_mpp_enc_convert (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
   GstBuffer *outbuf, *inbuf;
   GstMemory *in_mem, *out_mem = NULL;
   GstVideoMeta *meta;
+  GstMppRgaResult rga_result = GST_MPP_RGA_UNAVAILABLE;
   gsize size, maxsize, offset;
   gint src_hstride, src_vstride, rotation;
-  gboolean strides_changed;
+  gboolean strides_changed, allow_cpu_copy;
   guint i;
 
   GST_MPP_ENC_PROP_LOCK (encoder);
@@ -1693,12 +1717,19 @@ gst_mpp_enc_convert (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
   if (size < GST_VIDEO_INFO_SIZE (&src_info)) {
     GST_ERROR_OBJECT (self, "input buffer too small (%" G_GSIZE_FORMAT
         " < %" G_GSIZE_FORMAT ")", size, GST_VIDEO_INFO_SIZE (&src_info));
+    gst_mpp_conversion_stats_layout_rejected (gst_mpp_conversion_stats_get
+        (G_OBJECT (self)));
+    gst_mpp_conversion_stats_dropped (gst_mpp_conversion_stats_get (G_OBJECT
+            (self)));
     return NULL;
   }
 
   outbuf = gst_buffer_new ();
-  if (!outbuf)
+  if (!outbuf) {
+    gst_mpp_conversion_stats_dropped (gst_mpp_conversion_stats_get (G_OBJECT
+            (self)));
     goto err;
+  }
 
   if (rotation)
     goto convert;
@@ -1754,8 +1785,11 @@ convert:
 
   out_mem = gst_allocator_alloc (self->allocator,
       GST_VIDEO_INFO_SIZE (&dst_info), NULL);
-  if (!out_mem)
+  if (!out_mem) {
+    gst_mpp_conversion_stats_dropped (gst_mpp_conversion_stats_get (G_OBJECT
+            (self)));
     goto err;
+  }
 
   gst_buffer_append_memory (outbuf, out_mem);
   out_mem = NULL;
@@ -1763,17 +1797,30 @@ convert:
 #ifdef HAVE_RGA
   /* outbuf owns the memory now, so the blit borrows it back rather than
    * keeping a second name for it alive across the error paths below. */
-  if (gst_mpp_use_rga () &&
-      gst_mpp_rga_convert (inbuf, &src_info,
-          gst_buffer_peek_memory (outbuf, 0), &dst_info, rotation)) {
+  rga_result = gst_mpp_rga_convert (inbuf, &src_info,
+      gst_buffer_peek_memory (outbuf, 0), &dst_info, rotation,
+      GST_MPP_RGA_OP_ENCODE_CONVERT);
+  if (rga_result == GST_MPP_RGA_SUCCESS) {
     GST_DEBUG_OBJECT (self, "using RGA converted buffer");
     goto out;
   }
+  if (rga_result == GST_MPP_RGA_LAYOUT_REJECTED)
+    gst_mpp_conversion_stats_layout_rejected (gst_mpp_conversion_stats_get
+        (G_OBJECT (self)));
 #endif
 
+  allow_cpu_copy = gst_mpp_cpu_copy_allowed ();
   if (rotation ||
-      GST_VIDEO_INFO_FORMAT (&src_info) != GST_VIDEO_INFO_FORMAT (&dst_info))
+      GST_VIDEO_INFO_FORMAT (&src_info) != GST_VIDEO_INFO_FORMAT (&dst_info) ||
+      !allow_cpu_copy) {
+    gst_mpp_conversion_stats_dropped (gst_mpp_conversion_stats_get (G_OBJECT
+            (self)));
+    GST_ELEMENT_ERROR (self, CORE, NEGOTIATION,
+        ("no 2D converter available for %s",
+            gst_mpp_rga_operation_name (GST_MPP_RGA_OP_ENCODE_CONVERT)),
+        ("RGA result %d", rga_result));
     goto err;
+  }
 
   /*
    * Nothing below writes the MPP buffer, so a skipped copy leaves it holding
@@ -1782,25 +1829,35 @@ convert:
    */
   if (!gst_video_frame_map (&src_frame, &src_info, inbuf, GST_MAP_READ)) {
     GST_ERROR_OBJECT (self, "failed to map input frame");
+    gst_mpp_conversion_stats_dropped (gst_mpp_conversion_stats_get (G_OBJECT
+            (self)));
     goto err;
   }
 
   if (!gst_video_frame_map (&dst_frame, &dst_info, outbuf, GST_MAP_WRITE)) {
     GST_ERROR_OBJECT (self, "failed to map converted frame");
     gst_video_frame_unmap (&src_frame);
+    gst_mpp_conversion_stats_dropped (gst_mpp_conversion_stats_get (G_OBJECT
+            (self)));
     goto err;
   }
 
-  GST_VIDEO_ENCODER_STREAM_UNLOCK (encoder);
-  if (!gst_video_frame_copy (&dst_frame, &src_frame)) {
+  if (allow_cpu_copy) {
+    GST_VIDEO_ENCODER_STREAM_UNLOCK (encoder);
+    if (!gst_video_frame_copy (&dst_frame, &src_frame)) {
+      GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
+      gst_video_frame_unmap (&dst_frame);
+      gst_video_frame_unmap (&src_frame);
+      gst_mpp_conversion_stats_dropped (gst_mpp_conversion_stats_get (G_OBJECT
+              (self)));
+      goto err;
+    }
     GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
-    gst_video_frame_unmap (&dst_frame);
-    gst_video_frame_unmap (&src_frame);
-    goto err;
   }
-  GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
   gst_video_frame_unmap (&dst_frame);
   gst_video_frame_unmap (&src_frame);
+  gst_mpp_conversion_stats_fallback (gst_mpp_conversion_stats_get (G_OBJECT
+          (self)));
 
   GST_DEBUG_OBJECT (self, "using software converted buffer");
 
@@ -2130,6 +2187,17 @@ static GstStateChangeReturn
 gst_mpp_enc_change_state (GstElement * element, GstStateChange transition)
 {
   GstVideoEncoder *encoder = GST_VIDEO_ENCODER (element);
+  GstMppEnc *self = GST_MPP_ENC (element);
+
+  if (transition == GST_STATE_CHANGE_READY_TO_NULL) {
+    GstMppConversionStatsSnapshot stats;
+    gst_mpp_conversion_stats_snapshot (gst_mpp_conversion_stats_get (G_OBJECT
+            (self)), &stats);
+    GST_DEBUG_OBJECT (self,
+        "conversion summary: fallback=%" G_GUINT64_FORMAT " dropped=%"
+        G_GUINT64_FORMAT " layout-rejections=%" G_GUINT64_FORMAT,
+        stats.fallback_frames, stats.dropped_frames, stats.layout_rejections);
+  }
 
   if (transition == GST_STATE_CHANGE_PAUSED_TO_READY) {
     GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
@@ -2153,6 +2221,7 @@ static void
 gst_mpp_enc_init (GstMppEnc * self)
 {
   g_mutex_init (&self->prop_mutex);
+  gst_mpp_conversion_stats_attach (G_OBJECT (self));
 
   self->mpp_type = MPP_VIDEO_CodingUnused;
 
@@ -2327,6 +2396,23 @@ gst_mpp_enc_class_init (GstMppEncClass * klass)
           1, MPP_MAX_PENDING, DEFAULT_PROP_MAX_PENDING,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  g_object_class_install_property (gobject_class,
+      PROP_CONVERSION_FALLBACK_FRAMES,
+      g_param_spec_uint64 ("conversion-fallback-frames",
+          "Conversion fallback frames",
+          "Frames converted by the debug CPU-copy fallback", 0, G_MAXUINT64,
+          0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class,
+      PROP_CONVERSION_DROPPED_FRAMES,
+      g_param_spec_uint64 ("conversion-dropped-frames",
+          "Conversion dropped frames",
+          "Frames dropped because no 2D converter was available", 0,
+          G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_LAYOUT_REJECTIONS,
+      g_param_spec_uint64 ("layout-rejections", "Layout rejections",
+          "Frames rejected for an unsupported conversion layout", 0,
+          G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+
   g_object_class_install_property (gobject_class, PROP_HEADER_MODE,
       g_param_spec_enum ("header-mode", "Header mode",
           "Header mode",
@@ -2448,8 +2534,7 @@ no_rga:
   g_object_class_install_property (gobject_class, PROP_DEBREATH,
       g_param_spec_boolean ("debreath", "De-breathing",
           "Smooth the GOP bitrate breathing oscillation",
-          DEFAULT_PROP_DEBREATH,
-          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+          DEFAULT_PROP_DEBREATH, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (gobject_class, PROP_DEBREATH_STRENGTH,
       g_param_spec_uint ("debreath-strength", "De-breathing strength",
