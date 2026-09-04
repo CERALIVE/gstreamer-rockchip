@@ -11,13 +11,19 @@
 #include "config.h"
 #endif
 
+#include "gstrgacompositor.h"
 #include "gstrgaconvert.h"
 
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
-  return gst_element_register (plugin, "rgaconvert", GST_RANK_NONE,
+  gboolean registered = TRUE;
+
+  registered &= gst_element_register (plugin, "rgaconvert", GST_RANK_NONE,
       GST_TYPE_RGA_CONVERT);
+  registered &= gst_element_register (plugin, "rgacompositor", GST_RANK_NONE,
+      GST_TYPE_RGA_COMPOSITOR);
+  return registered;
 }
 
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,
