@@ -1,9 +1,9 @@
 # CeraLive gstreamer-rockchip
 
 GStreamer plugins for Rockchip MPP hardware encode/decode on RK3588 devices.
-This public CeraLive fork preserves the complete eleven-factory plugin set while
-maintaining and validating the H.264/H.265 encoder and decoder paths used by the
-CeraLive streaming stack.
+This public CeraLive fork maintains and validates the H.264/H.265 encoder and
+decoder paths used by the CeraLive streaming stack, and extends the upstream
+nine-factory plugin set to eleven with two first-party librga elements.
 
 ## Maintainer notice
 
@@ -19,6 +19,16 @@ Its four engine-critical elements are `mpph264enc`, `mpph265enc`,
 `mppvideodec`, and `mppjpegdec`. Five additional upstream factories remain part
 of the package and registration contract; `rgaconvert` and `rgacompositor` add
 the two first-party librga factories.
+
+**Which of those eleven you actually get depends on where you are looking.** The
+two `rockchiprga` factories live on the unmerged `feat/rga-librga-backend`
+branch — `main` is at `b021d610`, which predates them — so the published
+`1.14.4+ceralive.1` package carries **nine** factories, not eleven. Everything
+described under "RGA conversion safety" below is branch code: built, reviewed, CI
+gated, and exercised by the gated board drills, but not in any released package
+and not on any device image. See
+[`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md) for what a real
+board has and has not established.
 
 ## Build
 

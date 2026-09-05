@@ -16,7 +16,8 @@ compressed input -> mppvideodec/mppjpegdec -> program graph
 ```
 
 The package remains a complete plugin set. The factory contract contains
-**eleven built entries** with no reserved slots:
+**eleven built entries** with no reserved slots — but read the release-state note
+below the table before quoting that number as something a device carries:
 
 | # | Factory | Plugin | Registration expectation |
 |---|---|---|---|
@@ -41,6 +42,24 @@ registers on the SoCs that do carry the block.
 CeraLive deeply validates the four MPP factories used by the engine plus
 `rgaconvert` and `rgacompositor`; the remaining five retain
 build-and-registration coverage.
+
+**RELEASE STATE — the eleven-factory contract is BRANCH truth, not shipped
+truth.** The two `rockchiprga` factories and the encoder-hygiene work exist only
+on the long-lived `feat/rga-librga-backend` branch, which is not merged: `main`
+is at `b021d610`, which predates `cae67b2b` (`rgaconvert`) entirely. The one
+published release, `1.14.4+ceralive.1`, was cut from that pre-RGA history and
+therefore carries **nine** factories — no `rgaconvert`, no `rgacompositor`. The
+`image-building-pipeline` manifest row that pins this fork names that nine-factory
+asset, and no device image has been built or flashed with it either.
+
+So the honest wording for anything on this branch is "built and reviewed, gated in
+CI, and exercised by the board drills named in
+[`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md)" — never "ships",
+never "devices carry it". Both elements are real built code rather than stubs
+(`gst/rockchiprga/gstrgaconvert.c`, `gst/rockchiprga/gstrgacompositor.c`), and the
+d5 conversion matrix has genuinely run on hardware and genuinely recorded six
+failing quality cells; a passing CI gate is not a shipped element, and a run board
+drill is not a released package.
 
 ## Repository map
 
