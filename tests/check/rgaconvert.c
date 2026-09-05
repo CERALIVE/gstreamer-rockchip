@@ -9,6 +9,15 @@
 #include <rga/im2d.h>
 
 #include "../../gst/rockchiprga/gstrgaconvert.h"
+/* Exercise the real im2d submission below the injected hardware probe. */
+#undef GST_CAT_DEFAULT
+#include "../../gst/rockchipmpp/gstmpprgabackend.c"
+#undef GST_CAT_DEFAULT
+#define GST_CAT_DEFAULT check_debug
+
+static rga_buffer_t submitted_src;
+static rga_buffer_t submitted_dst;
+static guint submitted_calls;
 
 int
 c_RkRgaInit (void)
@@ -52,8 +61,9 @@ IM_STATUS
 improcess (rga_buffer_t src, rga_buffer_t dst, rga_buffer_t pat,
     im_rect src_rect, im_rect dst_rect, im_rect pat_rect, int usage)
 {
-  (void) src;
-  (void) dst;
+  submitted_src = src;
+  submitted_dst = dst;
+  submitted_calls++;
   (void) pat;
   (void) src_rect;
   (void) dst_rect;
@@ -67,6 +77,7 @@ typedef struct
   gboolean available;
   gint process_result;
   guint process_calls;
+  gboolean submit_im2d;
   GstMppRgaIm2dRequest last_request;
 } FakeRga;
 
@@ -116,6 +127,8 @@ fake_process (const GstMppRgaIm2dRequest * request, gpointer user_data)
 
   fake->process_calls++;
   fake->last_request = *request;
+  if (fake->submit_im2d)
+    return gst_mpp_rga_real_process (request, NULL);
   return fake->process_result;
 }
 
@@ -606,6 +619,196 @@ GST_START_TEST (test_allocation_offers_and_accepts_dmabuf_pool)
 }
 GST_END_TEST;
 
+GST_START_TEST (test_colorimetry_reaches_improcess)
+{
+  const struct
+  {
+    const gchar *color;
+    gint y2r;
+    gint r2y;
+  } cases[] = {
+    {"bt601", IM_YUV_TO_RGB_BT601_LIMIT, IM_RGB_TO_YUV_BT601_LIMIT},
+    {"bt709", IM_YUV_TO_RGB_BT709_LIMIT, IM_RGB_TO_YUV_BT709_LIMIT},
+    {"1:4:16:4", IM_YUV_TO_RGB_BT601_FULL, IM_RGB_TO_YUV_BT601_FULL},
+    {"1:3:5:1", IM_YUV_BT709_FULL_RANGE, IM_YUV_BT709_FULL_RANGE},
+  };
+  FakeRga fake = {.available = TRUE, .submit_im2d = TRUE};
+  TestConvert test = test_convert_new (&fake);
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+  guint i;
+  guint direction;
+
+  for (i = 0; i < G_N_ELEMENTS (cases); i++) {
+    for (direction = 0; direction < 2; direction++) {
+      gchar *yuv_caps = g_strdup_printf (
+          "video/x-raw(memory:DMABuf),format=NV12,width=640,height=480,colorimetry=%s",
+          cases[i].color);
+      const gchar *rgb_caps =
+          "video/x-raw(memory:DMABuf),format=BGR,width=640,height=480,colorimetry=sRGB";
+      gsize offsets[GST_VIDEO_MAX_PLANES] = { 0, };
+      gint strides[GST_VIDEO_MAX_PLANES] = { 640 * 3, };
+      GstBuffer *yuv = new_nv12_buffer (TRUE, 640, 480, 672, 496);
+      GstBuffer *rgb = new_video_buffer (TRUE, GST_VIDEO_FORMAT_BGR,
+          640, 480, 1, offsets, strides, 640 * 480 * 3);
+
+      set_convert_caps (test.convert, direction ? rgb_caps : yuv_caps,
+          direction ? yuv_caps : rgb_caps);
+      submitted_calls = 0;
+      fail_unless_equals_int (klass->transform (GST_BASE_TRANSFORM (test.convert),
+              direction ? rgb : yuv, direction ? yuv : rgb), GST_FLOW_OK);
+      fail_unless_equals_int (submitted_calls, 1);
+      if (i == 3) {
+        fail_unless_equals_int (submitted_src.color_space_mode,
+            direction ? IM_RGB_FULL : IM_YUV_BT709_FULL_RANGE);
+        fail_unless_equals_int (submitted_dst.color_space_mode,
+            direction ? IM_YUV_BT709_FULL_RANGE : IM_RGB_FULL);
+      } else {
+        fail_unless_equals_int (submitted_src.color_space_mode, 0);
+        fail_unless_equals_int (submitted_dst.color_space_mode,
+            direction ? cases[i].r2y : cases[i].y2r);
+      }
+      gst_buffer_unref (rgb);
+      gst_buffer_unref (yuv);
+      g_free (yuv_caps);
+    }
+  }
+  test_convert_clear (&test);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_unspecified_colorimetry_uses_video_info_defaults)
+{
+  const guint heights[] = { 480, 576, 578, 1080, 2160 };
+  FakeRga fake = {.available = TRUE, .submit_im2d = TRUE};
+  TestConvert test = test_convert_new (&fake);
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+  guint i;
+  guint direction;
+
+  for (i = 0; i < G_N_ELEMENTS (heights); i++) {
+    guint height = heights[i];
+    gchar *yuv_caps = g_strdup_printf (
+        "video/x-raw(memory:DMABuf),format=NV12,width=640,height=%u", height);
+    const gchar *rgb_caps =
+        "video/x-raw(memory:DMABuf),format=BGR,width=320,height=240";
+    gsize offsets[GST_VIDEO_MAX_PLANES] = { 0, };
+    gint strides[GST_VIDEO_MAX_PLANES] = { 320 * 3, };
+    GstBuffer *yuv = new_nv12_buffer (TRUE, 640, height, 640, height);
+    GstBuffer *rgb = new_video_buffer (TRUE, GST_VIDEO_FORMAT_BGR,
+        320, 240, 1, offsets, strides, 320 * 240 * 3);
+
+    for (direction = 0; direction < 2; direction++) {
+      set_convert_caps (test.convert, direction ? rgb_caps : yuv_caps,
+          direction ? yuv_caps : rgb_caps);
+      fail_unless_equals_int (klass->transform (GST_BASE_TRANSFORM (test.convert),
+              direction ? rgb : yuv, direction ? yuv : rgb), GST_FLOW_OK);
+      fail_unless_equals_int (submitted_src.color_space_mode, 0);
+      fail_unless_equals_int (submitted_dst.color_space_mode,
+          direction ? (height > 576 ? IM_RGB_TO_YUV_BT709_LIMIT :
+              IM_RGB_TO_YUV_BT601_LIMIT) :
+          (height > 576 ? IM_YUV_TO_RGB_BT709_LIMIT : IM_YUV_TO_RGB_BT601_LIMIT));
+    }
+    gst_buffer_unref (rgb);
+    gst_buffer_unref (yuv);
+    g_free (yuv_caps);
+  }
+  test_convert_clear (&test);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_stride_only_does_not_request_csc)
+{
+  FakeRga fake = {.available = TRUE, .submit_im2d = TRUE};
+  TestConvert test = test_convert_new (&fake);
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+  const gchar *caps =
+      "video/x-raw(memory:DMABuf),format=NV12,width=640,height=480,colorimetry=bt709";
+  GstBuffer *input = new_nv12_buffer (TRUE, 640, 480, 672, 496);
+  GstBuffer *output = new_nv12_buffer (TRUE, 640, 480, 640, 480);
+
+  set_convert_caps (test.convert, caps, caps);
+  submitted_calls = 0;
+  fail_unless_equals_int (klass->transform (GST_BASE_TRANSFORM (test.convert),
+          input, output), GST_FLOW_OK);
+  fail_unless_equals_int (submitted_calls, 1);
+  fail_unless_equals_int (submitted_src.color_space_mode, 0);
+  fail_unless_equals_int (submitted_dst.color_space_mode, 0);
+  gst_buffer_unref (output);
+  gst_buffer_unref (input);
+  test_convert_clear (&test);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_color_space_changes_and_unsupported_modes)
+{
+  const struct
+  {
+    GstVideoFormat input_format;
+    GstVideoFormat output_format;
+    const gchar *input_color;
+    const gchar *output_color;
+    gboolean supported;
+    gint src_mode;
+    gint dst_mode;
+  } cases[] = {
+    {GST_VIDEO_FORMAT_NV12, GST_VIDEO_FORMAT_NV16, "bt709", "bt709",
+        TRUE, 0, 0},
+    {GST_VIDEO_FORMAT_BGR, GST_VIDEO_FORMAT_RGBA, "sRGB", "sRGB",
+        TRUE, 0, 0},
+    {GST_VIDEO_FORMAT_NV12, GST_VIDEO_FORMAT_NV12, "bt601", "bt709",
+        TRUE, IM_YUV_BT601_LIMIT_RANGE, IM_YUV_BT709_LIMIT_RANGE},
+    {GST_VIDEO_FORMAT_NV12, GST_VIDEO_FORMAT_NV12, "bt709", "1:3:5:1",
+        TRUE, IM_YUV_BT709_LIMIT_RANGE, IM_YUV_BT709_FULL_RANGE},
+    {GST_VIDEO_FORMAT_NV12, GST_VIDEO_FORMAT_BGR, "bt2020", "sRGB",
+        FALSE, 0, 0},
+    {GST_VIDEO_FORMAT_BGR, GST_VIDEO_FORMAT_NV12, "sRGB", "bt2020",
+        FALSE, 0, 0},
+    {GST_VIDEO_FORMAT_BGR, GST_VIDEO_FORMAT_NV12, "2:1:7:1", "bt709",
+        FALSE, 0, 0},
+  };
+  FakeRga fake = {.available = TRUE, .submit_im2d = TRUE};
+  TestConvert test = test_convert_new (&fake);
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+  guint i;
+
+  for (i = 0; i < G_N_ELEMENTS (cases); i++) {
+    GstVideoInfo infos[2];
+    GstBuffer *buffers[2];
+    guint side;
+    gchar *caps[2];
+
+    for (side = 0; side < 2; side++) {
+      GstVideoFormat format = side ? cases[i].output_format :
+          cases[i].input_format;
+
+      gst_video_info_set_format (&infos[side], format, 640, 480);
+      caps[side] = g_strdup_printf (
+          "video/x-raw(memory:DMABuf),format=%s,width=640,height=480,colorimetry=%s",
+          gst_video_format_to_string (format),
+          side ? cases[i].output_color : cases[i].input_color);
+      buffers[side] = new_video_buffer (TRUE, format, 640, 480,
+          GST_VIDEO_INFO_N_PLANES (&infos[side]), infos[side].offset,
+          infos[side].stride, infos[side].size);
+    }
+    set_convert_caps (test.convert, caps[0], caps[1]);
+    submitted_calls = 0;
+    fail_unless_equals_int (klass->transform (GST_BASE_TRANSFORM (test.convert),
+            buffers[0], buffers[1]),
+        cases[i].supported ? GST_FLOW_OK : GST_FLOW_NOT_NEGOTIATED);
+    fail_unless_equals_int (submitted_calls, cases[i].supported ? 1 : 0);
+    if (cases[i].supported) {
+      fail_unless_equals_int (submitted_src.color_space_mode, cases[i].src_mode);
+      fail_unless_equals_int (submitted_dst.color_space_mode, cases[i].dst_mode);
+    }
+    for (side = 0; side < 2; side++) {
+      gst_buffer_unref (buffers[side]);
+      g_free (caps[side]);
+    }
+  }
+  test_convert_clear (&test);
+}
+GST_END_TEST;
+
 static Suite *
 rgaconvert_suite (void)
 {
@@ -619,6 +822,10 @@ rgaconvert_suite (void)
   tcase_add_test (test_case,
       test_rotation_and_crop_fixate_natural_output_dimensions);
   tcase_add_test (test_case, test_caps_negotiation_matrix);
+  tcase_add_test (test_case, test_colorimetry_reaches_improcess);
+  tcase_add_test (test_case, test_unspecified_colorimetry_uses_video_info_defaults);
+  tcase_add_test (test_case, test_stride_only_does_not_request_csc);
+  tcase_add_test (test_case, test_color_space_changes_and_unsupported_modes);
   tcase_add_test (test_case,
       test_one_process_call_honors_stride_crop_and_transform);
   tcase_add_test (test_case, test_system_memory_input_is_typed_refusal);

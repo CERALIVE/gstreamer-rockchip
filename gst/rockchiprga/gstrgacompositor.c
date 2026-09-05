@@ -714,6 +714,15 @@ gst_rga_compositor_aggregate_frames (GstVideoAggregator * videoaggregator,
 
   gst_rga_compositor_fill_request (&copy_request, &input_frame[0],
       &output_frame, &rectangles[0]);
+  if (!gst_mpp_rga_request_set_colorimetry (&copy_request, &inputs[0].info,
+          &videoaggregator->info) ||
+      (inputs[1].buffer &&
+          !gst_mpp_rga_composite_set_colorimetry (&composite_request,
+              &videoaggregator->info, &inputs[1].info))) {
+    flow = gst_rga_compositor_refuse_frame (self,
+        "negotiated matrix or range is unsupported by librga CSC", FALSE);
+    goto out;
+  }
   result = gst_mpp_rga_backend_process (backend,
       GST_MPP_RGA_OP_COMPOSITOR_COPY, GST_VIDEO_FORMAT_NV12,
       GST_VIDEO_FORMAT_NV12, &copy_request);

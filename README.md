@@ -85,6 +85,13 @@ DMA-BUF input and output. Negotiated src caps select output geometry, including
 the natural width/height swap for 90° and 270° rotation. System-memory staging
 remains debug-only behind the same `GST_MPP_ALLOW_CPU_COPY=1` switch.
 
+Color conversion uses the negotiated YUV matrix and range, including GStreamer's
+resolution-based defaults when caps omit colorimetry. BT.601 and BT.709 are
+explicitly passed to librga; same-color-space format/stride changes do not request
+CSC. Unsupported modes fail rather than silently selecting another matrix. See
+[`RGA ↔ MPP interaction`](docs/RGA-MPP-INTERACTION.md#im2d-colorimetry) for the
+mapping and hardware limitations.
+
 `rgacompositor` accepts at most two progressive DMA-BUF request pads: an NV12
 primary and a BGRA overlay, producing NV12. The RGB overlay is required by
 librga's NV12-output three-channel blend; `rgaconvert` can normalize a YUV

@@ -52,6 +52,92 @@ conversions.
 The MPP plugin compiles without the im2d operation; `rockchiprga` enables it in
 its own DSO via `-DGST_MPP_RGA_ENABLE_IM2D`. Both link the same sources.
 
+## im2d colorimetry
+
+[EXISTS] Both `improcess()` submission paths set `rga_buffer_t.color_space_mode`
+after `wrapbuffer_fd()`. The API was checked against the SHA-pinned
+`librga-dev_2.2.0-1_arm64.deb` in `ci/mpp-pin.env`: its `rga/im2d_version.h`
+identifies **1.10.1_[4]**, not API 2.2.0. `rga/im2d_type.h` defines the buffer
+field and `IM_COLOR_SPACE_MODE`; `rga/im2d_single.h` declares the seven-argument
+C `improcess()`. CSC is a buffer attribute, **not a usage flag**.
+
+`rgaconvert` reuses the input/output `GstVideoInfo` snapshots parsed in
+`gst_rga_convert_set_caps()`, including the existing DMA_DRM caps path.
+`rgacompositor` reuses the aggregator's output info and pad-info snapshots.
+No extra caps query is performed. Matrix and range come from the **YUV source**
+for YUV→RGB and the **YUV destination** for RGB→YUV; RGB's matrix is not a
+choice between BT.601 and BT.709.
+
+For conversion to/from full-range RGB, the ordinary directional modes are set
+on the **destination buffer**, including YUV→RGB:
+
+| YUV `GstVideoColorimetry.matrix` | `range` | YUV→RGB destination mode | RGB→YUV destination mode |
+|---|---|---|---|
+| `GST_VIDEO_COLOR_MATRIX_BT601` | `GST_VIDEO_COLOR_RANGE_16_235` | `IM_YUV_TO_RGB_BT601_LIMIT` | `IM_RGB_TO_YUV_BT601_LIMIT` |
+| `GST_VIDEO_COLOR_MATRIX_BT601` | `GST_VIDEO_COLOR_RANGE_0_255` | `IM_YUV_TO_RGB_BT601_FULL` | `IM_RGB_TO_YUV_BT601_FULL` |
+| `GST_VIDEO_COLOR_MATRIX_BT709` | `GST_VIDEO_COLOR_RANGE_16_235` | `IM_YUV_TO_RGB_BT709_LIMIT` | `IM_RGB_TO_YUV_BT709_LIMIT` |
+| `GST_VIDEO_COLOR_MATRIX_BT709` | `GST_VIDEO_COLOR_RANGE_0_255` | Full-CSC endpoint pair, below | Full-CSC endpoint pair, below |
+
+There is **no** `IM_YUV_TO_RGB_BT709_FULL` or `IM_RGB_TO_YUV_BT709_FULL`
+directional enum in this header. BT.709 full range instead sets **both** buffer
+endpoints: `IM_YUV_BT709_FULL_RANGE` on the YUV buffer and `IM_RGB_FULL` on RGB.
+A genuine YUV matrix/range change similarly uses the corresponding endpoint
+modes: `IM_YUV_BT601_LIMIT_RANGE`, `IM_YUV_BT601_FULL_RANGE`,
+`IM_YUV_BT709_LIMIT_RANGE`, or `IM_YUV_BT709_FULL_RANGE`. These operations
+require librga/hardware full-CSC support; a hardware refusal remains a typed
+negotiation failure, never permission to fall back to a different matrix.
+Ordinary modes are preferred where possible to avoid imposing that capability
+requirement on basic BT.601/BT.709-limited conversions.
+
+When both endpoints have the same color family, matrix and range, both modes
+remain `IM_COLOR_SPACE_DEFAULT` (zero). NV12 stride changes, NV16→NV12 chroma
+reshuffles, and RGB channel-order changes therefore do not request CSC. A
+negotiated change of YUV matrix/range is a real color conversion even if the
+pixel-format name remains NV12.
+
+The compositor's NV12 + BGRA → NV12 blend is different from an NV12 copy:
+librga blends in RGB internally. Its output buffer carries
+`IM_YUV_TO_RGB_* | IM_RGB_TO_YUV_*`, using the accumulator/output's colorimetry
+for both directions. The preceding primary copy/scale is configured separately;
+when its colorimetry is unchanged it requests no CSC. A lone-primary passthrough
+still performs no hardware operation. BT.709-full blending is refused: the
+pinned API has no directional pair for it, and the full-CSC endpoint pair does
+not encode the two-direction blend. Limited-range RGB and unsupported YUV
+matrices (for example BT.2020) are also refused when CSC is required.
+
+### Unspecified caps are already resolved by GStreamer
+
+`gst_video_info_from_caps()` and `gst_video_info_set_format()` populate the
+defaults through GStreamer's private `set_default_colorimetry()` helper:
+YUV height **≤576** selects BT.601 limited; height **>576** selects BT.709
+limited. RGB defaults to full-range RGB/sRGB at every size. The backend consumes
+those populated values rather than implementing its own threshold or assuming
+librga's default. For scaling across the SD/HD boundary with both sides untagged,
+the independently negotiated YUV endpoints can therefore require a matrix change.
+Explicit caps override these defaults.
+
+Source: GStreamer [1.22 video-info.c](https://github.com/GStreamer/gstreamer/blob/1.22.0/subprojects/gst-plugins-base/gst-libs/gst/video/video-info.c)
+and [1.26 video-info.c](https://github.com/GStreamer/gstreamer/blob/1.26.0/subprojects/gst-plugins-base/gst-libs/gst/video/video-info.c).
+This is a matrix/range correction only: RGA does not implement transfer-function
+conversion, gamut/primaries conversion, or HDR tone mapping here. The legacy MPP
+`c_RkRgaBlit` path is unchanged by this im2d fix.
+
+### Proof boundary
+
+`tests/check/rgaconvert.c` exercises negotiated caps through the real backend
+wrapping into an intercepted `improcess()`, asserting BT.601/BT.709 limited/full
+in both directions, SD/HD default selection, same-color-space no-CSC, genuine
+YUV matrix/range changes, and unsupported-mode refusal. The compositor tests
+assert the copy and blend descriptors separately and retain the existing
+zero-operation passthrough test. These are hardware-independent call-contract
+tests, not pixel-quality measurements.
+
+The d5 software oracle now uses each untagged YUV endpoint's resolution-based
+default, matching the DUT rather than the pre-fix implicit librga BT.601 mode.
+Its 40 dB threshold is unchanged. **The updated d5 has not run on a board**;
+the historical six failing cells in `tests/board/DRILL-RESULTS.md` remain
+historical evidence, not a claimed pass for this fix.
+
 ## The trial-verified initialization sequence
 
 `gst_mpp_rga_backend_init()` runs once per process, behind a `GOnce` in

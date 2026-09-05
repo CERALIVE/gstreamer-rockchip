@@ -184,6 +184,11 @@ The following are compatibility contracts, not cleanup opportunities:
   `GST_MPP_ALLOW_CPU_COPY=1`; `rgacompositor` has no CPU pixel path at all.
   Normal operation fails negotiation instead. The three read-only conversion
   counters are additive element properties.
+- **im2d color conversion:** negotiated `GstVideoInfo` matrix/range selects
+  `rga_buffer_t.color_space_mode`; format/stride-only work leaves CSC unset.
+  YUV-output composition explicitly requests both CSC directions. Unknown or
+  unsupported conversions fail rather than assuming BT.601. Mapping, defaults,
+  full-range limitations, and test scope: `docs/RGA-MPP-INTERACTION.md`.
 - **`rgaconvert` properties used by the engine:** the six transform properties
   keep their names, types, defaults, ranges, and enum/flag nicks. A consumer
   graph names them literally, so a rename is a cross-repository migration.

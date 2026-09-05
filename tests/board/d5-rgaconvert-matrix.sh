@@ -153,6 +153,7 @@ run_cell() {
 	local operation=$1 in_format=$2 out_format=$3
 	local parse_format=${in_format,,}
 	local input_colorimetry=",colorimetry=bt601"
+	local output_colorimetry=bt601
 	local label="$operation-$in_format-to-$out_format"
 	local reference_filter="videoconvert" out_w out_h
 	local hw_log="$REPORT_DIR/$label.hw.log"
@@ -161,6 +162,7 @@ run_cell() {
 	local ref_raw="$REPORT_DIR/$label.ref.raw"
 	local remote_input="$remote_scratch/$label.input.raw"
 	local counters fallback dropped rejections psnr_line luma chroma worst
+	(( SRC_HEIGHT > 576 )) && input_colorimetry=",colorimetry=bt709"
 	[[ "$in_format" == BGR ]] && input_colorimetry=""
 
 	case "$operation" in
@@ -184,6 +186,7 @@ run_cell() {
 			return 1
 			;;
 	esac
+	(( out_h > 576 )) && output_colorimetry=bt709
 	if [[ "$in_format" == NV16 && ("$operation" == crop || "$operation" == rotate) ]]; then
 		reference_filter="videoconvert ! video/x-raw,format=I420 ! $reference_filter"
 	fi
@@ -211,7 +214,7 @@ run_cell() {
 		return 1
 	fi
 
-	if ! board_ssh "timeout 60 gst-launch-1.0 -e filesrc location='$remote_input' ! rawvideoparse format=$parse_format width=$SRC_WIDTH height=$SRC_HEIGHT framerate=1/1 ! video/x-raw,format=$in_format,width=$SRC_WIDTH,height=$SRC_HEIGHT$input_colorimetry ! $reference_filter ! video/x-raw,format=$out_format,width=$out_w,height=$out_h,colorimetry=bt601 ! filesink location='$remote_scratch/$label.ref.raw'" \
+	if ! board_ssh "timeout 60 gst-launch-1.0 -e filesrc location='$remote_input' ! rawvideoparse format=$parse_format width=$SRC_WIDTH height=$SRC_HEIGHT framerate=1/1 ! video/x-raw,format=$in_format,width=$SRC_WIDTH,height=$SRC_HEIGHT$input_colorimetry ! $reference_filter ! video/x-raw,format=$out_format,width=$out_w,height=$out_h,colorimetry=$output_colorimetry ! filesink location='$remote_scratch/$label.ref.raw'" \
 		>"$ref_log" 2>&1; then
 		record_cell "$operation" "$in_format" "$out_format" "$out_w" "$out_h" \
 			FAIL n/a n/a n/a n/a 'software reference pipeline failed'

@@ -943,6 +943,11 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
   crop_h = self->crop_h;
   g_mutex_unlock (&self->lock);
 
+  if (!gst_mpp_rga_request_set_colorimetry (&request, &input_info,
+          &output_info))
+    return gst_rga_convert_not_negotiated (self,
+        "negotiated matrix or range is unsupported by librga CSC", FALSE);
+
   if (!gst_rga_convert_layout_from_buffer (input, &input_info, &input_layout,
           &reason) ||
       !gst_rga_convert_layout_from_buffer (output, &output_info, &output_layout,

@@ -81,6 +81,105 @@ gst_mpp_rga_real_blit (rga_info_t * src, rga_info_t * dst, gpointer user_data)
 
 #ifdef GST_MPP_RGA_ENABLE_IM2D
 static gint
+gst_mpp_rga_color_space (const GstVideoInfo * info)
+{
+  gboolean full = info->colorimetry.range == GST_VIDEO_COLOR_RANGE_0_255;
+
+  if (!full && info->colorimetry.range != GST_VIDEO_COLOR_RANGE_16_235)
+    return -1;
+  if (GST_VIDEO_INFO_IS_RGB (info))
+    return full ? IM_RGB_FULL : -1;
+  if (!GST_VIDEO_INFO_IS_YUV (info))
+    return -1;
+
+  switch (info->colorimetry.matrix) {
+    case GST_VIDEO_COLOR_MATRIX_BT601:
+      return full ? IM_YUV_BT601_FULL_RANGE : IM_YUV_BT601_LIMIT_RANGE;
+    case GST_VIDEO_COLOR_MATRIX_BT709:
+      return full ? IM_YUV_BT709_FULL_RANGE : IM_YUV_BT709_LIMIT_RANGE;
+    default:
+      return -1;
+  }
+}
+
+gboolean
+gst_mpp_rga_request_set_colorimetry (GstMppRgaIm2dRequest * request,
+    const GstVideoInfo * input, const GstVideoInfo * output)
+{
+  gint src_mode;
+  gint dst_mode;
+
+  request->src_color_space_mode = IM_COLOR_SPACE_DEFAULT;
+  request->dst_color_space_mode = IM_COLOR_SPACE_DEFAULT;
+  if (GST_VIDEO_INFO_IS_RGB (input) == GST_VIDEO_INFO_IS_RGB (output) &&
+      input->colorimetry.matrix == output->colorimetry.matrix &&
+      input->colorimetry.range == output->colorimetry.range)
+    return TRUE;
+
+  src_mode = gst_mpp_rga_color_space (input);
+  dst_mode = gst_mpp_rga_color_space (output);
+  if (src_mode < 0 || dst_mode < 0)
+    return FALSE;
+
+  /* Directional modes belong on dst, even for YUV input. Avoid requiring
+   * full-CSC hardware for the matrices the ordinary CSC units implement. */
+  if (src_mode == IM_RGB_FULL) {
+    switch (dst_mode) {
+      case IM_YUV_BT601_LIMIT_RANGE:
+        request->dst_color_space_mode = IM_RGB_TO_YUV_BT601_LIMIT;
+        return TRUE;
+      case IM_YUV_BT601_FULL_RANGE:
+        request->dst_color_space_mode = IM_RGB_TO_YUV_BT601_FULL;
+        return TRUE;
+      case IM_YUV_BT709_LIMIT_RANGE:
+        request->dst_color_space_mode = IM_RGB_TO_YUV_BT709_LIMIT;
+        return TRUE;
+      default:
+        break;
+    }
+  } else if (dst_mode == IM_RGB_FULL) {
+    switch (src_mode) {
+      case IM_YUV_BT601_LIMIT_RANGE:
+        request->dst_color_space_mode = IM_YUV_TO_RGB_BT601_LIMIT;
+        return TRUE;
+      case IM_YUV_BT601_FULL_RANGE:
+        request->dst_color_space_mode = IM_YUV_TO_RGB_BT601_FULL;
+        return TRUE;
+      case IM_YUV_BT709_LIMIT_RANGE:
+        request->dst_color_space_mode = IM_YUV_TO_RGB_BT709_LIMIT;
+        return TRUE;
+      default:
+        break;
+    }
+  }
+
+  request->src_color_space_mode = src_mode;
+  request->dst_color_space_mode = dst_mode;
+  return TRUE;
+}
+
+gboolean
+gst_mpp_rga_composite_set_colorimetry (GstMppRgaIm2dCompositeRequest * request,
+    const GstVideoInfo * accumulator, const GstVideoInfo * overlay)
+{
+  GstMppRgaIm2dRequest y2r = { 0, };
+  GstMppRgaIm2dRequest r2y = { 0, };
+
+  /* The YUV accumulator crosses RGB for blending, then returns to YUV.
+   * Full-CSC endpoint modes cannot express this two-direction blend. */
+  if (!gst_mpp_rga_request_set_colorimetry (&y2r, accumulator, overlay) ||
+      !gst_mpp_rga_request_set_colorimetry (&r2y, overlay, accumulator) ||
+      !(y2r.dst_color_space_mode & IM_YUV_TO_RGB_MASK) ||
+      !(r2y.dst_color_space_mode & IM_RGB_TO_YUV_MASK))
+    return FALSE;
+
+  request->transform.src_color_space_mode = IM_COLOR_SPACE_DEFAULT;
+  request->transform.dst_color_space_mode = y2r.dst_color_space_mode |
+      r2y.dst_color_space_mode;
+  return TRUE;
+}
+
+static gint
 gst_mpp_rga_real_configure_im2d (guint core_mask, gint priority)
 {
   IM_STATUS status;
@@ -128,6 +227,8 @@ gst_mpp_rga_real_process (const GstMppRgaIm2dRequest * request,
   dst = wrapbuffer_fd (request->dst_fd, request->dst_width,
       request->dst_height, request->dst_format, request->dst_wstride,
       request->dst_hstride);
+  src.color_space_mode = request->src_color_space_mode;
+  dst.color_space_mode = request->dst_color_space_mode;
 
   return improcess (src, dst, pat, src_rect, dst_rect, pat_rect,
       request->usage | IM_SYNC);
@@ -178,6 +279,8 @@ gst_mpp_rga_real_composite (const GstMppRgaIm2dCompositeRequest * request,
       request->pat_height, request->pat_format, request->pat_wstride,
       request->pat_hstride);
   pat.global_alpha = request->pat_alpha;
+  source.color_space_mode = transform->src_color_space_mode;
+  output.color_space_mode = transform->dst_color_space_mode;
 
   return improcess (source, output, pat, source_rect, output_rect, pat_rect,
       transform->usage | IM_SYNC);

@@ -9,6 +9,14 @@
 #include <rga/im2d.h>
 
 #include "../../gst/rockchiprga/gstrgacompositor.h"
+/* Keep descriptor assertions below the real backend's im2d wrapping. */
+#undef GST_CAT_DEFAULT
+#include "../../gst/rockchipmpp/gstmpprgabackend.c"
+#undef GST_CAT_DEFAULT
+#define GST_CAT_DEFAULT check_debug
+
+static rga_buffer_t submitted_dst[2];
+static guint submitted_calls;
 
 #define PRIMARY_CAPS \
   "video/x-raw(memory:DMABuf),format=NV12,width=1920,height=1080," \
@@ -60,7 +68,9 @@ improcess (rga_buffer_t src, rga_buffer_t dst, rga_buffer_t pat,
     im_rect src_rect, im_rect dst_rect, im_rect pat_rect, int usage)
 {
   (void) src;
-  (void) dst;
+  if (submitted_calls < G_N_ELEMENTS (submitted_dst))
+    submitted_dst[submitted_calls] = dst;
+  submitted_calls++;
   (void) pat;
   (void) src_rect;
   (void) dst_rect;
@@ -144,6 +154,7 @@ typedef struct
   gint composite_result;
   guint process_calls;
   guint composite_calls;
+  gboolean submit_im2d;
   GstMppRgaIm2dRequest last_process;
   GstMppRgaIm2dCompositeRequest last_composite;
 } FakeRga;
@@ -204,6 +215,8 @@ fake_process (const GstMppRgaIm2dRequest * request, gpointer user_data)
 
   fake->process_calls++;
   fake->last_process = *request;
+  if (fake->submit_im2d)
+    return gst_mpp_rga_real_process (request, NULL);
   return fake->process_result;
 }
 
@@ -215,6 +228,8 @@ fake_composite (const GstMppRgaIm2dCompositeRequest * request,
 
   fake->composite_calls++;
   fake->last_composite = *request;
+  if (fake->submit_im2d)
+    return gst_mpp_rga_real_composite (request, NULL);
   return fake->composite_result;
 }
 
@@ -282,11 +297,14 @@ new_bgra_buffer (guint width, guint height)
 }
 
 static TestHarness
-test_harness_new (FakeRga * fake, gboolean with_secondary)
+test_harness_new_with_color (FakeRga * fake, gboolean with_secondary,
+    const gchar * color)
 {
   TestHarness test = { 0, };
   GstRgaCompositor *compositor = g_object_new (GST_TYPE_RGA_COMPOSITOR, NULL);
   GstPad *pad;
+  gchar *primary_caps = color ? g_strdup_printf (PRIMARY_CAPS
+      ",colorimetry=%s", color) : g_strdup (PRIMARY_CAPS);
 
   test.backend = gst_mpp_rga_backend_new (&fake_ops, fake);
   test.allocator = test_allocator_new ();
@@ -311,12 +329,19 @@ test_harness_new (FakeRga * fake, gboolean with_secondary)
   }
   gst_object_unref (compositor);
 
-  gst_harness_set_sink_caps_str (test.output, PRIMARY_CAPS);
-  gst_harness_set_src_caps_str (test.primary, PRIMARY_CAPS);
+  gst_harness_set_sink_caps_str (test.output, primary_caps);
+  gst_harness_set_src_caps_str (test.primary, primary_caps);
+  g_free (primary_caps);
   if (test.secondary)
     gst_harness_set_src_caps_str (test.secondary, SECONDARY_CAPS);
   gst_harness_play (test.output);
   return test;
+}
+
+static TestHarness
+test_harness_new (FakeRga * fake, gboolean with_secondary)
+{
+  return test_harness_new_with_color (fake, with_secondary, NULL);
 }
 
 static void
@@ -753,6 +778,58 @@ GST_START_TEST (test_unavailable_backend_fails_ready_but_factory_remains)
 }
 GST_END_TEST;
 
+GST_START_TEST (test_blend_colorimetry_reaches_improcess)
+{
+  const struct
+  {
+    const gchar *color;
+    gint mode;
+  } cases[] = {
+    {"bt601", IM_YUV_TO_RGB_BT601_LIMIT | IM_RGB_TO_YUV_BT601_LIMIT},
+    {"bt709", IM_YUV_TO_RGB_BT709_LIMIT | IM_RGB_TO_YUV_BT709_LIMIT},
+    {"1:4:16:4", IM_YUV_TO_RGB_BT601_FULL | IM_RGB_TO_YUV_BT601_FULL},
+    {NULL, IM_YUV_TO_RGB_BT709_LIMIT | IM_RGB_TO_YUV_BT709_LIMIT},
+  };
+  guint i;
+
+  for (i = 0; i < G_N_ELEMENTS (cases); i++) {
+    FakeRga fake = {.available = TRUE, .submit_im2d = TRUE};
+    TestHarness test = test_harness_new_with_color (&fake, TRUE, cases[i].color);
+    GstBuffer *output;
+
+    submitted_calls = 0;
+    output = push_pair_and_pull (&test);
+    fail_unless_equals_int (submitted_calls, 2);
+    fail_unless_equals_int (submitted_dst[0].color_space_mode, 0);
+    fail_unless_equals_int (submitted_dst[1].color_space_mode, cases[i].mode);
+    gst_buffer_unref (output);
+    test_harness_clear (&test);
+  }
+}
+GST_END_TEST;
+
+GST_START_TEST (test_blend_rejects_unrepresentable_colorimetry)
+{
+  GstMppRgaIm2dCompositeRequest request = { 0, };
+  GstVideoInfo accumulator;
+  GstVideoInfo overlay;
+
+  gst_video_info_set_format (&accumulator, GST_VIDEO_FORMAT_NV12, 1920, 1080);
+  gst_video_info_set_format (&overlay, GST_VIDEO_FORMAT_BGRA, 1920, 1080);
+  accumulator.colorimetry.range = GST_VIDEO_COLOR_RANGE_0_255;
+  fail_if (gst_mpp_rga_composite_set_colorimetry (&request, &accumulator,
+          &overlay));
+  accumulator.colorimetry.range = GST_VIDEO_COLOR_RANGE_16_235;
+  accumulator.colorimetry.matrix = GST_VIDEO_COLOR_MATRIX_BT2020;
+  fail_if (gst_mpp_rga_composite_set_colorimetry (&request, &accumulator,
+          &overlay));
+  accumulator.colorimetry.matrix = GST_VIDEO_COLOR_MATRIX_BT709;
+  overlay.colorimetry.range = GST_VIDEO_COLOR_RANGE_16_235;
+  fail_if (gst_mpp_rga_composite_set_colorimetry (&request, &accumulator,
+          &overlay));
+}
+GST_END_TEST;
+
 static Suite *
 rgacompositor_suite (void)
 {
@@ -761,6 +838,8 @@ rgacompositor_suite (void)
 
   tcase_set_timeout (test_case, 30);
   tcase_add_test (test_case, test_pad_factory_and_property_contract);
+  tcase_add_test (test_case, test_blend_colorimetry_reaches_improcess);
+  tcase_add_test (test_case, test_blend_rejects_unrepresentable_colorimetry);
   tcase_add_test (test_case,
       test_named_and_custom_layout_geometry_reaches_fake_backend);
   tcase_add_test (test_case,

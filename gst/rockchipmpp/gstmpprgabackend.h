@@ -75,6 +75,8 @@ typedef struct
   gint usage;
   guint core_mask;
   gint priority;
+  gint src_color_space_mode;
+  gint dst_color_space_mode;
 } GstMppRgaIm2dRequest;
 
 typedef struct
@@ -106,6 +108,11 @@ typedef struct
 } GstMppRgaBackendOps;
 
 typedef struct _GstMppRgaBackend GstMppRgaBackend;
+
+gboolean gst_mpp_rga_request_set_colorimetry (GstMppRgaIm2dRequest * request,
+    const GstVideoInfo * input, const GstVideoInfo * output);
+gboolean gst_mpp_rga_composite_set_colorimetry (GstMppRgaIm2dCompositeRequest *
+    request, const GstVideoInfo * accumulator, const GstVideoInfo * overlay);
 
 GstMppRgaBackend *gst_mpp_rga_backend_new (const GstMppRgaBackendOps * ops,
     gpointer user_data);
