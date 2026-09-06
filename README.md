@@ -1,9 +1,9 @@
 # CeraLive gstreamer-rockchip
 
 GStreamer plugins for Rockchip MPP hardware encode/decode on RK3588 devices.
-This public CeraLive fork preserves the complete nine-factory plugin set while
-maintaining and validating the H.264/H.265 encoder and decoder paths used by the
-CeraLive streaming stack.
+This public CeraLive fork maintains and validates the H.264/H.265 encoder and
+decoder paths used by the CeraLive streaming stack, and extends the upstream
+nine-factory plugin set to eleven with two first-party librga elements.
 
 ## Maintainer notice
 
@@ -17,7 +17,19 @@ The fork keeps the plugin filename `libgstrockchipmpp.so` and replaces the
 historical `gstreamer1.0-rockchip1` and `belabox-gstreamer1.0-rockchip` packages.
 Its four engine-critical elements are `mpph264enc`, `mpph265enc`,
 `mppvideodec`, and `mppjpegdec`. Five additional upstream factories remain part
-of the package and registration contract.
+of the package and registration contract; `rgaconvert` and `rgacompositor` add
+the two first-party librga factories.
+
+**The package version matters:** `1.14.4+ceralive.1` carries **nine** factories,
+with neither `rgaconvert` nor `rgacompositor`. This tree adds both elements and
+encoder hygiene for `1.14.4+ceralive.2`; check the
+[release assets](https://github.com/CERALIVE/gstreamer-rockchip/releases) for
+package availability. The release is being pulled forward to unblock board
+validation, not to claim that a device image has passed it. The earlier d5
+matrix recorded six failing quality cells, and the negotiated-colorimetry fix
+still needs its hardware rerun. See
+[`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md) for the actual
+hardware evidence and remaining limits.
 
 ## Build
 
@@ -44,6 +56,53 @@ Hardware-independent tests use the mock MPP seam. RK3588-only acceptance is in
 `tests/board/`; those scripts are explicitly gated and record their own verdicts.
 See [`AGENTS.md`](AGENTS.md) for the exact proof boundary, frozen contracts, and
 contribution rules.
+
+Encoder latency, bounded context recovery, colorimetry/VUI configuration,
+forced-IDR handling, and the PTS/DTS contract are documented in
+[`docs/ENCODER-RUNTIME-CONTRACT.md`](docs/ENCODER-RUNTIME-CONTRACT.md).
+
+## RGA conversion safety
+
+The MPP encoder and decoders treat librga as available only after `/dev/rga`
+answers `RGA_IOC_GET_DRVIER_VERSION` with driver version 1.2.4 or newer.
+`c_RkRgaInit()` is retained for compatibility but is not an availability test.
+Eight consecutive failures demote only the operation and input/output format
+tuple that failed; other tuples continue using RGA, and a later trial success
+restores the demoted tuple. `ENODEV` is the only blit failure that disables the
+backend process-wide.
+
+`conversion-fallback-frames`, `conversion-dropped-frames`, and
+`layout-rejections` are read-only counters on the MPP encoder and decoder
+elements. Their final values are also emitted at `GST_DEBUG` level when an
+element returns to NULL. CPU frame copying is disabled in production; setting
+`GST_MPP_ALLOW_CPU_COPY=1` enables that debug-only fallback. `GST_MPP_NO_RGA=1`
+continues to force conversion refusal. Without an available 2D path, conversion
+fails with `GST_FLOW_NOT_NEGOTIATED` rather than silently copying on the CPU.
+
+The separate `rockchiprga` plugin registers `rgaconvert` and `rgacompositor` at
+rank `NONE` for explicit engine selection. `rgaconvert` performs scale, crop,
+color conversion, rotation, and flip as one librga `improcess` operation over
+DMA-BUF input and output. Negotiated src caps select output geometry, including
+the natural width/height swap for 90° and 270° rotation. System-memory staging
+remains debug-only behind the same `GST_MPP_ALLOW_CPU_COPY=1` switch.
+
+Color conversion uses the negotiated YUV matrix and range, including GStreamer's
+resolution-based defaults when caps omit colorimetry. BT.601 and BT.709 are
+explicitly passed to librga; same-color-space format/stride changes do not request
+CSC. Unsupported modes fail rather than silently selecting another matrix. See
+[`RGA ↔ MPP interaction`](docs/RGA-MPP-INTERACTION.md#im2d-colorimetry) for the
+mapping and hardware limitations.
+
+`rgacompositor` accepts at most two progressive DMA-BUF request pads: an NV12
+primary and a BGRA overlay, producing NV12. The RGB overlay is required by
+librga's NV12-output three-channel blend; `rgaconvert` can normalize a YUV
+secondary to BGRA upstream. The compositor offers four corner-PiP presets, two
+side-by-side PbP presets, and raw custom pad rectangles, with per-pad alpha and
+z-order. A two-input frame uses one primary copy/scale and one geometry-aware
+librga composite pass; a lone primary is passed through without an RGA or CPU
+pixel operation. Both factories remain discoverable without hardware, but
+NULL→READY fails with a typed error when `/dev/rga` does not pass the shared
+driver-version trial.
 
 ## Upstream lineage and credits
 

@@ -10,27 +10,79 @@ fix ledger for the RK3588 encode/decode path.
 This repository supplies the RK3588 hardware elements used by `cerastream`:
 
 ```text
-capture -> mpph264enc/mpph265enc -> cerastream transport
+capture -> rgaconvert -> mpph264enc/mpph265enc -> cerastream transport
+primary + secondary -> rgacompositor -> mpph264enc/mpph265enc
 compressed input -> mppvideodec/mppjpegdec -> program graph
 ```
 
-The package remains a complete plugin set. All nine factories must continue to
-build and register: `mpph264enc`, `mpph265enc`, `mppvp8enc`, `mppjpegenc`,
-`mppvideodec`, `mppjpegdec`, `mppvpxalphadecodebin`, `kmssrc`, and
-`rkximagesink`. CeraLive deeply validates the four factories used by the engine;
-the other five retain build-and-registration coverage.
+The package remains a complete plugin set. The factory contract contains
+**eleven built entries** with no reserved slots — but read the release-state note
+below the table before quoting that number as something a device carries:
+
+| # | Factory | Plugin | Registration expectation |
+|---|---|---|---|
+| 1 | `mpph264enc` | `rockchipmpp` | Registers where `gst_mpp_enc_supported()` finds a VPU. |
+| 2 | `mpph265enc` | `rockchipmpp` | Registers where `gst_mpp_enc_supported()` finds a VPU. |
+| 3 | `mppvp8enc` | `rockchipmpp` | Registers only on SoCs with a VEPU2 VP8 encoder. **RK3588: EXPECTED-ABSENT.** |
+| 4 | `mppjpegenc` | `rockchipmpp` | Registers where `gst_mpp_enc_supported()` finds a VPU. |
+| 5 | `mppvideodec` | `rockchipmpp` | Registers unconditionally. |
+| 6 | `mppjpegdec` | `rockchipmpp` | Registers unconditionally, rank 257. |
+| 7 | `mppvpxalphadecodebin` | `rockchipmpp` | Registers on GStreamer ≥ 1.19. |
+| 8 | `kmssrc` | `kmssrc` | Registers unconditionally. |
+| 9 | `rkximagesink` | `rkximage` | Registers unconditionally. |
+| 10 | `rgaconvert` | `rockchiprga` | Registers unconditionally at rank `NONE`; activation is gated at NULL→READY. |
+| 11 | `rgacompositor` | `rockchiprga` | Registers unconditionally at rank `NONE`; activation is gated at NULL→READY. |
+
+`mppvp8enc`'s absence on RK3588 is a **silicon fact, not a registration
+failure**: the SoC has no VEPU2 VP8 block, the historical Radxa package behaves
+identically on the same board, and `d1-runtime-parity.sh` scores it
+EXPECTED-ABSENT rather than failing. Do not "fix" it and do not remove it — it
+registers on the SoCs that do carry the block.
+
+CeraLive deeply validates the four MPP factories used by the engine plus
+`rgaconvert` and `rgacompositor`; the remaining five retain
+build-and-registration coverage.
+
+**RELEASE BOUNDARY — `1.14.4+ceralive.1` carries nine factories.** It predates
+both `rockchiprga` elements. This tree adds `rgaconvert`, `rgacompositor` and
+encoder hygiene for `1.14.4+ceralive.2`; use the
+[published releases](https://github.com/CERALIVE/gstreamer-rockchip/releases)
+to establish whether that package is available, not a branch name or CI result.
+Publishing the package and pinning it in an image are separate from installing
+and qualifying that exact image on hardware.
+
+The release is being pulled forward to unblock board validation, not to declare
+that validation passed. The earlier d5 conversion matrix recorded six failing
+quality cells; the negotiated-colorimetry fix still needs its hardware rerun.
+[`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md) retains the actual
+drill verdicts and their limits. A passing build or install smoke does not erase
+those limits or establish a working 4K59.94 capture-to-encode stream.
+
+Release through `.github/workflows/publish-release.yml` on `main` only, after
+the merged commit's Build Check passes. Dispatch with `release_type=stable`
+and `dry_run=false` for publication; `dry_run=true` rehearses without publishing.
+The workflow derives the next upstream-style version from existing tags, gates
+the build and both suite install smokes, publishes exactly one arm64 `.deb` plus
+its `.sha256`, then dispatches `apt-reindex` to `CERALIVE/apt-worker`. Do not
+pre-create the tag. Independently download and checksum the release archive
+before image pinning, and verify the stable arm64 APT index and package bytes
+after reindexing; a successful dispatch alone is not serving proof.
 
 ## Repository map
 
 | Area | Location |
 |---|---|
 | MPP encoder/decoder plugin | `gst/rockchipmpp/` |
+| RGA 2D converter/compositor plugin | `gst/rockchiprga/` |
+| RGA backend, tuple health, conversion counters | `gst/rockchipmpp/gstmpprga*.c`, `gstmppconversionstats.c` |
+| RGA ↔ MPP interaction reference | `docs/RGA-MPP-INTERACTION.md` |
 | KMS source | `gst/kmssrc/` |
 | Rockchip X11/KMS sink | `gst/rkximage/` |
 | Hardware-independent tests | `tests/` |
 | Board-gated drills | `tests/board/` |
 | Runtime parity goldens | `tests/golden/` |
 | Per-fix evidence ledger | `docs/fix-audit.md` |
+| Encoder latency/recovery/color/VUI/IDR/DTS contract | `docs/ENCODER-RUNTIME-CONTRACT.md` |
 | Debian package contract | `packaging/` |
 | Target suite and MPP/RGA pins | `ci/` |
 
@@ -103,12 +155,20 @@ The complete red/green, MPP-ABI, hardware-gate, and independent-review record is
 
 The following are compatibility contracts, not cleanup opportunities:
 
-- **Plugin filename:** `libgstrockchipmpp.so` remains unchanged.
+- **Plugin filenames:** `libgstrockchipmpp.so` remains unchanged — the image's
+  sysext exclusion globs and its MPP runtime-contract test key on that exact
+  name. The RGA converter and compositor ship alongside it as
+  `libgstrockchiprga.so`, in the same package and the same plugin directory;
+  both names are frozen.
 - **Package prefix/name:** Rockchip packages retain the
   `gstreamer1.0-rockchip` prefix; this fork ships
   `gstreamer1.0-rockchip-ceralive` and replaces
   `gstreamer1.0-rockchip1` plus `belabox-gstreamer1.0-rockchip`.
-- **Factory set:** all nine factories listed under **Role** continue to register.
+- **Factory set:** the eleven-entry table under **Role** is the contract. All
+  eleven factories continue to register on the platforms named in their
+  expectation column, with `mppvp8enc` EXPECTED-ABSENT on RK3588. Registering
+  fewer factories than the SoC can carry is a defect; registering an unlisted
+  factory is a contract change.
 - **Encoder properties used by the engine:** `bitrate`, `bitrate-min`,
   `bitrate-max`, `zero-copy-pkt`, `rc-mode`, `qp-max`, `gop`, `width`, and
   `height` keep their names, types, defaults, ranges, and enum nicks. The
@@ -120,6 +180,84 @@ The following are compatibility contracts, not cleanup opportunities:
 - **Caps and allocation:** existing golden caps are additive-only. The MPP
   encoder's DMA-BUF pool, 1080-to-1088 `GstVideoAlignment`, and DMA32 allocator
   request are runtime contracts.
+- **Encoder runtime hygiene:** latency follows the tracked pending depth;
+  non-timeout MPP failures get at most three context restarts per ten seconds;
+  explicit sink colorimetry reaches MPP VUI config without guessing absent
+  values; both force-key-unit directions request IDR; and the no-B-frame output
+  contract is `DTS = PTS`. The read-only `encoder-restarts` counter is additive.
+- **RGA conversion:** `/dev/rga` must pass the driver-version ioctl before use;
+  librga init alone is never sufficient. Blit health is isolated per operation
+  and format pair. MPP/`rgaconvert` CPU staging remains debug-only behind
+  `GST_MPP_ALLOW_CPU_COPY=1`; `rgacompositor` has no CPU pixel path at all.
+  Normal operation fails negotiation instead. The three read-only conversion
+  counters are additive element properties.
+- **im2d color conversion:** negotiated `GstVideoInfo` matrix/range selects
+  `rga_buffer_t.color_space_mode`; format/stride-only work leaves CSC unset.
+  YUV-output composition explicitly requests both CSC directions. Unknown or
+  unsupported conversions fail rather than assuming BT.601. Mapping, defaults,
+  full-range limitations, and test scope: `docs/RGA-MPP-INTERACTION.md`.
+- **`rgaconvert` properties used by the engine:** the six transform properties
+  keep their names, types, defaults, ranges, and enum/flag nicks. A consumer
+  graph names them literally, so a rename is a cross-repository migration.
+
+  | Property | Type | Default | Range / nicks |
+  |---|---|---|---|
+  | `rotation` | enum `GstRgaRotation` | `0` | nicks `0`, `90`, `180`, `270` — clockwise |
+  | `hflip` | boolean | `FALSE` | — |
+  | `vflip` | boolean | `FALSE` | — |
+  | `core-mask` | flags `GstRgaCoreMask` | `auto` | nicks `auto`, `rga3-core0`, `rga3-core1`, `rga2` |
+  | `priority` | int | `0` | `0`–`6` |
+  | `crop-x` / `crop-y` | uint | `0` | `0`–`G_MAXUINT`, input crop origin |
+  | `crop-w` / `crop-h` | uint | `0` | `0`–`G_MAXUINT`; **zero means "the remaining extent"**, not "an empty crop" |
+
+  `crop-{x,y,w,h}` are four separate properties by design — an operator sets
+  only the edges it wants and leaves the rest at the default. Zero width or
+  height is therefore load-bearing: it selects the remainder of the input, so
+  the default property set is a full-frame no-crop conversion.
+
+  `rgaconvert` also carries the same three read-only counters as the MPP
+  elements — `conversion-fallback-frames`, `conversion-dropped-frames`,
+  `layout-rejections` — with identical semantics, because all three elements
+  share `gstmppconversionstats.c`. Output geometry comes from negotiated src
+  caps, including the width/height swap that 90°/270° rotation forces; it is
+  never a property. The factory registers at rank `NONE` and never autoplugs;
+  activation, not registration, is what a missing `/dev/rga` blocks.
+
+- **`rgacompositor` element and pad properties:** the element is a
+  `GstVideoAggregator` with request pads `sink_%u`, capped at `sink_0` and
+  `sink_1` in v1. Its per-pad contract is:
+
+  | Property | Type | Default | Range / meaning |
+  |---|---|---|---|
+  | `xpos` | int | `0` | `0`–`G_MAXINT`; custom-layout left edge |
+  | `ypos` | int | `0` | `0`–`G_MAXINT`; custom-layout top edge |
+  | `width` | int | `0` | `0`–`G_MAXINT`; custom requires a positive even value |
+  | `height` | int | `0` | `0`–`G_MAXINT`; custom requires a positive even value |
+  | `alpha` | double | `1.0` | `0.0`–`1.0`; global alpha when the pad is composited |
+  | `zorder` | uint | request index | Lower values render first; ties use pad index |
+
+  Element property `layout` is enum `GstRgaCompositorLayout`, default
+  `pip-top-right`, with nicks `pip-top-right`, `pip-top-left`,
+  `pip-bottom-right`, `pip-bottom-left`, `pbp-left-right`, `pbp-top-bottom`, and
+  `custom`. PiP makes `sink_0` the full output and scales `sink_1` to half of
+  each output axis (one-quarter area), inset by an even-aligned 5% margin. PbP
+  splits the output into even-aligned left/right or top/bottom halves. `custom`
+  uses each pad's four geometry properties verbatim and rejects zero, odd, or
+  out-of-bounds rectangles.
+
+  `sink_0` and output are progressive NV12 DMA-BUF; `sink_1` is progressive
+  BGRA DMA-BUF. The asymmetric input contract is required by librga's
+  NV12-output three-channel blend: the NV12 accumulator is the source/dst and
+  the RGB overlay is the `pat` channel. Upstream `rgaconvert` supplies BGRA when
+  a secondary source starts as YUV. Two inputs run one primary `improcess`
+  copy/scale followed by one geometry-aware composite pass; output allocation
+  uses the same 16-aligned dma-heap allocator as `rgaconvert`. With only
+  `sink_0` connected and output caps unchanged, the input buffer is passed
+  through by reference with no RGA or CPU pixel operation. The element exposes
+  `conversion-fallback-frames`, `conversion-dropped-frames`, and
+  `layout-rejections` through `gstmppconversionstats.c`; fallback remains zero
+  because no CPU path exists. Its rank and READY failure contract match
+  `rgaconvert`.
 
 `tests/parity-check.sh`, `tests/golden/`, `packaging/package-contract.sh`, and
 the board drills are the executable authorities. Update a frozen contract only
@@ -136,20 +274,25 @@ The board suite is deliberately outside Meson:
 
 | Drill | Hardware claim |
 |---|---|
-| `d1-runtime-parity.sh` | Package installation, all-nine registration, four-element golden contract. |
-| `d2-radxa-fork-ab.sh` | Radxa/fork 60 s encode A/B, 300/300 AUs, SPS geometry/profile/level, no RGA entry. |
+| `d1-runtime-parity.sh` | Package installation, registration of every built factory the board's SoC can carry, four-element golden contract. `mppvp8enc` is scored EXPECTED-ABSENT on an `rk3588` board and PRESENT-REQUIRED elsewhere. |
+| `d2-radxa-fork-ab.sh` | Radxa/fork encode A/B over **H.265 primary and H.264 secondary**: 300/300 AUs per codec, SPS geometry/profile/level, zero `RGA_BLIT fail`, and `conversion-fallback-frames = 0` on the fork variant. |
 | `d3-main10-stride-ab.sh` | Report-only Main10 current-vs-`*8/pixel_stride0` frame-checksum experiment. |
-| `d4-allocation-soak.sh` | 136 s DMA allocation soak with live bitrate, resolution, and temporal-SVC changes. |
+| `d4-allocation-soak.sh` | 136 s DMA allocation soak with live bitrate, resolution, and temporal-SVC changes, run **on a trial-verified librga backend** and scored on the three conversion counters. |
+| `d5-rgaconvert-matrix.sh` | `rgaconvert` conversion matrix — {CSC, scale, crop, rotate} × representative format pairs, each cell measured as PSNR against a software reference of the same operation. |
 
 The latest executed verdicts and their hardware scope are recorded in
 [`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md). That tracked
 summary preserves failed and inconclusive outcomes; it is not a substitute for
-the retained raw transcripts.
+the retained raw transcripts. A criteria change does not carry an old verdict
+forward: when a drill's acceptance criteria are reworked, its prior result
+becomes history and the drill is **not yet run** under the new criteria until a
+board actually executes it.
 
 Every script requires `CERALIVE_BOARD_TEST=1` and otherwise exits 77. Board
 identity is supplied only through `BOARD_IP`, `BOARD_SSH_USER`, and
 `BOARD_SSH_PASS`; repository files never locate credentials or reference a
-workspace parent. d1/d2/d4 also take package paths through environment variables.
+workspace parent. d1/d2/d4/d5 also take package paths through environment
+variables.
 
 ### The suite proves
 
@@ -158,9 +301,17 @@ workspace parent. d1/d2/d4 also take package paths through environment variables
 - Registration/property/caps/rank behavior and the finite runtime observations
   scored by each completed drill.
 - For d2/d4, zero matching `RGA_BLIT fail` and `rga_api version` journal lines in
-  the measured window.
+  the measured window, and `conversion-fallback-frames = 0` read from the
+  element's own end-of-run counter summary — never inferred from silence.
 - For d3, only the enum written by its frame-count/checksum/error oracle:
   `CURRENT_CORRECT`, `ALTERNATIVE_CORRECT`, or `INCONCLUSIVE`.
+- For d4, that the backend under test is the trial-verified librga one: the
+  `mpprgabackend` probe logged a driver version at or above the 1.2.4 floor in
+  that run. A run whose log carries no such probe line FAILS; availability is
+  never assumed from the absence of an error.
+- For d5, only the measured PSNR of each executed cell against its software
+  reference. An unexecuted cell is `NOT-RUN`; it is never scored from a
+  neighbouring cell, from a previous drill, or from the element's own logs.
 
 ### The suite does NOT prove
 
@@ -176,13 +327,20 @@ workspace parent. d1/d2/d4 also take package paths through environment variables
   and counters substitute only for the specific properties they assert.
 - A result from an unreachable board. Such a run is `SKIPPED-unreachable` with an
   attempt transcript, never PASS.
+- That d5's PSNR threshold means bit-exactness. RGA is a fixed-function 2D
+  engine and its chroma resampling does not match libgstvideo's; a passing cell
+  says the hardware result is faithful to the reference at the recorded dB, not
+  that the two are identical. A cell that RGA cannot perform at all fails
+  negotiation instead, which is a distinct, separately recorded outcome.
 
 ## Licensing and credits
 
 The project remains LGPL-2.1. Keep `COPYING`, source headers, and
 `packaging/copyright` intact. Copyright holders represented in the shipped tree
 are Rockchip Electronics Co., Ltd.; Collabora Ltd.; Igalia; and Julien Moutte.
-Igalia and Julien Moutte are scoped to `gst/rkximage/`, not the MPP plugin.
+Igalia and Julien Moutte are scoped to `gst/rkximage/`, not the MPP plugin;
+CERALIVE owns the new RGA backend, tuple-health, and conversion-counter files
+and the whole of `gst/rockchiprga/`.
 
 Provenance credits are distinct: Rockchip originated the plugin family, JeffyCN
 maintains the audited upstream line, BELABOX rebased and carried the downstream
@@ -191,8 +349,15 @@ this fork. See `README.md` for the public maintainer notice.
 
 ## Anti-patterns
 
-- Do not rename `libgstrockchipmpp.so` or the package prefix.
+- Do not rename `libgstrockchipmpp.so`, `libgstrockchiprga.so`, or the package
+  prefix, and do not split the RGA elements into a second `.deb`: the release
+  publishes exactly one archive.
 - Do not remove unused factories to reduce the package.
+- Do not extend `rgacompositor` beyond two sink pads or add a CPU compositor;
+  v1 is deliberately one primary plus one secondary on librga.
+- Do not treat `mppvp8enc`'s absence on RK3588 as a bug to fix or as a drill
+  failure to suppress. It is silicon, it reproduces on the Radxa package, and
+  d1 scores it explicitly.
 - Do not rename `bitrate` back to `bps` or add a legacy alias here.
 - Do not change Main10 stride semantics on static-analysis confidence alone.
 - Do not treat plugin registration success as proof all factories registered;

@@ -33,6 +33,8 @@
 #include <rockchip/rk_mpi.h>
 #include <rockchip/mpp_log.h>
 
+#include "gstmpprgabackend.h"
+
 G_BEGIN_DECLS;
 
 #ifndef ARRAY_SIZE
@@ -91,11 +93,13 @@ GstVideoFormat gst_mpp_mpp_format_to_gst_format (MppFrameFormat mpp_format);
 MppFrameFormat gst_mpp_gst_format_to_mpp_format (GstVideoFormat format);
 
 #ifdef HAVE_RGA
-gboolean gst_mpp_rga_convert (GstBuffer * inbuf, GstVideoInfo * src_vinfo,
-    GstMemory * out_mem, GstVideoInfo * dst_vinfo, gint rotation);
+GstMppRgaResult gst_mpp_rga_convert (GstBuffer * inbuf,
+    GstVideoInfo * src_vinfo, GstMemory * out_mem, GstVideoInfo * dst_vinfo,
+    gint rotation, GstMppRgaOperation operation);
 
-gboolean gst_mpp_rga_convert_from_mpp_frame (MppFrame * mframe,
-    GstMemory * out_mem, GstVideoInfo * dst_vinfo, gint rotation, GstVideoCropMeta *crop);
+GstMppRgaResult gst_mpp_rga_convert_from_mpp_frame (MppFrame * mframe,
+    GstMemory * out_mem, GstVideoInfo * dst_vinfo, gint rotation,
+    GstVideoCropMeta * crop, GstMppRgaOperation operation);
 #endif
 
 /* Apply new format and size without reinit the video info */

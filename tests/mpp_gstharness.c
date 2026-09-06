@@ -819,12 +819,19 @@ static void assert_memory_is_unmapped(GstMemory *mem) {
  */
 GST_START_TEST(test_failed_rotation_leaves_appended_memory_singly_owned) {
   mpp_mock_reset();
+  g_unsetenv("GST_MPP_ALLOW_CPU_COPY");
   GstHarness *h = start_conversion_harness(90);
 
   GstFlowReturn ret = push_conversion_frame(
       h, gst_buffer_new_allocate(NULL, CONVERT_FRAME_SIZE, NULL));
 
   fail_unless_equals_int(ret, GST_FLOW_NOT_NEGOTIATED);
+  guint64 fallback = G_MAXUINT64;
+  guint64 dropped = 0;
+  g_object_get(h->element, "conversion-fallback-frames", &fallback,
+               "conversion-dropped-frames", &dropped, NULL);
+  fail_unless_equals_uint64(fallback, 0);
+  fail_unless_equals_uint64(dropped, 1);
   assert_no_frames_left_pending(h->element);
   g_print("failed rotation: flow=%s\n", gst_flow_get_name(ret));
 
@@ -844,6 +851,7 @@ GST_END_TEST
  */
 GST_START_TEST(test_unreadable_source_frame_fails_the_conversion) {
   mpp_mock_reset();
+  g_setenv("GST_MPP_ALLOW_CPU_COPY", "1", TRUE);
   GstHarness *h = start_conversion_harness(0);
 
   GstAllocator *unmappable = g_object_new(TEST_TYPE_UNMAPPABLE_ALLOCATOR, NULL);
@@ -854,6 +862,12 @@ GST_START_TEST(test_unreadable_source_frame_fails_the_conversion) {
   GstFlowReturn ret = push_conversion_frame(h, frame);
 
   fail_unless_equals_int(ret, GST_FLOW_NOT_NEGOTIATED);
+  guint64 fallback = G_MAXUINT64;
+  guint64 dropped = 0;
+  g_object_get(h->element, "conversion-fallback-frames", &fallback,
+               "conversion-dropped-frames", &dropped, NULL);
+  fail_unless_equals_uint64(fallback, 0);
+  fail_unless_equals_uint64(dropped, 1);
   assert_no_frames_left_pending(h->element);
 
   gst_harness_teardown(h);
@@ -878,6 +892,7 @@ GST_END_TEST
  */
 GST_START_TEST(test_unwritable_destination_frame_fails_the_conversion) {
   mpp_mock_reset();
+  g_setenv("GST_MPP_ALLOW_CPU_COPY", "1", TRUE);
   GstHarness *h = start_conversion_harness(0);
 
   /* Armed here so the buffer gst_mpp_enc_convert() allocates for this frame is
@@ -909,6 +924,7 @@ GST_END_TEST
  */
 GST_START_TEST(test_completed_software_conversion_releases_its_frame_maps) {
   mpp_mock_reset();
+  g_setenv("GST_MPP_ALLOW_CPU_COPY", "1", TRUE);
   GstHarness *h = start_conversion_harness(0);
 
   GstBuffer *frame = gst_buffer_new_allocate(NULL, CONVERT_FRAME_SIZE, NULL);
@@ -916,6 +932,12 @@ GST_START_TEST(test_completed_software_conversion_releases_its_frame_maps) {
   GstFlowReturn ret = push_conversion_frame(h, frame);
 
   fail_unless_equals_int(ret, GST_FLOW_OK);
+  guint64 fallback = 0;
+  guint64 dropped = G_MAXUINT64;
+  g_object_get(h->element, "conversion-fallback-frames", &fallback,
+               "conversion-dropped-frames", &dropped, NULL);
+  fail_unless_equals_uint64(fallback, 1);
+  fail_unless_equals_uint64(dropped, 0);
   assert_memory_is_unmapped(input);
   gst_memory_unref(input);
   g_print("completed conversion: flow=%s input memory remappable\n",
@@ -936,6 +958,16 @@ static void check_factory(const char *name, const char *property) {
   fail_unless(n > 0);
   fail_unless(g_object_class_find_property(G_OBJECT_GET_CLASS(e), property) !=
               NULL);
+  const char *counter_names[] = {"conversion-fallback-frames",
+                                 "conversion-dropped-frames",
+                                 "layout-rejections"};
+  for (guint i = 0; i < G_N_ELEMENTS(counter_names); i++) {
+    GParamSpec *counter = g_object_class_find_property(G_OBJECT_GET_CLASS(e),
+                                                       counter_names[i]);
+    fail_unless(counter != NULL);
+    fail_unless((counter->flags & G_PARAM_READABLE) != 0);
+    fail_unless((counter->flags & G_PARAM_WRITABLE) == 0);
+  }
   g_free(ps);
   gst_object_unref(e);
   gst_object_unref(f);
@@ -1981,10 +2013,17 @@ GST_START_TEST(test_h265_encoder_lifecycle) {
 }
 GST_END_TEST
 
+static void
+enable_debug_cpu_copy (void)
+{
+  g_setenv("GST_MPP_ALLOW_CPU_COPY", "1", TRUE);
+}
+
 Suite *mpp_gstharness_suite(void) {
   Suite *s = suite_create("rockchipmpp");
   TCase *tc = tcase_create("caps");
   tcase_set_timeout(tc, 15);
+  tcase_add_checked_fixture(tc, enable_debug_cpu_copy, NULL);
   tcase_add_test(tc, test_factories_properties);
   tcase_add_test(tc, test_jpeg_caps_with_harness);
   tcase_add_test(tc, test_video_decoder_caps_truth);

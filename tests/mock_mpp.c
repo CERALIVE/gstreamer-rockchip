@@ -155,6 +155,13 @@ static MockEncGeometryRecord enc_geometry_records[ENC_PLAN_CAPACITY];
 static atomic_uint enc_gap_empty_polls;
 static atomic_uint enc_gap_empty_polls_remaining;
 static atomic_uint enc_gap_empty_polls_per_packet;
+static atomic_uint enc_put_errors_remaining;
+static atomic_uint enc_get_errors_remaining;
+static atomic_int enc_put_error;
+static atomic_int enc_get_error;
+static atomic_int enc_force_idr_pending;
+static atomic_uint enc_create_calls;
+static atomic_uint enc_destroy_calls;
 
 /* Off unless a test arms it, so the encoder harness keeps the MPP behavior it
  * was written against. */
@@ -500,6 +507,9 @@ static MPP_RET control(MppCtx c, MpiCmd cmd, MppParam p) {
       atomic_fetch_add(&enc_ref_cfg_resets, 1);
     if (atomic_load(&enc_reject_ref_cfg))
       ret = MPP_NOK;
+  } else if (cmd == MPP_ENC_SET_IDR_FRAME) {
+    control_counts[4]++;
+    atomic_store(&enc_force_idr_pending, 1);
   }
   FILE *f = fopen(
       getenv("MPP_MOCK_LOG") ? getenv("MPP_MOCK_LOG") : "mpp-mock.log", "a");
@@ -509,7 +519,7 @@ static MPP_RET control(MppCtx c, MpiCmd cmd, MppParam p) {
   }
   return ret;
 }
-static MockBuffer *enc_buffer_new(unsigned char payload) {
+static MockBuffer *enc_buffer_new(const unsigned char *payload, size_t length) {
   MockBuffer *b = calloc(1, sizeof(*b));
   if (!b)
     return NULL;
@@ -528,10 +538,10 @@ static MockBuffer *enc_buffer_new(unsigned char payload) {
     free(b);
     return NULL;
   }
-  ((unsigned char *)b->data)[0] = payload;
+  memcpy(b->data, payload, length);
   b->map_size = ENC_BUFFER_MAP_SIZE;
   b->enc_owned = 1;
-  b->size = 1;
+  b->size = length;
   b->index = -1;
   b->refs = 1;
   atomic_fetch_add(&enc_live_buffers, 1);
@@ -539,6 +549,12 @@ static MockBuffer *enc_buffer_new(unsigned char payload) {
 }
 static MPP_RET encode_put(MppCtx c, MppFrame f) {
   (void)c;
+  unsigned errors = atomic_load(&enc_put_errors_remaining);
+  while (errors && !atomic_compare_exchange_weak(&enc_put_errors_remaining,
+                                                 &errors, errors - 1))
+    ;
+  if (errors)
+    return (MPP_RET)atomic_load(&enc_put_error);
   if (atomic_load(&enc_reject_put)) {
     atomic_fetch_add(&enc_put_rejections, 1);
     return MPP_NOK;
@@ -551,20 +567,28 @@ static MPP_RET encode_put(MppCtx c, MppFrame f) {
 
   unsigned slot = tail % ENC_PACKET_CAPACITY;
   MockPacket *packet = &enc_packets[slot];
-  MockBuffer *buffer = enc_buffer_new((unsigned char)(tail + 1));
+  unsigned char default_payload = (unsigned char)(tail + 1);
+  static const unsigned char idr_payload[] = {0, 0, 0, 1, 0x65, 0x88};
+  int forced_idr = atomic_exchange(&enc_force_idr_pending, 0);
+  const unsigned char *payload = forced_idr ? idr_payload : &default_payload;
+  size_t payload_length = forced_idr ? sizeof(idr_payload) : 1;
+  MockBuffer *buffer = enc_buffer_new(payload, payload_length);
   if (!buffer)
     return MPP_NOK;
   memset(packet, 0, sizeof(*packet));
 
   packet->input_frame = f;
   packet->buffer = (MppBuffer)buffer;
-  packet->length = (tail < ENC_PLAN_CAPACITY && enc_plan_length_armed[tail])
+  packet->length = forced_idr ? payload_length
+                   : (tail < ENC_PLAN_CAPACITY && enc_plan_length_armed[tail])
                        ? enc_plan_length[tail]
                        : ENC_PLAN_DEFAULT_LENGTH;
   packet->id = tail + 1;
   packet->has_intra_meta =
-      tail < ENC_PLAN_CAPACITY && enc_plan_intra_armed[tail];
-  packet->intra = packet->has_intra_meta ? enc_plan_intra[tail] : 0;
+      forced_idr || (tail < ENC_PLAN_CAPACITY && enc_plan_intra_armed[tail]);
+  packet->intra = forced_idr               ? 1
+                  : packet->has_intra_meta ? enc_plan_intra[tail]
+                                           : 0;
   packet->encoder_packet = 1;
   packet->alive = 1;
 
@@ -585,6 +609,15 @@ static MPP_RET encode_get(MppCtx c, MppPacket *p) {
   (void)c;
   if (!p)
     return MPP_NOK;
+
+  unsigned errors = atomic_load(&enc_get_errors_remaining);
+  while (errors && !atomic_compare_exchange_weak(&enc_get_errors_remaining,
+                                                 &errors, errors - 1))
+    ;
+  if (errors) {
+    *p = NULL;
+    return (MPP_RET)atomic_load(&enc_get_error);
+  }
 
   unsigned gap_remaining = atomic_load(&enc_gap_empty_polls_remaining);
   while (gap_remaining && !atomic_compare_exchange_weak(
@@ -1038,6 +1071,7 @@ MPP_RET mpp_create(MppCtx *ctx, MppApi **mpi) {
   api.decode_put_packet = put_packet_ok;
   api.decode_get_frame = get_frame_ok;
   *mpi = &api;
+  atomic_fetch_add(&enc_create_calls, 1);
   FILE *f = fopen(
       getenv("MPP_MOCK_LOG") ? getenv("MPP_MOCK_LOG") : "mpp-mock.log", "a");
   if (f) {
@@ -1059,6 +1093,7 @@ MPP_RET mpp_init(MppCtx c, MppCtxType t, MppCodingType coding) {
 }
 MPP_RET mpp_destroy(MppCtx c) {
   (void)c;
+  atomic_fetch_add(&enc_destroy_calls, 1);
   return MPP_OK;
 }
 void mpp_set_log_level(int l) { (void)l; }
@@ -1204,7 +1239,22 @@ unsigned mpp_mock_control_count(int cmd) {
          : cmd == MPP_ENC_SET_SEI_CFG     ? (unsigned)control_counts[1]
          : cmd == MPP_ENC_SET_HEADER_MODE ? (unsigned)control_counts[2]
          : cmd == MPP_ENC_SET_REF_CFG     ? (unsigned)control_counts[3]
+         : cmd == MPP_ENC_SET_IDR_FRAME   ? (unsigned)control_counts[4]
                                           : 0;
+}
+void mpp_mock_enc_fail_put(unsigned count, MPP_RET error) {
+  atomic_store(&enc_put_error, error);
+  atomic_store(&enc_put_errors_remaining, count);
+}
+void mpp_mock_enc_fail_get(unsigned count, MPP_RET error) {
+  atomic_store(&enc_get_error, error);
+  atomic_store(&enc_get_errors_remaining, count);
+}
+unsigned mpp_mock_enc_create_calls(void) {
+  return atomic_load(&enc_create_calls);
+}
+unsigned mpp_mock_enc_destroy_calls(void) {
+  return atomic_load(&enc_destroy_calls);
 }
 void mpp_mock_enc_reject_ref_cfg(int reject) {
   atomic_store(&enc_reject_ref_cfg, !!reject);
@@ -1552,6 +1602,13 @@ void mpp_mock_reset(void) {
   atomic_store(&enc_gap_empty_polls, 0);
   atomic_store(&enc_gap_empty_polls_remaining, 0);
   atomic_store(&enc_gap_empty_polls_per_packet, 0);
+  atomic_store(&enc_put_errors_remaining, 0);
+  atomic_store(&enc_get_errors_remaining, 0);
+  atomic_store(&enc_put_error, MPP_NOK);
+  atomic_store(&enc_get_error, MPP_NOK);
+  atomic_store(&enc_force_idr_pending, 0);
+  atomic_store(&enc_create_calls, 0);
+  atomic_store(&enc_destroy_calls, 0);
   memset(enc_packets, 0, sizeof(enc_packets));
   atomic_store(&enc_live_buffers, 0);
   atomic_store(&buffer_import_failure_armed, 0);

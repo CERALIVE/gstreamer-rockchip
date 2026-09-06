@@ -40,6 +40,18 @@ Files: packaging/*
 Copyright: 2026 CERALIVE <contact@ceralive.tv>
 License: LGPL-2.1
 
+Files: gst/rockchipmpp/gstmppconversionstats.c
+       gst/rockchipmpp/gstmppconversionstats.h
+       gst/rockchipmpp/gstmpprgabackend.c
+       gst/rockchipmpp/gstmpprgabackend.h
+       gst/rockchipmpp/gstmpprgatuple.c
+       gst/rockchipmpp/gstmpprgatuple.h
+       gst/rockchiprga/gstrgaconvert.c
+       gst/rockchiprga/gstrgaconvert.h
+       gst/rockchiprga/gstrockchiprga.c
+Copyright: 2026 CERALIVE <contact@ceralive.tv>
+License: LGPL-2.1
+
 License: LGPL-2.1
  This library is free software; you can redistribute it and/or modify it under
  the terms of the GNU Lesser General Public License as published by the Free

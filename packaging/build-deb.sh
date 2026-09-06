@@ -22,8 +22,12 @@ rm -rf "${build_dir}" "${stage_dir}"
 # Every plugin option is stated explicitly rather than left to meson's `auto`.
 # With `auto`, a missing MPP or RGA drops the affected plugin and the build
 # still succeeds — which would ship a green, silently element-less package.
-# The flag set mirrors debian/rules so the package carries the same four
-# plugins the radxa build it replaces did.
+#
+# `-Drga=enabled` carries two meanings and both are load-bearing: it enables
+# RGA conversion inside the MPP plugin, AND it is what builds the separate
+# rockchiprga plugin at all (gst/meson.build descends into it only when librga
+# is found and the feature is not disabled). Left on `auto` in a container
+# without librga, the package would silently ship without either RGA factory.
 meson setup "${build_dir}" "${root}" \
 	--prefix=/usr \
 	--libdir="lib/${triplet}" \
@@ -71,6 +75,8 @@ gstreamer1.0-rockchip-ceralive (${version}) unstable; urgency=medium
     verified fix ledger recorded in docs/fix-audit.md.
   * Replaces gstreamer1.0-rockchip1 and belabox-gstreamer1.0-rockchip on the
     device image; the plugin filename libgstrockchipmpp.so is unchanged.
+  * Ships the rockchiprga plugin (libgstrockchiprga.so) providing rgaconvert and
+    the two-input rgacompositor PiP/PbP element, in this same package.
 
  -- CERALIVE <contact@ceralive.tv>  ${changelog_date}
 EOF
@@ -78,7 +84,7 @@ EOF
 installed_size="$(du -ks "${stage_dir}" | cut -f1)"
 mkdir -p "${stage_dir}/DEBIAN"
 
-# Depends is the ELF NEEDED closure of all THREE shipped plugins, not the build
+# Depends is the ELF NEEDED closure of all FOUR shipped plugins, not the build
 # flag list. Under-declaring here fails silently: a build container already has
 # the missing library, so the install smoke passes and only a device breaks.
 # package-contract.sh re-derives this closure from the staged .so files.
@@ -88,7 +94,15 @@ mkdir -p "${stage_dir}/DEBIAN"
 #   libglib2.0-0                    libglib-2.0.so.0, libgobject-2.0.so.0
 #   libdrm2                         libdrm.so.2          (kmssrc, rkximage)
 #   libx11-6                        libX11.so.6          (rkximage)
-#   librockchip-mpp1 / librga2      librockchip_mpp.so.1, librga.so.2
+#   librockchip-mpp1                librockchip_mpp.so.1 (rockchipmpp)
+#   librga2                         librga.so.2          (rockchipmpp, rockchiprga)
+#
+# rockchiprga leaves Depends unchanged, but NOT because its NEEDED set is a
+# subset of the MPP plugin's -- it links libgstbase-1.0.so.0, which the MPP
+# plugin does not. That SONAME is already inside the declared closure, supplied
+# by libgstreamer1.0-0 for kmssrc, so no new package is required.
+# The staged closure check re-derives this from the built .so files instead of
+# trusting the reasoning here.
 #
 # Only libc6 is versioned, and that floor IS the target-suite contract
 # (GLIBC_FLOOR in ci/target-suite.env, gated by ci/check-glibc-floor.sh). The
@@ -120,8 +134,8 @@ Homepage: https://github.com/CERALIVE/gstreamer-rockchip
 License: LGPL-2.1
 Description: CeraLive-hardened GStreamer plugins for Rockchip RK3588
  The RK3588 hardware encode/decode elements the CeraLive streaming engine runs
- on: mpph264enc, mpph265enc, mppvideodec and mppjpegdec, backed by the Rockchip
- MPP and RGA libraries.
+ on: mpph264enc, mpph265enc, mppvideodec and mppjpegdec, plus the rgaconvert 2D
+ converter and rgacompositor PiP/PbP mixer, backed by Rockchip MPP and RGA.
  .
  This is the CeraLive fork of the Rockchip plugin set. It exists so the elements
  the device streams with are under first-party control: every change it carries

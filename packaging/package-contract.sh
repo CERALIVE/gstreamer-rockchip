@@ -32,13 +32,20 @@ readonly EXPECT_PACKAGE="gstreamer1.0-rockchip-ceralive"
 # FROZEN. The image's sysext exclusion globs and the MPP runtime-contract test
 # key on this filename and on the package-name prefix, by exact name.
 readonly EXPECT_PLUGIN_SO="libgstrockchipmpp.so"
+# Also FROZEN, and shipped in the SAME package: the release publishes exactly one
+# .deb, so the RGA elements have nowhere else to go. cerastream names their
+# factories literally in its RK3588 graphs, so an install that silently lacks
+# this file cannot normalize capture or compose two sources.
+readonly EXPECT_RGA_PLUGIN_SO="libgstrockchiprga.so"
 readonly EXPECT_ARCH="arm64"
 readonly EXPECT_TRIPLET="aarch64-linux-gnu"
-readonly EXPECT_PLUGIN_PATH="/usr/lib/${EXPECT_TRIPLET}/gstreamer-1.0/${EXPECT_PLUGIN_SO}"
+readonly EXPECT_PLUGIN_DIR="/usr/lib/${EXPECT_TRIPLET}/gstreamer-1.0"
+readonly EXPECT_PLUGIN_PATH="${EXPECT_PLUGIN_DIR}/${EXPECT_PLUGIN_SO}"
+readonly EXPECT_RGA_PLUGIN_PATH="${EXPECT_PLUGIN_DIR}/${EXPECT_RGA_PLUGIN_SO}"
 readonly DEP5_FORMAT="https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/"
 readonly SOURCE_URL="https://github.com/CERALIVE/gstreamer-rockchip"
 readonly EXPECT_DEPENDS="libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, libglib2.0-0, libc6 (>= 2.36), libdrm2, libx11-6, librockchip-mpp1, librga2"
-# Every SONAME the three shipped plugins link, mapped to the Debian package that
+# Every SONAME the four shipped plugins link, mapped to the Debian package that
 # supplies it. Resolved with `dpkg -S` on the arm64 build container, not guessed.
 # The staged check below re-derives the plugins' NEEDED set and refuses anything
 # this table does not cover, so a new link-time dependency cannot reach a release
@@ -60,7 +67,7 @@ librga.so.2=librga2"
 # from the tree, not assumed: the scan below fails if gst/ grows a holder that
 # is not in this list, so a new upstream contributor cannot reach a release
 # without a DEP-5 stanza.
-readonly KNOWN_HOLDERS_RE='Rockchip Electronics|Collabora Ltd|Igalia|Julien Moutte'
+readonly KNOWN_HOLDERS_RE='Rockchip Electronics|Collabora Ltd|Igalia|Julien Moutte|CERALIVE'
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 builder="${root}/packaging/build-deb.sh"
@@ -159,6 +166,21 @@ grep -qF "plugins_install_dir = '@0@/gstreamer-1.0'.format(get_option('libdir'))
 	|| fail "meson.build plugins_install_dir must resolve to <libdir>/gstreamer-1.0"
 grep -qF "library('gstrockchipmpp'," "${root}/gst/rockchipmpp/meson.build" \
 	|| fail "the MPP plugin library name is FROZEN as gstrockchipmpp (${EXPECT_PLUGIN_SO})"
+grep -qF "library('gstrockchiprga'," "${root}/gst/rockchiprga/meson.build" \
+	|| fail "the RGA plugin library name is FROZEN as gstrockchiprga (${EXPECT_RGA_PLUGIN_SO})"
+grep -qF 'gst_element_register (plugin, "rgaconvert"' "${root}/gst/rockchiprga/gstrockchiprga.c" \
+	|| fail "rockchiprga must register rgaconvert"
+grep -qF 'gst_element_register (plugin, "rgacompositor"' "${root}/gst/rockchiprga/gstrockchiprga.c" \
+	|| fail "rockchiprga must register rgacompositor"
+grep -qF "install_dir : plugins_install_dir," "${root}/gst/rockchiprga/meson.build" \
+	|| fail "the RGA plugin must install into plugins_install_dir alongside ${EXPECT_PLUGIN_SO}"
+# The RGA plugin is reached through a conditional subdir, so an enabled -Drga is
+# what puts it in the package at all. Assert the descent exists: without it the
+# build stays green and quietly ships one plugin fewer.
+grep -qF "subdir('rockchiprga')" "${root}/gst/meson.build" \
+	|| fail "gst/meson.build must descend into rockchiprga so the plugin is built"
+grep -qF -- '-Drga=enabled' "${builder}" \
+	|| fail "build-deb.sh must set -Drga=enabled; on 'auto' the RGA plugin can vanish silently"
 live_triplet="$(dpkg-architecture -a "${EXPECT_ARCH}" -qDEB_HOST_MULTIARCH)"
 [ "${live_triplet}" = "${EXPECT_TRIPLET}" ] \
 	|| fail "${EXPECT_ARCH} must resolve to ${EXPECT_TRIPLET}, got ${live_triplet}"
@@ -215,11 +237,13 @@ Rockchip Electronics Co., Ltd
 Collabora Ltd.
 Igalia
 Julien Moutte
+CERALIVE <contact@ceralive.tv>
 HOLDERS
 
 if [ "$#" -eq 0 ]; then
-	printf 'package-contract: OK static (%s %s · %s)\n' \
-		"${EXPECT_PACKAGE}" "${EXPECT_DEB_VERSION}" "${EXPECT_PLUGIN_PATH}"
+	printf 'package-contract: OK static (%s %s · %s · %s)\n' \
+		"${EXPECT_PACKAGE}" "${EXPECT_DEB_VERSION}" \
+		"${EXPECT_PLUGIN_PATH}" "${EXPECT_RGA_PLUGIN_SO}"
 	exit 0
 fi
 
@@ -228,9 +252,10 @@ stage="$1"
 out="${2:-${root}/dist}"
 [ -d "${stage}" ] || fail "staged tree ${stage} does not exist"
 
-staged_plugin="${stage}${EXPECT_PLUGIN_PATH}"
-[ -f "${staged_plugin}" ] \
-	|| fail "FROZEN plugin path missing: ${EXPECT_PLUGIN_PATH} (looked in ${stage})"
+for staged_path in "${EXPECT_PLUGIN_PATH}" "${EXPECT_RGA_PLUGIN_PATH}"; do
+	[ -f "${stage}${staged_path}" ] \
+		|| fail "FROZEN plugin path missing: ${staged_path} (looked in ${stage})"
+done
 
 staged_doc="${stage}/usr/share/doc/${EXPECT_PACKAGE}"
 for doc in copyright COPYING changelog.Debian.gz; do
@@ -272,4 +297,5 @@ if [ -d "${out}" ]; then
 		|| fail "the release must publish EXACTLY ONE .deb, ${out} holds ${debs}"
 fi
 
-printf 'package-contract: OK static + staged (%s · %s)\n' "${stage}" "${EXPECT_PLUGIN_PATH}"
+printf 'package-contract: OK static + staged (%s · %s · %s)\n' \
+	"${stage}" "${EXPECT_PLUGIN_PATH}" "${EXPECT_RGA_PLUGIN_PATH}"

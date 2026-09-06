@@ -87,6 +87,9 @@ enum
   PROP_IGNORE_ERROR,
   PROP_FAST_MODE,
   PROP_DMA_FEATURE,
+  PROP_CONVERSION_FALLBACK_FRAMES,
+  PROP_CONVERSION_DROPPED_FRAMES,
+  PROP_LAYOUT_REJECTIONS,
   PROP_LAST,
 };
 
@@ -196,6 +199,20 @@ gst_mpp_dec_get_property (GObject * object,
     case PROP_DMA_FEATURE:
       g_value_set_boolean (value, self->dma_feature);
       break;
+    case PROP_CONVERSION_FALLBACK_FRAMES:
+    case PROP_CONVERSION_DROPPED_FRAMES:
+    case PROP_LAYOUT_REJECTIONS:{
+      GstMppConversionStatsSnapshot stats;
+      gst_mpp_conversion_stats_snapshot (gst_mpp_conversion_stats_get (object),
+          &stats);
+      if (prop_id == PROP_CONVERSION_FALLBACK_FRAMES)
+        g_value_set_uint64 (value, stats.fallback_frames);
+      else if (prop_id == PROP_CONVERSION_DROPPED_FRAMES)
+        g_value_set_uint64 (value, stats.dropped_frames);
+      else
+        g_value_set_uint64 (value, stats.layout_rejections);
+      break;
+    }
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       return;
@@ -242,7 +259,8 @@ gst_mpp_dec_flush_ready_frames (GstVideoDecoder * decoder, gboolean finish)
 
   while ((frame = g_queue_pop_head (self->ready_frames))) {
     if (finish) {
-      GstFlowReturn finish_result = gst_video_decoder_finish_frame (decoder, frame);
+      GstFlowReturn finish_result =
+          gst_video_decoder_finish_frame (decoder, frame);
 
       if (result == GST_FLOW_OK && finish_result != GST_FLOW_OK)
         result = finish_result;
@@ -867,8 +885,8 @@ gst_mpp_dec_apply_info_change (GstVideoDecoder * decoder, MppFrame mframe)
   if (self->rotation || dst_format != src_format ||
       dst_width != width || dst_height != height ||
       self->crop_x != 0 || self->crop_y != 0 ||
-      (self->crop_w != 0 && (gint)self->crop_w != width) ||
-      (self->crop_h != 0 && (gint)self->crop_h != height)) {
+      (self->crop_w != 0 && (gint) self->crop_w != width) ||
+      (self->crop_h != 0 && (gint) self->crop_h != height)) {
     if (afbc || rfbc || offset_x || offset_y) {
       GST_ERROR_OBJECT (self, "unable to convert with FBC or offsets (%d, %d)",
           offset_x, offset_y);
@@ -1115,7 +1133,8 @@ out:
      * MPP output consumes one pending frame. frames is oldest-first (see the
      * seen_valid_pts branch above). */
     frame = frames->data;
-    GST_DEBUG_OBJECT (self, "no PTS match; consuming oldest pending frame (#%d)",
+    GST_DEBUG_OBJECT (self,
+        "no PTS match; consuming oldest pending frame (#%d)",
         frame->system_frame_number);
 
     if (self->last_frame)
@@ -1137,35 +1156,40 @@ out:
 }
 
 #ifdef HAVE_RGA
-static gboolean
+static GstMppRgaResult
 gst_mpp_dec_rga_convert (GstVideoDecoder * decoder, MppFrame mframe,
     GstBuffer * buffer)
 {
   GstMppDec *self = GST_MPP_DEC (decoder);
   GstVideoInfo *info = &self->info;
   GstMemory *mem;
-  gboolean ret;
+  GstMppRgaResult ret;
+  GstMppRgaOperation operation = self->mpp_type == MPP_VIDEO_CodingMJPEG ?
+      GST_MPP_RGA_OP_JPEG_CONVERT : GST_MPP_RGA_OP_DECODE_CONVERT;
 
   GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
 
   mem = gst_allocator_alloc (self->allocator, GST_VIDEO_INFO_SIZE (info), NULL);
-  g_return_val_if_fail (mem, FALSE);
+  if (!mem) {
+    GST_VIDEO_DECODER_STREAM_LOCK (decoder);
+    return GST_MPP_RGA_LAYOUT_REJECTED;
+  }
 
   // Crop
   GstVideoCropMeta *crop = gst_buffer_get_video_crop_meta (buffer);
 
-  if (!gst_mpp_rga_convert_from_mpp_frame (mframe, mem, info, self->rotation, crop)) {
+  ret = gst_mpp_rga_convert_from_mpp_frame (mframe, mem, info, self->rotation,
+      crop, operation);
+  if (ret != GST_MPP_RGA_SUCCESS) {
     GST_WARNING_OBJECT (self, "failed to convert");
     gst_memory_unref (mem);
-    ret = FALSE;
   } else {
     gst_buffer_replace_all_memory (buffer, mem);
-    ret = TRUE;
   }
 
   GST_VIDEO_DECODER_STREAM_LOCK (decoder);
 
-  if (crop && ret) {
+  if (crop && ret == GST_MPP_RGA_SUCCESS) {
     // We've already cropped the frame with RGA, remove the crop meta
     gst_buffer_remove_meta (buffer, &crop->meta);
   }
@@ -1190,6 +1214,9 @@ gst_mpp_dec_get_gst_buffer (GstVideoDecoder * decoder, MppFrame mframe)
   guint crop_h = self->crop_h;
   gboolean afbc = gst_mpp_frame_is_afbc (mframe);
   gboolean rfbc = gst_mpp_frame_is_rfbc (mframe);
+  GstMppRgaResult rga_result = GST_MPP_RGA_UNAVAILABLE;
+  GstMppRgaOperation operation = self->mpp_type == MPP_VIDEO_CodingMJPEG ?
+      GST_MPP_RGA_OP_JPEG_CONVERT : GST_MPP_RGA_OP_DECODE_CONVERT;
 
   if (!self->allocator)
     return NULL;
@@ -1252,12 +1279,24 @@ gst_mpp_dec_get_gst_buffer (GstVideoDecoder * decoder, MppFrame mframe)
   if (gst_mpp_use_rga ()) {
     if (!GST_VIDEO_INFO_IS_AFBC (info) && !GST_VIDEO_INFO_IS_RFBC (info) &&
         !offset_x && !offset_y &&
-        gst_mpp_dec_rga_convert (decoder, mframe, buffer))
+        (rga_result = gst_mpp_dec_rga_convert (decoder, mframe, buffer)) ==
+        GST_MPP_RGA_SUCCESS)
       return buffer;
   }
 #endif
 
-  GST_WARNING_OBJECT (self, "unable to convert frame");
+  if (rga_result == GST_MPP_RGA_LAYOUT_REJECTED ||
+      GST_VIDEO_INFO_IS_AFBC (info) || GST_VIDEO_INFO_IS_RFBC (info) ||
+      offset_x || offset_y)
+    gst_mpp_conversion_stats_layout_rejected (gst_mpp_conversion_stats_get
+        (G_OBJECT (self)));
+  gst_mpp_conversion_stats_dropped (gst_mpp_conversion_stats_get (G_OBJECT
+          (self)));
+  GST_ELEMENT_ERROR (self, CORE, NEGOTIATION,
+      ("no 2D converter available for %s",
+          gst_mpp_rga_operation_name (operation)), ("RGA result %d",
+          rga_result));
+  self->task_ret = GST_FLOW_NOT_NEGOTIATED;
 
   gst_buffer_unref (buffer);
   return NULL;
@@ -1397,30 +1436,31 @@ gst_mpp_dec_loop (GstVideoDecoder * decoder)
 
      We've considered a few options here:
      * we could force RGA conversions to be always on, so we always pass copies
-       of the original buffer - but this has considerable overhead
+     of the original buffer - but this has considerable overhead
      * we can pass our buffers as read-only, and implement a custom mem_copy
-       for our buffers, which uses the RGA for an offloaded copy - but this
-       would incur the same overhead if any of the downstream elements wants
-       to make the buffer writeable
+     for our buffers, which uses the RGA for an offloaded copy - but this
+     would incur the same overhead if any of the downstream elements wants
+     to make the buffer writeable
      * or we can delay our output by one frame, and safely allow the original
-       buffer to be modified with no additional overhead
+     buffer to be modified with no additional overhead
 
-    If convert is used, then we're outputting a buffer copy, and there's no
-    need to delay it
-  */
+     If convert is used, then we're outputting a buffer copy, and there's no
+     need to delay it
+   */
   if (self->convert) {
     self->task_ret = gst_video_decoder_finish_frame (decoder, frame);
   } else {
     if (!self->ready_frames) {
-      self->ready_frames = g_queue_new();
-      if (!self->ready_frames) goto error;
+      self->ready_frames = g_queue_new ();
+      if (!self->ready_frames)
+        goto error;
     }
-    g_queue_push_tail(self->ready_frames, frame);
+    g_queue_push_tail (self->ready_frames, frame);
 
     /* The threshold can be adjusted if some configurations /
        variants keep more than one reference frame */
-    if (g_queue_get_length(self->ready_frames) > 1) {
-      GstVideoCodecFrame *output_frame = g_queue_pop_head(self->ready_frames);
+    if (g_queue_get_length (self->ready_frames) > 1) {
+      GstVideoCodecFrame *output_frame = g_queue_pop_head (self->ready_frames);
       if (output_frame) {
         self->task_ret = gst_video_decoder_finish_frame (decoder, output_frame);
       }
@@ -1628,6 +1668,17 @@ static GstStateChangeReturn
 gst_mpp_dec_change_state (GstElement * element, GstStateChange transition)
 {
   GstVideoDecoder *decoder = GST_VIDEO_DECODER (element);
+  GstMppDec *self = GST_MPP_DEC (element);
+
+  if (transition == GST_STATE_CHANGE_READY_TO_NULL) {
+    GstMppConversionStatsSnapshot stats;
+    gst_mpp_conversion_stats_snapshot (gst_mpp_conversion_stats_get (G_OBJECT
+            (self)), &stats);
+    GST_DEBUG_OBJECT (self,
+        "conversion summary: fallback=%" G_GUINT64_FORMAT " dropped=%"
+        G_GUINT64_FORMAT " layout-rejections=%" G_GUINT64_FORMAT,
+        stats.fallback_frames, stats.dropped_frames, stats.layout_rejections);
+  }
 
   if (transition == GST_STATE_CHANGE_PAUSED_TO_READY) {
     GST_VIDEO_DECODER_STREAM_LOCK (decoder);
@@ -1646,6 +1697,7 @@ gst_mpp_dec_init (GstMppDec * self)
   self->ignore_error = DEFAULT_PROP_IGNORE_ERROR;
   self->fast_mode = DEFAULT_PROP_FAST_MODE;
   self->dma_feature = DEFAULT_PROP_DMA_FEATURE;
+  gst_mpp_conversion_stats_attach (G_OBJECT (self));
 
   gst_video_decoder_set_packetized (decoder, TRUE);
 }
@@ -1691,6 +1743,22 @@ gst_mpp_dec_class_init (GstMppDecClass * klass)
 
   gobject_class->set_property = GST_DEBUG_FUNCPTR (gst_mpp_dec_set_property);
   gobject_class->get_property = GST_DEBUG_FUNCPTR (gst_mpp_dec_get_property);
+  g_object_class_install_property (gobject_class,
+      PROP_CONVERSION_FALLBACK_FRAMES,
+      g_param_spec_uint64 ("conversion-fallback-frames",
+          "Conversion fallback frames",
+          "Frames converted by the debug CPU-copy fallback", 0, G_MAXUINT64,
+          0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class,
+      PROP_CONVERSION_DROPPED_FRAMES,
+      g_param_spec_uint64 ("conversion-dropped-frames",
+          "Conversion dropped frames",
+          "Frames dropped because no 2D converter was available", 0,
+          G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_LAYOUT_REJECTIONS,
+      g_param_spec_uint64 ("layout-rejections", "Layout rejections",
+          "Frames rejected for an unsupported conversion layout", 0,
+          G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 
 #ifdef HAVE_RGA
   if (!gst_mpp_use_rga ())

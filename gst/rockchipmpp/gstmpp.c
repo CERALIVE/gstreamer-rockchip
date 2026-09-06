@@ -25,8 +25,6 @@
 #include "config.h"
 #endif
 
-#include <string.h>
-
 #include <gst/allocators/gstdmabuf.h>
 
 #include "gstmpp.h"
@@ -212,7 +210,8 @@ gst_mpp_rga_info_from_mpp_frame (rga_info_t * info, MppFrame mframe)
 
   RgaSURF_FORMAT rga_format = gst_mpp_mpp_format_to_rga_format (mpp_format);
   if (rga_format == RK_FORMAT_UNKNOWN) {
-    GST_ERROR ("unable to convert from MPP format %d to RGA format", mpp_format);
+    GST_ERROR ("unable to convert from MPP format %d to RGA format",
+        mpp_format);
     return FALSE;
   }
 
@@ -247,33 +246,6 @@ gst_mpp_rga_info_from_video_info (rga_info_t * info, GstVideoInfo * vinfo)
       hstride, vstride);
 }
 
-static gboolean
-gst_mpp_rga_do_convert (rga_info_t * src_info, rga_info_t * dst_info)
-{
-  static gint rga_supported = 1;
-  static gint rga_inited = 0;
-
-  if (!rga_supported || !gst_mpp_use_rga ())
-    return FALSE;
-
-  if (!rga_inited) {
-    if (c_RkRgaInit () < 0) {
-      rga_supported = 0;
-      GST_WARNING ("failed to init RGA");
-      return FALSE;
-    }
-    rga_inited = 1;
-  }
-
-  if (c_RkRgaBlit (src_info, dst_info, NULL) < 0) {
-    GST_WARNING ("failed to blit");
-    return FALSE;
-  }
-
-  GST_DEBUG ("converted with RGA");
-  return TRUE;
-}
-
 static gint
 gst_mpp_rga_get_rotation (gint rotation)
 {
@@ -291,21 +263,25 @@ gst_mpp_rga_get_rotation (gint rotation)
   }
 }
 
-gboolean
+GstMppRgaResult
 gst_mpp_rga_convert (GstBuffer * inbuf, GstVideoInfo * src_vinfo,
-    GstMemory * out_mem, GstVideoInfo * dst_vinfo, gint rotation)
+    GstMemory * out_mem, GstVideoInfo * dst_vinfo, gint rotation,
+    GstMppRgaOperation operation)
 {
   GstMapInfo mapinfo = { 0, };
-  gboolean ret;
+  GstMppRgaResult ret;
+  gboolean mapped = FALSE;
+  GstVideoFormat src_format = GST_VIDEO_INFO_FORMAT (src_vinfo);
+  GstVideoFormat dst_format = GST_VIDEO_INFO_FORMAT (dst_vinfo);
 
   rga_info_t src_info = { 0, };
   rga_info_t dst_info = { 0, };
 
   if (!gst_mpp_rga_info_from_video_info (&src_info, src_vinfo))
-    return FALSE;
+    return GST_MPP_RGA_LAYOUT_REJECTED;
 
   if (!gst_mpp_rga_info_from_video_info (&dst_info, dst_vinfo))
-    return FALSE;
+    return GST_MPP_RGA_LAYOUT_REJECTED;
 
   /* Prefer using dma fd */
   if (gst_buffer_n_memory (inbuf) == 1) {
@@ -320,7 +296,9 @@ gst_mpp_rga_convert (GstBuffer * inbuf, GstVideoInfo * src_vinfo,
   }
 
   if (src_info.fd <= 0) {
-    gst_buffer_map (inbuf, &mapinfo, GST_MAP_READ);
+    if (!gst_buffer_map (inbuf, &mapinfo, GST_MAP_READ))
+      return GST_MPP_RGA_LAYOUT_REJECTED;
+    mapped = TRUE;
     src_info.virAddr = mapinfo.data;
   }
 
@@ -328,23 +306,32 @@ gst_mpp_rga_convert (GstBuffer * inbuf, GstVideoInfo * src_vinfo,
 
   src_info.rotation = gst_mpp_rga_get_rotation (rotation);
   if (src_info.rotation < 0)
-    return FALSE;
+    return GST_MPP_RGA_LAYOUT_REJECTED;
 
-  ret = gst_mpp_rga_do_convert (&src_info, &dst_info);
+  if (!gst_mpp_use_rga ())
+    ret = GST_MPP_RGA_UNAVAILABLE;
+  else
+    ret = gst_mpp_rga_backend_blit (gst_mpp_rga_backend_get_default (),
+        operation, src_format, dst_format, &src_info, &dst_info);
 
-  gst_buffer_unmap (inbuf, &mapinfo);
+  if (mapped)
+    gst_buffer_unmap (inbuf, &mapinfo);
   return ret;
 }
 
-gboolean
+GstMppRgaResult
 gst_mpp_rga_convert_from_mpp_frame (MppFrame * mframe,
-    GstMemory * out_mem, GstVideoInfo * dst_vinfo, gint rotation, GstVideoCropMeta *crop)
+    GstMemory * out_mem, GstVideoInfo * dst_vinfo, gint rotation,
+    GstVideoCropMeta * crop, GstMppRgaOperation operation)
 {
   rga_info_t src_info = { 0, };
   rga_info_t dst_info = { 0, };
+  GstVideoFormat src_format =
+      gst_mpp_mpp_format_to_gst_format (mpp_frame_get_fmt (mframe));
+  GstVideoFormat dst_format = GST_VIDEO_INFO_FORMAT (dst_vinfo);
 
   if (!gst_mpp_rga_info_from_mpp_frame (&src_info, mframe))
-    return FALSE;
+    return GST_MPP_RGA_LAYOUT_REJECTED;
 
   if (crop) {
     src_info.rect.xoffset = crop->x;
@@ -354,15 +341,19 @@ gst_mpp_rga_convert_from_mpp_frame (MppFrame * mframe,
   }
 
   if (!gst_mpp_rga_info_from_video_info (&dst_info, dst_vinfo))
-    return FALSE;
+    return GST_MPP_RGA_LAYOUT_REJECTED;
 
   dst_info.fd = gst_dmabuf_memory_get_fd (out_mem);
 
   src_info.rotation = gst_mpp_rga_get_rotation (rotation);
   if (src_info.rotation < 0)
-    return FALSE;
+    return GST_MPP_RGA_LAYOUT_REJECTED;
 
-  return gst_mpp_rga_do_convert (&src_info, &dst_info);
+  if (!gst_mpp_use_rga ())
+    return GST_MPP_RGA_UNAVAILABLE;
+
+  return gst_mpp_rga_backend_blit (gst_mpp_rga_backend_get_default (),
+      operation, src_format, dst_format, &src_info, &dst_info);
 }
 #endif
 
