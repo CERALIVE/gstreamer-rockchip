@@ -20,15 +20,16 @@ Its four engine-critical elements are `mpph264enc`, `mpph265enc`,
 of the package and registration contract; `rgaconvert` and `rgacompositor` add
 the two first-party librga factories.
 
-**Which of those eleven you actually get depends on where you are looking.** The
-two `rockchiprga` factories live on the unmerged `feat/rga-librga-backend`
-branch — `main` is at `b021d610`, which predates them — so the published
-`1.14.4+ceralive.1` package carries **nine** factories, not eleven. Everything
-described under "RGA conversion safety" below is branch code: built, reviewed, CI
-gated, and exercised by the gated board drills, but not in any released package
-and not on any device image. See
-[`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md) for what a real
-board has and has not established.
+**The package version matters:** `1.14.4+ceralive.1` carries **nine** factories,
+with neither `rgaconvert` nor `rgacompositor`. This tree adds both elements and
+encoder hygiene for `1.14.4+ceralive.2`; check the
+[release assets](https://github.com/CERALIVE/gstreamer-rockchip/releases) for
+package availability. The release is being pulled forward to unblock board
+validation, not to claim that a device image has passed it. The earlier d5
+matrix recorded six failing quality cells, and the negotiated-colorimetry fix
+still needs its hardware rerun. See
+[`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md) for the actual
+hardware evidence and remaining limits.
 
 ## Build
 

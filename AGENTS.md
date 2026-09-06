@@ -43,23 +43,30 @@ CeraLive deeply validates the four MPP factories used by the engine plus
 `rgaconvert` and `rgacompositor`; the remaining five retain
 build-and-registration coverage.
 
-**RELEASE STATE — the eleven-factory contract is BRANCH truth, not shipped
-truth.** The two `rockchiprga` factories and the encoder-hygiene work exist only
-on the long-lived `feat/rga-librga-backend` branch, which is not merged: `main`
-is at `b021d610`, which predates `cae67b2b` (`rgaconvert`) entirely. The one
-published release, `1.14.4+ceralive.1`, was cut from that pre-RGA history and
-therefore carries **nine** factories — no `rgaconvert`, no `rgacompositor`. The
-`image-building-pipeline` manifest row that pins this fork names that nine-factory
-asset, and no device image has been built or flashed with it either.
+**RELEASE BOUNDARY — `1.14.4+ceralive.1` carries nine factories.** It predates
+both `rockchiprga` elements. This tree adds `rgaconvert`, `rgacompositor` and
+encoder hygiene for `1.14.4+ceralive.2`; use the
+[published releases](https://github.com/CERALIVE/gstreamer-rockchip/releases)
+to establish whether that package is available, not a branch name or CI result.
+Publishing the package and pinning it in an image are separate from installing
+and qualifying that exact image on hardware.
 
-So the honest wording for anything on this branch is "built and reviewed, gated in
-CI, and exercised by the board drills named in
-[`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md)" — never "ships",
-never "devices carry it". Both elements are real built code rather than stubs
-(`gst/rockchiprga/gstrgaconvert.c`, `gst/rockchiprga/gstrgacompositor.c`), and the
-d5 conversion matrix has genuinely run on hardware and genuinely recorded six
-failing quality cells; a passing CI gate is not a shipped element, and a run board
-drill is not a released package.
+The release is being pulled forward to unblock board validation, not to declare
+that validation passed. The earlier d5 conversion matrix recorded six failing
+quality cells; the negotiated-colorimetry fix still needs its hardware rerun.
+[`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md) retains the actual
+drill verdicts and their limits. A passing build or install smoke does not erase
+those limits or establish a working 4K59.94 capture-to-encode stream.
+
+Release through `.github/workflows/publish-release.yml` on `main` only, after
+the merged commit's Build Check passes. Dispatch with `release_type=stable`
+and `dry_run=false` for publication; `dry_run=true` rehearses without publishing.
+The workflow derives the next upstream-style version from existing tags, gates
+the build and both suite install smokes, publishes exactly one arm64 `.deb` plus
+its `.sha256`, then dispatches `apt-reindex` to `CERALIVE/apt-worker`. Do not
+pre-create the tag. Independently download and checksum the release archive
+before image pinning, and verify the stable arm64 APT index and package bytes
+after reindexing; a successful dispatch alone is not serving proof.
 
 ## Repository map
 
