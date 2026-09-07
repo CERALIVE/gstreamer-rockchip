@@ -121,6 +121,7 @@ jobs:
   build:
     name: ${{ matrix.suite }} · GStreamer ${{ matrix.gst_minor }} · arm64
     needs: [changes, resolve-suite]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04-arm
     container:
       image: debian:${{ matrix.suite }}-slim
