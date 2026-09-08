@@ -58,16 +58,23 @@ for file in $(find gst/rockchipmpp -type f | grep -E "\.c$|\.h$") ; do
     # revision in the index (and not the checked out version).
     nf=`git checkout-index --temp ${file} | cut -f 1`
     newfile=`mktemp /tmp/${nf}.XXXXXX` || exit 1
+    normalized=`mktemp /tmp/${nf}.XXXXXX` || exit 1
+    # Some inherited MPP sources deliberately use CRLF. GNU indent 2.2.12
+    # treats the carriage return as input rather than line-ending whitespace,
+    # losing its statement nesting and reporting false unmatched-else errors.
+    # Normalize only the temporary checker input so the source's line endings
+    # remain untouched.
+    tr -d '\r' < "$nf" > "$normalized" || exit 1
     $INDENT ${INDENT_PARAMETERS} \
-	$nf -o $newfile 2>> /dev/null
+	$normalized -o $newfile 2>> /dev/null
     # FIXME: Call indent twice as it tends to do line-breaks
     # different for every second call.
     $INDENT ${INDENT_PARAMETERS} \
         $newfile 2>> /dev/null
-    diff -u -p "${nf}" "${newfile}"
+    diff -u -p "${normalized}" "${newfile}"
     r=$?
-    cp "${newfile}" "${file}"
     rm "${newfile}"
+    rm "${normalized}"
     rm "${nf}"
     if [ $r != 0 ] ; then
 echo "================================================================================================="
