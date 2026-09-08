@@ -121,6 +121,23 @@ Moutte's notices apply to the `gst/rkximage/` subtree. The machine-readable,
 file-scoped attribution is [`packaging/copyright`](packaging/copyright); source
 headers remain authoritative.
 
+## Colorimetry fixation and known limitations
+
+The U1 fix preserves omitted same-family colorimetry during raw-format caps
+fixation without overriding explicit color-conversion requests. On Orange Pi
+5+, the previously failing omitted-colorimetry HDMI case now reaches EOS, but
+explicit BT.709 output still fails with librga's `Not support full csc mode
+[300]`. This is a genuine CSC capability gap, not a regression; its fix is
+deferred to convergence todo 49 after librga R1 `1.10.5+ceralive.1`.
+
+The strict d5 matrix records four PASS cells, five expected U3 chroma failures,
+and three rotation submission failures. Same-kernel A/B reproduces all three
+rotations identically on baseline: they are pre-existing, tracked separately,
+and not waived as U3. The owner authorizes `1.14.4+ceralive.3` with these explicit
+limitations; this is not a claim of complete board qualification. See the
+[board results](tests/board/DRILL-RESULTS.md#2026-09-08--u1-fixation-candidate-orange-pi-5-partial)
+for the tested packages, PSNR cells, and proof limits.
+
 ## License
 
 This project is free software under the **GNU Lesser General Public License,
