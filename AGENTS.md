@@ -347,6 +347,23 @@ maintains the audited upstream line, BELABOX rebased and carried the downstream
 tree, and irlserver-datagutt added the streaming-control features inherited by
 this fork. See `README.md` for the public maintainer notice.
 
+## Pre-commit formatting
+
+`hooks/pre-commit.hook` runs GNU indent 2.2.12 with the upstream parameter set
+against the index contents of every C/H file under `gst/rockchipmpp/`. The
+encoder source and header intentionally retain inherited CRLF line endings;
+GNU indent 2.2.12 misparses those carriage returns as input, producing
+misleading unmatched-`else`, statement-nesting, and unexpected-EOF errors.
+The hook strips CR only in its temporary checker input, so it can validate
+those files without changing their stored line endings. It also leaves the
+working tree untouched when a style diff is found.
+
+The two genuinely non-compliant LF files (`gstmppallocator.c` and
+`gstmpph265enc.c`) are kept at the hook's two-pass output. The encoder's
+failure was introduced by commit `dd3ce32c` restoring inherited CRLF; the
+underlying C was valid and the original file passed GNU indent before that
+line-ending-only change.
+
 ## Anti-patterns
 
 - Do not rename `libgstrockchipmpp.so`, `libgstrockchiprga.so`, or the package
@@ -365,8 +382,7 @@ this fork. See `README.md` for the public maintainer notice.
 - Do not claim sanitizer coverage that the qemu-user environment cannot run.
 - Do not let a board drill install a package without recording package, kernel,
   and final verdict, and do not infer PASS from a command merely completing.
-- Do not run the pre-commit hook casually: its baseline-wide `gst-indent` pass is
-  destructive on failure and can rewrite untouched source. Review `git status`
-  immediately if it runs.
+- Do not run the pre-commit hook casually: it checks the whole MPP subtree and
+  is intentionally baseline-wide. Review `git status` immediately if it runs.
 - Preserve mixed line endings in inherited files; avoid text-mode whole-file
   rewrites and compare raw versus whitespace-ignored diffs.
