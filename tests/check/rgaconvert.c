@@ -362,6 +362,80 @@ GST_START_TEST (test_caps_negotiation_matrix)
 }
 GST_END_TEST;
 
+GST_START_TEST (test_fixation_preserves_omitted_yuv_colorimetry)
+{
+  FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS };
+  TestConvert test = test_convert_new (&fake);
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+  GstCaps *input = caps_from_string
+      ("video/x-raw(memory:DMABuf),format=NV16,width=3840,height=2160,colorimetry=2:4:7:1");
+  GstCaps *output = caps_from_string
+      ("video/x-raw(memory:DMABuf),format=NV12,width=3840,height=2160");
+  const gchar *color;
+
+  output = klass->fixate_caps (GST_BASE_TRANSFORM (test.convert), GST_PAD_SINK,
+      input, output);
+  color = gst_structure_get_string (gst_caps_get_structure (output, 0),
+      "colorimetry");
+  fail_unless (color != NULL, "NV16 to NV12 fixation dropped input colorimetry");
+  fail_unless_equals_string (color, "2:4:7:1");
+  gst_caps_unref (output);
+  gst_caps_unref (input);
+  test_convert_clear (&test);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_transform_caps_prefers_identity_colorimetry_both_directions)
+{
+  FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS };
+  TestConvert test = test_convert_new (&fake);
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+  GstCaps *input = caps_from_string
+      ("video/x-raw(memory:DMABuf),format=NV16,width=3840,height=2160,colorimetry=2:4:7:1");
+  const GstPadDirection directions[] = { GST_PAD_SINK, GST_PAD_SRC };
+  guint i;
+
+  for (i = 0; i < G_N_ELEMENTS (directions); i++) {
+    GstCaps *output = klass->transform_caps (GST_BASE_TRANSFORM (test.convert),
+        directions[i], input, NULL);
+    const gchar *color = gst_structure_get_string
+        (gst_caps_get_structure (output, 0), "colorimetry");
+
+    fail_unless (color != NULL, "transform_caps lost identity colorimetry");
+    fail_unless_equals_string (color, "2:4:7:1");
+    gst_caps_unref (output);
+  }
+  gst_caps_unref (input);
+  test_convert_clear (&test);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_fixation_does_not_relabel_explicit_bt709_or_rgb)
+{
+  FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS };
+  TestConvert test = test_convert_new (&fake);
+  GstCaps *input = caps_from_string
+      ("video/x-raw(memory:DMABuf),format=NV16,width=3840,height=2160,colorimetry=2:4:7:1");
+  GstCaps *filter = caps_from_string
+      ("video/x-raw(memory:DMABuf),format=NV12,width=3840,height=2160,colorimetry=bt709");
+  GstCaps *output = fixate_output (test.convert, input, filter);
+
+  fail_unless_equals_string (gst_structure_get_string
+      (gst_caps_get_structure (output, 0), "colorimetry"), "bt709");
+  gst_caps_unref (output);
+  gst_caps_unref (filter);
+  filter = caps_from_string
+      ("video/x-raw(memory:DMABuf),format=BGR,width=3840,height=2160");
+  output = fixate_output (test.convert, input, filter);
+  fail_if (gst_structure_has_field (gst_caps_get_structure (output, 0),
+      "colorimetry"), "YUV matrix must not be copied into RGB caps");
+  gst_caps_unref (output);
+  gst_caps_unref (filter);
+  gst_caps_unref (input);
+  test_convert_clear (&test);
+}
+GST_END_TEST;
+
 GST_START_TEST (test_one_process_call_honors_stride_crop_and_transform)
 {
   FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS };
@@ -822,6 +896,10 @@ rgaconvert_suite (void)
   tcase_add_test (test_case,
       test_rotation_and_crop_fixate_natural_output_dimensions);
   tcase_add_test (test_case, test_caps_negotiation_matrix);
+  tcase_add_test (test_case, test_fixation_preserves_omitted_yuv_colorimetry);
+  tcase_add_test (test_case,
+      test_transform_caps_prefers_identity_colorimetry_both_directions);
+  tcase_add_test (test_case, test_fixation_does_not_relabel_explicit_bt709_or_rgb);
   tcase_add_test (test_case, test_colorimetry_reaches_improcess);
   tcase_add_test (test_case, test_unspecified_colorimetry_uses_video_info_defaults);
   tcase_add_test (test_case, test_stride_only_does_not_request_csc);

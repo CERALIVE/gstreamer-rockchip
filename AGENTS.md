@@ -51,9 +51,10 @@ to establish whether that package is available, not a branch name or CI result.
 Publishing the package and pinning it in an image are separate from installing
 and qualifying that exact image on hardware.
 
-The release is being pulled forward to unblock board validation, not to declare
-that validation passed. The earlier d5 conversion matrix recorded six failing
-quality cells; the negotiated-colorimetry fix still needs its hardware rerun.
+The `1.14.4+ceralive.3` release scope is the omitted-colorimetry fixation fix,
+not complete media-stack qualification. The OPi hardware rerun proves that fix;
+explicit BT.709 CSC and the remaining d5 failures are documented limitations
+accepted by the owner for this release, not silently passing board gates.
 [`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md) retains the actual
 drill verdicts and their limits. A passing build or install smoke does not erase
 those limits or establish a working 4K59.94 capture-to-encode stream.
@@ -196,6 +197,15 @@ The following are compatibility contracts, not cleanup opportunities:
   YUV-output composition explicitly requests both CSC directions. Unknown or
   unsupported conversions fail rather than assuming BT.601. Mapping, defaults,
   full-range limitations, and test scope: `docs/RGA-MPP-INTERACTION.md`.
+- **Caps fixation [EXISTS]:** same-memory identity alternatives retain
+  explicit colorimetry; raw-format fixation restores omitted colorimetry within
+  the same YUV/RGB family. Explicit output requests are never overwritten. The
+  OPi omitted-colorimetry U1 case passes. Explicit BT.709 remains a known CSC
+  limitation deferred to convergence todo 49 after librga R1
+  `1.10.5+ceralive.1`. The three d5 rotation failures reproduce identically on
+  baseline in the same kernel boot; they are separate from U3 chroma limits.
+  The owner authorizes `.3` with these documented limitations. See the
+  2026-09-08 evidence and release disposition in `tests/board/DRILL-RESULTS.md`.
 - **`rgaconvert` properties used by the engine:** the six transform properties
   keep their names, types, defaults, ranges, and enum/flag nicks. A consumer
   graph names them literally, so a rename is a cross-repository migration.

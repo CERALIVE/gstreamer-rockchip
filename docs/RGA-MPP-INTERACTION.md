@@ -107,6 +107,20 @@ matrices (for example BT.2020) are also refused when CSC is required.
 
 ### Unspecified caps are already resolved by GStreamer
 
+The U1 fixation change preserves an explicit input colorimetry when
+the selected raw output format remains in the same YUV/RGB family and the
+output has no colorimetry field. Identity alternatives retain it in both pad
+directions. A YUV matrix is not copied into RGB caps, and explicit output
+colorimetry is never overwritten. This avoids an accidental matrix change
+during YUV subsampling or resizing; it does not implement a requested CSC.
+Explicit BT.709 output from the OPi's `2:4:7:1` input still fails with librga's
+`Not support full csc mode [300]`: a genuine CSC capability limitation, not
+metadata loss or a regression. It is deferred to convergence todo 49, gated
+on librga R1 `1.10.5+ceralive.1`, and is owner-approved as a documented
+limitation for `.3`. The OPi proof, separate pre-existing rotation failures,
+and release disposition are recorded in the 2026-09-08 section of
+`tests/board/DRILL-RESULTS.md`.
+
 `gst_video_info_from_caps()` and `gst_video_info_set_format()` populate the
 defaults through GStreamer's private `set_default_colorimetry()` helper:
 YUV height **≤576** selects BT.601 limited; height **>576** selects BT.709
