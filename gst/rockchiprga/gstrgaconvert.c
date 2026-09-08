@@ -585,6 +585,17 @@ gst_rga_convert_transform_caps (GstBaseTransform * transform,
             "pixel-aspect-ratio");
         features = gst_caps_features_copy (gst_caps_get_features (templates,
                 template_index));
+        if (pass == 0 && gst_structure_has_field (input, "colorimetry")) {
+          GstStructure *identity = gst_structure_copy (output);
+
+          /* Prefer keeping the colour interpretation without constraining CSC
+           * alternatives, which still need the unrestricted template below. */
+          gst_rga_convert_copy_caps_field (identity, input, "format");
+          gst_rga_convert_copy_caps_field (identity, input, "drm-format");
+          gst_rga_convert_copy_caps_field (identity, input, "colorimetry");
+          gst_caps_append_structure_full (result, identity,
+              gst_caps_features_copy (features));
+        }
         if (gst_caps_is_subset_structure_full (result, output, features)) {
           gst_structure_free (output);
           gst_caps_features_free (features);
@@ -674,6 +685,22 @@ gst_rga_convert_fixate_caps (GstBaseTransform * transform,
     }
     gst_structure_fixate_field_nearest_int (output, "width", width);
     gst_structure_fixate_field_nearest_int (output, "height", height);
+    if (!gst_structure_has_field (output, "colorimetry")) {
+      const gchar *out_format = gst_structure_get_string (output, "format");
+      const GstVideoFormatInfo *out_info = out_format ?
+          gst_video_format_get_info (gst_video_format_from_string (out_format)) :
+          NULL;
+
+      /* Geometry and YUV subsampling do not change the matrix/range. Do not
+       * copy a YUV matrix into RGB or overwrite an explicit CSC request. */
+      if (out_info &&
+          ((GST_VIDEO_INFO_IS_YUV (&info) &&
+                  GST_VIDEO_FORMAT_INFO_IS_YUV (out_info)) ||
+              (GST_VIDEO_INFO_IS_RGB (&info) &&
+                  GST_VIDEO_FORMAT_INFO_IS_RGB (out_info))))
+        gst_rga_convert_copy_caps_field (output,
+            gst_caps_get_structure (caps, 0), "colorimetry");
+    }
   }
   return gst_caps_fixate (othercaps);
 }
