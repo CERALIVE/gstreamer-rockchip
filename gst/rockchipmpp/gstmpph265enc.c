@@ -47,10 +47,10 @@ struct _GstMppH265Enc
   guint qp_max_i;
   gint qp_ip;
 
-  gint profile;            /* MPP_PROFILE_HEVC_*: 1=main, 2=main10, 3=main-still */
-  gint tier;               /* 0=main tier, 1=high tier */
-  gint level;              /* general_level_idc (level * 30, e.g. 120 = 4.0) */
-  gboolean sao;            /* Sample Adaptive Offset filter */
+  gint profile;                 /* MPP_PROFILE_HEVC_*: 1=main, 2=main10, 3=main-still */
+  gint tier;                    /* 0=main tier, 1=high tier */
+  gint level;                   /* general_level_idc (level * 30, e.g. 120 = 4.0) */
+  gboolean sao;                 /* Sample Adaptive Offset filter */
 };
 
 typedef struct
