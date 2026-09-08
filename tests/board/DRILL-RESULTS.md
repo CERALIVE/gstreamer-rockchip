@@ -108,3 +108,120 @@ results. Their luma is exact or 48.55–56.58 dB; the strict failures come from
 fixed-function chroma conversion/resampling differences, including sparse edge
 outliers up to 94 levels. They must not be softened into harness failures or a
 channel-order defect.
+
+## 2026-09-08 — U1 fixation candidate, Orange Pi 5+ [PARTIAL]
+
+Current `origin/main` `aa92bdd460bdc5454f16a70ebd7173dc63db78f9` includes
+`3c1272bc`, but still reproduces U1. A fresh arm64 package was built from that
+source and installed before testing. HDMI negotiated NV16 3840×2160 at
+60000/1001 with `colorimetry=2:4:7:1`; all three tests requested DMA-BUF NV12
+output and 60 input buffers. The local fixation candidate was then installed
+as `1.14.4+ceralive.2+u1candidate.1` on the same kernel and libraries.
+
+| NV12 output request | Current main | Fixation candidate |
+|---|---|---|
+| Colorimetry omitted | FAIL, exit 1, `Not support full csc mode [300]` | PASS, EOS, exit 0; output retains `2:4:7:1` |
+| Explicit `2:4:7:1` | PASS, EOS, exit 0 | PASS, EOS, exit 0 |
+| Explicit `bt709` | FAIL, exit 1, `Not support full csc mode [300]` | FAIL, same refusal; the explicit request is not overwritten |
+
+The candidate corrects metadata loss, not real BT.601→BT.709 conversion.
+The initial all-three-PASS gate was not met. The owner subsequently authorized
+`.3` with the explicit-BT.709 case recorded as a **KNOWN LIMITATION**, not a
+release blocker: librga rejects full CSC mode 300, a genuine capability gap
+whose fix is deferred to convergence todo 49 after librga R1 `1.10.5+ceralive.1`.
+The explicit request is neither dropped nor relabelled to pretend conversion
+succeeded. The two passing cases qualify the omitted-colorimetry fix.
+Neither CSC selection nor librga defaults changed. Rock rows are **NO-SOURCE**:
+the owner authorized this OPi-only run while Rock awaits physical inspection;
+no Rock contact was attempted.
+
+### Candidate d5, unchanged strict 40 dB floor
+
+Board: `7.2.0-ceralive-rk3588 #ceralive1 SMP PREEMPT @1788765300`,
+`librga2 2.2.0-1` (`rga_api version 1.10.1_[4]`), `librockchip-mpp1 1.5.0-1`.
+The existing d5 script and DMA-BUF helper ran unchanged. The software reference
+uses BT.709 for HD YUV and BT.601 for SD output, matching the helper's
+GstVideoInfo defaults; it is not the historical always-BT.601 oracle.
+Only orchestration changed: locked strict-host-key transport, Docker in place
+of Podman for the same helper compile, and three-second SSH pacing.
+
+| Operation | NV12 → NV16 | NV16 → NV12 | BGR → NV12 |
+|---|---|---|---|
+| CSC | PASS — inf/inf | PASS — inf/inf | EXPECTED-FAIL U3 — inf/38.54 |
+| Scale | EXPECTED-FAIL U3 — 47.69/34.12 | EXPECTED-FAIL U3 — 47.69/34.12 | EXPECTED-FAIL U3 — 49.52/38.28 |
+| Crop | PASS — 49.29/44.97 | PASS — 50.30/44.83 | EXPECTED-FAIL U3 — inf/34.30 |
+| Rotate | **FAIL — request rejected, EINVAL** | **FAIL — request rejected, EINVAL** | **FAIL — request rejected, EINVAL; U3 quality not measured** |
+
+Values are luma/chroma PSNR in dB. The five scored expected-fail cells match
+the exact historical U3 identities and fail only the chroma floor, with
+fallback=0, dropped=0 and layout-rejections=0. Their changed numeric scores
+are retained, not claimed equivalent to the old reference. The sixth U3 cell,
+BGR rotation, could not be quality-scored and must not be waived as U3.
+All three rotations report `OUTPUT_SEEN=0`, dropped=1, and the kernel logs
+`request validation failed before mapping`. Two of those cells previously
+passed historically; the d5 result remains **FAIL**, not expected-fail-only.
+The same-kernel A/B below establishes that the rotation submission failures are
+pre-existing, rather than introduced by this fix. The owner accepts them as
+separate, non-blocking follow-up work for `.3`; they are not U3 waivers.
+
+Raw full matrix: `test-results/board/d5-rgaconvert-matrix-20260908T041507Z/`.
+The earlier `20260908T041211Z` attempt lost SSH partway through and is retained
+as transport-incomplete, not merged into these results. U1/build/restore
+transcripts: `test-results/board/todo27-u1-transcripts.tar.gz`.
+After the failed acceptance gate, the checksum-verified published
+`1.14.4+ceralive.2` package was restored. No kernel, image pin, reboot, release,
+or merge was performed.
+
+### Same-kernel rotation A/B and release disposition
+
+Baseline `aa92bdd460bdc5454f16a70ebd7173dc63db78f9` was installed from the
+archived `1.14.4+ceralive.2+u1baseline.aa92bdd4` package (SHA-256
+`ac4676253e8779616e04d9bb3cf4fe563d36f8dc45e53c31197e74210dcebe05`). Only the
+three rotation cells ran, with the d5 script, helper source and 40 dB floor
+unchanged. All three reproduce the candidate's EINVAL/no-output failure and
+fallback=0, dropped=1, layout-rejections=0. The same boot journal contains both
+legs' `request validation failed before mapping` entries.
+
+| Pair | Candidate request | Baseline request | Provenance verdict |
+|---|---|---|---|
+| NV12 → NV16 | 3984 | 3987 | FAIL-ON-BASELINE-TOO — identical |
+| NV16 → NV12 | 3985 | 3988 | FAIL-ON-BASELINE-TOO — identical |
+| BGR → NV12 | 3986 | 3989 | FAIL-ON-BASELINE-TOO — identical |
+
+Raw baseline run: `test-results/board/d5-rgaconvert-matrix-20260908T043811Z/`.
+Both current legs use kernel `#ceralive1 SMP PREEMPT @1788765300`, slot B,
+`librga2 2.2.0-1` / API `1.10.1_[4]`. The historical September-4 PASS rows
+belong to kernel `#3 SMP PREEMPT Thu Sep 3 20:11:22 -05 2026`, slot A, and
+the earlier `.1` development plugin. Historical Radxa records identify the
+same librga lineage, but no run-specific historical dpkg receipt was recovered;
+no librga version change is claimed. The older-to-current rotation failure
+is a separate kernel-stack investigation, not a regression from this patch.
+Published `.2` was restored and checksum-verified after the A/B.
+
+**Owner-approved `.3` acceptance:** omitted colorimetry FIXED (FAIL→PASS),
+explicit `2:4:7:1` PASS, explicit BT.709 documented/deferred; d5 **4 PASS,
+5 expected U3 chroma FAIL, 3 independently reproduced pre-existing rotation
+FAIL**. Hardware failures retain those verdicts; release authorization does
+not turn them green. No CSC implementation, librga default, RGB bridge, kernel
+fix or image pin belongs to this change.
+
+### Commit-hook audit and scoped exception
+
+The owner explicitly authorized `git commit --no-verify` for the three U1
+commits, not a hook edit or a general exemption. The unchanged upstream-style
+hook formats every C/header file in `gst/rockchipmpp`, including files outside
+the staged diff. A non-mutating audit using GNU indent 2.2.12 and the hook's
+exact flags and two passes found these unrelated baseline mismatches:
+
+| File | Formatter pass exits | Finding |
+|---|---|---|
+| `gst/rockchipmpp/gstmppenc.h` | 0 / 0 | Formatting differs |
+| `gst/rockchipmpp/gstmppallocator.c` | 0 / 0 | Formatting differs |
+| `gst/rockchipmpp/gstmppenc.c` | 2 / 2 | Formatting differs; unmatched-else, statement-nesting and unexpected-EOF diagnostics |
+
+The audit stopped at the third mismatch. Raw audit output is retained locally
+as `test-results/t27-final/style-audit-results.log`, with per-file diff/stderr
+under `test-results/t27-final/style-audit.5wt9fW/`. None of those three source
+files or the hook is changed by U1. The exception avoids accepting unsafe
+formatter output for unrelated code; it does not bypass the RED/GREEN tests,
+hosted CI, independent review or merge-commit requirement.
