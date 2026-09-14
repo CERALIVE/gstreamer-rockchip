@@ -20,6 +20,106 @@ without an explicit `colorimetry` field write no color keys; renegotiation from
 specified to unspecified starts from a fresh MPP config so old values cannot
 leak into the new stream.
 
+sRGB transfer is also supported: GStreamer `GST_VIDEO_TRANSFER_SRGB` (enum 7)
+maps to `MPP_FRAME_TRC_IEC61966_2_1` (H.26x transfer code 13). The discriminating
+`2:4:7:1` tuple writes `prep:colorspace=6`, `prep:colorprim=1`,
+`prep:colortrc=13`, and `prep:range=MPP_FRAME_RANGE_MPEG`. Its expected SPS is
+`video_full_range_flag=0`, `matrix_coefficients=6`,
+`transfer_characteristics=13`, `colour_primaries=1`, with video-signal and
+colour-description presence flags set. The range enum itself is not the SPS
+full-range flag. This is metadata transport, not a pixel-conversion claim.
+
+### Unmapped values (unchanged)
+
+Each unsupported axis warns and returns before **any** of the four color-key
+writes. An unsupported explicit tuple on an already configured encoder can
+therefore leave prior color keys in place; "omitting VUI" describes skipped
+configuration, not a guarantee of absent bits. This separate behavior is not
+changed by adding sRGB.
+
+- Matrix: UNKNOWN, RGB/identity, FCC, SMPTE240M.
+- Primaries: UNKNOWN, BT470M, SMPTE240M, FILM, ADOBERGB, SMPTEST428,
+  SMPTERP431, SMPTEEG432, EBU3213.
+- Transfer: UNKNOWN, GAMMA10/18/20/22/28, SMPTE240M, LOG100/316, ADOBERGB,
+  SMPTE2084/PQ, ARIB_STD_B67/HLG.
+- Range: UNKNOWN; both defined full and limited ranges already map.
+
+All-UNKNOWN colorimetry is an intentional no-op. The named `sRGB` preset uses
+an RGB/identity matrix and is not interchangeable with YUV `2:4:7:1`; adding
+the transfer case does not add an RGB-matrix mapping or broaden negotiation.
+
+`tests/check/enc-colorimetry.c` checks the exact tuple from a cold start and
+BT.709→sRGB→BT.709 color-only caps transitions on both encoder factories.
+Before the fix, its two added cases failed with missing cold-start keys and
+stale BT.709 keys respectively. These are MPP configuration assertions, not
+hardware-generated bitstream evidence.
+
+### 2026-09-14 — sRGB SPS serialization evidence [PARTIAL]
+
+The plugin change is three added lines; inherited CRLF, factories, properties,
+defaults, caps negotiation and package pins are unchanged. Full arm64 builds
+and all **11/11 Meson suites** pass in bookworm/GStreamer 1.22.0 and
+trixie/GStreamer 1.26.2 under host QEMU user emulation. No suites skipped.
+Both MPP ABI-closure gates and GLIBC gate self-tests pass; the trixie plugin
+passes the repository's declared GLIBC floor. Both changed C files pass clangd
+with the bookworm target headers configured locally.
+
+For a stronger check than captured config alone, a separate process called the
+**real pinned library's software header writers**, not the mock's packet output:
+
+1. The actual plugin negotiated `bt709`→`2:4:7:1`→`bt709` at unchanged geometry
+   through GstHarness, once for each codec. The existing mock captured its four
+   `prep:*` values after each transition.
+2. An isolated serializer process, with **no `LD_PRELOAD`**, applied those
+   captured integers through real `mpp_enc_cfg_set_s32`. It used
+   `h264e_sps_update`/`h264e_sps_to_packet` for H.264 and
+   `h265e_set_extra_info`/`h265e_get_extra_info` for H.265. No `mpp_create`,
+   `mpp_init`, pixel buffers, frame submission or encoder device was used.
+3. A native host executable independently parsed the written Annex-B bytes
+   with GStreamer's H.264/H.265 codec parsers (1.28.7), asserting all presence
+   flags plus each leg's expected color values. It imports no MPP headers or
+   serializer code. Both pre-fix B files fail that oracle (exit 9); all six
+   post-fix files pass.
+
+The library is `librockchip-mpp1_1.5.0-1_arm64.deb`, package SHA-256
+`fe839d41010def25b2c096581815fd26214680bf9720fc47ff2c7afe501f6bcd`.
+Private struct declarations came from its release source,
+[`194af181db3a02a095c01db84e176d972e19b216`](https://github.com/tsukumijima/mpp-rockchip/tree/194af181db3a02a095c01db84e176d972e19b216).
+H.265's SoC query used the no-device-tree fallback, not an emulated RK3588.
+
+Every parsed file has one SPS, with `vui_parameters_present_flag=1`,
+`video_signal_type_present_flag=1`, `colour_description_present_flag=1`,
+`video_full_range_flag=0`, and `colour_primaries=1`:
+
+| Header input | H.264 transfer / matrix | H.265 transfer / matrix |
+|---|---|---|
+| Pre-fix B after A | **1 / 1 (wrong: stale BT.709)** | **1 / 1 (wrong: stale BT.709)** |
+| Fixed A | 1 / 1 | 1 / 1 |
+| Fixed B (`2:4:7:1`) | **13 / 6** | **13 / 6** |
+| Fixed return to A | 1 / 1 | 1 / 1 |
+
+Retained B artifacts:
+
+| Artifact | Bytes | SHA-256 |
+|---|---:|---|
+| H.264 SPS | 31 | `26851d20bd3e65cf03d52de6ee91e1a940bb3fd70958606f8b48aa353bd97075` |
+| H.265 VPS/SPS/PPS | 85 | `10d82223f16769f211a3e9d1182a1b4a9af5c8ac4887349936ce7d6c614c1f2c` |
+
+Local raw evidence, probe sources and logs are retained in the ignored
+`test-results/u6-srgb/` directory. The initial environment setup needed a
+root-capable isolated rootfs and correct temporary-directory permissions; an
+ABI-gate attempt also failed DNS until the resolver was mounted. These setup
+failures are not RED regression evidence. The actual RED cases are the two
+config regressions and the independently parsed stale-B headers above.
+
+**Proof boundary:** these are real MPP-generated parameter-set bytes, but no
+encoded picture or muxed stream was produced. This removes the demonstrated
+sRGB mapping obstruction and verifies SPS serialization, **not** hardware
+encoding, header delivery across a live switch, receiver continuity, pixel
+accuracy, or U6's ten cycles. A candidate package must still be deployed by the
+authorized hardware lane and its received muxed output parsed per active leg.
+U6 remains uncredited; no board, PR, tag or release operation was performed.
+
 Both upstream and downstream `GstForceKeyUnit` events request
 `MPP_ENC_SET_IDR_FRAME` for the next submitted frame. With
 `header-mode=each-idr`, that access unit also carries `GST_BUFFER_FLAG_HEADER`.

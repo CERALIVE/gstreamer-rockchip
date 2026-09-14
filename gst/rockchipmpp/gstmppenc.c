@@ -691,6 +691,9 @@ gst_mpp_enc_apply_colorimetry (GstMppEnc * self,
     case GST_VIDEO_TRANSFER_BT709:
       transfer = MPP_FRAME_TRC_BT709;
       break;
+    case GST_VIDEO_TRANSFER_SRGB:
+      transfer = MPP_FRAME_TRC_IEC61966_2_1;
+      break;
     case GST_VIDEO_TRANSFER_BT2020_10:
       transfer = MPP_FRAME_TRC_BT2020_10;
       break;
