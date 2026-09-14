@@ -186,6 +186,12 @@ The following are compatibility contracts, not cleanup opportunities:
   explicit sink colorimetry reaches MPP VUI config without guessing absent
   values; both force-key-unit directions request IDR; and the no-B-frame output
   contract is `DTS = PTS`. The read-only `encoder-restarts` counter is additive.
+  The sRGB transfer mapping [EXISTS] preserves `2:4:7:1` as limited-range
+  BT.601 matrix / IEC 61966-2-1 transfer / BT.709 primaries. GStreamer transfer
+  enum 7 maps to MPP/H.26x code 13, not 7. Host config tests cover cold starts
+  and color-only BT.709↔sRGB renegotiation for both codecs; hardware output and
+  ten-cycle live-switch acceptance remain separate gates. See the encoder
+  runtime contract for unmapped values and the bitstream evidence boundary.
 - **RGA conversion:** `/dev/rga` must pass the driver-version ioctl before use;
   librga init alone is never sufficient. Blit health is isolated per operation
   and format pair. MPP/`rgaconvert` CPU staging remains debug-only behind

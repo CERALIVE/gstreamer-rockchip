@@ -61,6 +61,12 @@ Encoder latency, bounded context recovery, colorimetry/VUI configuration,
 forced-IDR handling, and the PTS/DTS contract are documented in
 [`docs/ENCODER-RUNTIME-CONTRACT.md`](docs/ENCODER-RUNTIME-CONTRACT.md).
 
+The encoder also maps sRGB transfer for explicitly tagged YUV input, including
+`2:4:7:1` (limited range, BT.601 matrix, sRGB transfer, BT.709 primaries).
+This writes IEC 61966-2-1 transfer code 13 to MPP rather than omitting all VUI
+color keys. Cold-start and color-only renegotiation regressions run without a
+board; they do not qualify hardware output or live-switch continuity.
+
 ## RGA conversion safety
 
 The MPP encoder and decoders treat librga as available only after `/dev/rga`
