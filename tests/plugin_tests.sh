@@ -82,3 +82,5 @@ if bash "$MESON_SOURCE_ROOT/tests/parity-check.sh" --check-capabilities \
 fi
 grep -Fq 'advertises NV16_10LE40 although HAVE_NV16_10LE40 is not defined' \
   "$tmpdir/wrong-advertisement.log"
+
+bash "$MESON_SOURCE_ROOT/tests/parity-comparator.test.sh"

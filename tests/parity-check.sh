@@ -237,7 +237,8 @@ check_reference_golden_hashes() {
 
 check_source_contract() {
   local contract=$1 golden_dir=$2 label=$3
-  local element expected golden key needle
+  local element expected golden key needle golden_line loaded_golden=
+  local -A golden_lines=()
   while IFS=$'\t' read -r element expected; do
     [[ -z "$element" || "$element" == \#* ]] && continue
     golden="$golden_dir/$element.golden"
@@ -250,7 +251,14 @@ check_source_contract() {
       fi
       continue
     fi
-    if ! grep -Fqx "$expected" "$golden"; then
+    if [[ "$loaded_golden" != "$golden" ]]; then
+      golden_lines=()
+      while IFS= read -r golden_line || [[ -n "$golden_line" ]]; do
+        golden_lines["line:$golden_line"]=1
+      done < "$golden"
+      loaded_golden=$golden
+    fi
+    if [[ ! ${golden_lines["line:$expected"]+present} ]]; then
       echo "parity: source-derived contract missing from $element golden: $expected" >&2
       return 1
     fi
@@ -261,6 +269,13 @@ check_source_contract() {
 compare_expected_lines() {
   local element=$1 actual=$2 expected=$3
   local line key current actual_line key_count
+  local -A actual_lines=()
+
+  # Hundreds of emulated grep startups can exhaust the registration deadline.
+  # Index literal whole lines once; keep the stricter caps multiplicity check.
+  while IFS= read -r actual_line || [[ -n "$actual_line" ]]; do
+    actual_lines["line:$actual_line"]=1
+  done < "$actual"
 
   while IFS= read -r line; do
     if [[ "$line" == sink_caps=* || "$line" == src_caps=* ]]; then
@@ -280,7 +295,7 @@ compare_expected_lines() {
       fi
       continue
     fi
-    if ! grep -Fqx "$line" "$actual"; then
+    if [[ ! ${actual_lines["line:$line"]+present} ]]; then
       echo "parity: $element removed or changed baseline line:" >&2
       echo "  $line" >&2
       return 1
