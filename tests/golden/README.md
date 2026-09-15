@@ -29,3 +29,9 @@ every non-comment baseline line and permits additional properties. It separately
 asserts that `NV12_10LE40` and `NV16_10LE40` presence matches the same generated
 feature macros used to compile the plugin, so variant selection cannot mask a
 wrong capability advertisement.
+
+The active encoder sink goldens add a linear NV12 `memory:DMABuf` alternative
+for the composition boundary. The original plain-caps prefix remains unchanged;
+the comparator still checks exact caps and rejects removals or arbitrary changes.
+This addition is host-tested on the actual plugin, not a new board inspection
+or a revision of the historical capture provenance in the golden headers.

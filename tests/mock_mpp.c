@@ -129,6 +129,7 @@ static MockPacket enc_packets[ENC_PACKET_CAPACITY];
 static atomic_uint enc_live_buffers;
 static atomic_int buffer_import_failure_armed;
 static atomic_uint buffer_import_calls;
+static atomic_int last_import_fd;
 static atomic_uint buffer_inc_ref_calls;
 /* One-shot: the next buffer MPP hands out carries a dmafd the CPU cannot map. */
 static atomic_int buffer_unmappable_armed;
@@ -758,6 +759,7 @@ MPP_RET mpp_buffer_import_with_tag(MppBufferGroup group, MppBufferInfo *info,
     return MPP_NOK;
   *buffer = NULL;
   atomic_fetch_add(&buffer_import_calls, 1);
+  atomic_store(&last_import_fd, info->fd);
   if (atomic_exchange(&buffer_import_failure_armed, 0))
     return MPP_NOK;
   return mpp_buffer_get_with_tag(group, buffer, info->size, tag, caller);
@@ -1361,6 +1363,9 @@ void mpp_mock_fail_next_buffer_import(void) {
 unsigned mpp_mock_buffer_import_calls(void) {
   return atomic_load(&buffer_import_calls);
 }
+int mpp_mock_last_import_fd(void) {
+  return atomic_load(&last_import_fd);
+}
 unsigned mpp_mock_buffer_inc_ref_calls(void) {
   return atomic_load(&buffer_inc_ref_calls);
 }
@@ -1613,6 +1618,7 @@ void mpp_mock_reset(void) {
   atomic_store(&enc_live_buffers, 0);
   atomic_store(&buffer_import_failure_armed, 0);
   atomic_store(&buffer_import_calls, 0);
+  atomic_store(&last_import_fd, -1);
   atomic_store(&buffer_inc_ref_calls, 0);
   atomic_store(&buffer_unmappable_armed, 0);
   atomic_store(&buffer_unmappable_handed_out, 0);

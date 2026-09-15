@@ -4,7 +4,7 @@
 # Intentional divergence: inherited pre-fork cf155b3 renamed bps* to bitrate*; workspace plan history records the consumer-migration decision.
 element=mpph264enc
 rank=257
-sink_caps=video/x-raw format: { (string)NV12, (string)I420, (string)YUY2, (string)UYVY, (string)BGR16, (string)RGB16, (string)BGR, (string)RGB, (string)ABGR, (string)ARGB, (string)BGRA, (string)RGBA, (string)xBGR, (string)xRGB, (string)BGRx, (string)RGBx, (string)NV12, (string)NV21, (string)I420, (string)YV12, (string)NV16, (string)NV61, (string)BGR16, (string)RGB, (string)BGR, (string)RGBA, (string)BGRA, (string)RGBx, (string)BGRx, (string)NV24, (string)Y444 } width: [ 96, 2147483647 ] height: [ 64, 2147483647 ]
+sink_caps=video/x-raw format: { (string)NV12, (string)I420, (string)YUY2, (string)UYVY, (string)BGR16, (string)RGB16, (string)BGR, (string)RGB, (string)ABGR, (string)ARGB, (string)BGRA, (string)RGBA, (string)xBGR, (string)xRGB, (string)BGRx, (string)RGBx, (string)NV12, (string)NV21, (string)I420, (string)YV12, (string)NV16, (string)NV61, (string)BGR16, (string)RGB, (string)BGR, (string)RGBA, (string)BGRA, (string)RGBx, (string)BGRx, (string)NV24, (string)Y444 } width: [ 96, 2147483647 ] height: [ 64, 2147483647 ] video/x-raw(memory:DMABuf) format: NV12 width: [ 96, 2147483647 ] height: [ 64, 2147483647 ]
 src_caps=video/x-h264 width: [ 96, 2147483647 ] height: [ 64, 2147483647 ] stream-format: { (string)byte-stream } alignment: { (string)au } profile: { (string)baseline, (string)main, (string)high }
 property.anti-flicker.type=Unsigned Integer
 property.anti-flicker.default=0
