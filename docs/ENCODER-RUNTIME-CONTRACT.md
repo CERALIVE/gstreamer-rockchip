@@ -88,6 +88,44 @@ allowed in any ten-second window. A fourth failure posts
 read-only `encoder-restarts` property reports successful restarts over the
 element lifetime.
 
+### Hardware-error propagation gap [PARTIAL]
+
+**The bounded restart exists, but real hardware task failures cannot trigger it
+through the pinned library's configured async APIs.** This is a production
+recovery/observability gap, not just a test-harness limitation. No propagation
+fix or libmpp-pin change is implemented by the test-only interposer.
+
+Verified against installed `.4` source
+`f8960191ea14360347ceb9b96b6dce72f26b743d` and main
+`f84526ae1264bf1d4975d0eb4f4e2f9002f87ba5`: both have encoder blob
+`2d18d7ebfbb93f1359dd67577f00343e87230bd1`. The plugin sets nonblocking input
+and a 1ms output timeout (`gstmppenc.c:1204–1214`), rejects NOK/TIMEOUT as restart
+stimuli (`1315–1326`) and increments only after successful recreation (`1299`).
+The public call sites are `2194–2198` and `2229–2232`.
+
+Pinned MPP source `194af181db3a02a095c01db84e176d972e19b216` supplies the missing
+cross-layer link:
+
+- [`mpp/mpp.cpp:820–891`](https://github.com/tsukumijima/mpp-rockchip/blob/194af181db3a02a095c01db84e176d972e19b216/mpp/mpp.cpp#L820-L891):
+  async put returns only OK/NOK; async get only OK/NOK/TIMEOUT. None triggers
+  the plugin restart on this valid initialized path.
+- [`mpp/codec/mpp_enc_impl.cpp:3258–3314`](https://github.com/tsukumijima/mpp-rockchip/blob/194af181db3a02a095c01db84e176d972e19b216/mpp/codec/mpp_enc_impl.cpp#L3258-L3314):
+  a worker failure forces a future IDR and queues a zero-length packet. Get
+  returns OK for that packet; plugin `2260–2269,2324–2329` drops it as though it
+  were a rate-control drop. An empty packet does not uniquely identify a fault.
+- [`hal_h265e_vepu580.c:3306–3319`](https://github.com/tsukumijima/mpp-rockchip/blob/194af181db3a02a095c01db84e176d972e19b216/mpp/hal/rkenc/h265e/hal_h265e_vepu580.c#L3306-L3319):
+  H.265's non-split path overwrites the poll return with hardware-status checking,
+  potentially swallowing the error even before worker completion.
+
+The [standalone MPI test](../tests/mpi-interposer/README.md) proves a qualifying
+public error causes the unchanged plugin to restart and continue synthetic host
+output. **It does not satisfy item 30's island-knob requirement.** A separately
+scoped cross-layer bridge or approved propagation change must preserve task-error
+provenance through HAL, worker and public MPI, including H.265's earlier overwrite,
+without confusing legitimate rate-control drops or breaking frame ownership.
+Another kernel errno knob cannot extend the public async return set. MNH-27's
+libmpp freeze remains intact; no hardware result follows from these host tests.
+
 Negotiated BT.601, BT.709, and BT.2020 colorimetry is written to MPP's
 `prep:colorspace`, `prep:colorprim`, `prep:colortrc`, and `prep:range` keys.
 Full range maps to MPP's JPEG range and limited range maps to MPEG range. Caps

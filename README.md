@@ -61,6 +61,11 @@ Encoder latency, bounded context recovery, colorimetry/VUI configuration,
 forced-IDR handling, and the PTS/DTS contract are documented in
 [`docs/ENCODER-RUNTIME-CONTRACT.md`](docs/ENCODER-RUNTIME-CONTRACT.md).
 
+Use the [standalone MPI interposer tests](tests/mpi-interposer/README.md) for
+host-only recovery checks. They prove plugin recovery from an injected public
+MPI error, not hardware error propagation or item 30's island-knob requirement.
+The interposer is excluded from production builds and is never installed.
+
 The encoder also maps sRGB transfer for explicitly tagged YUV input, including
 `2:4:7:1` (limited range, BT.601 matrix, sRGB transfer, BT.709 primaries).
 This writes IEC 61966-2-1 transfer code 13 to MPP rather than omitting all VUI
