@@ -52,3 +52,20 @@ test('rockchiprga rgacompositor layouts and DMA-BUF aggregation',
   depends : rockchiprga,
   workdir : meson.project_build_root(),
   is_parallel : false)
+
+if mpp_dep.found()
+  enc_dmabuf = executable('enc-dmabuf', '../../tests/check/enc-dmabuf.c',
+    dependencies : [gst_dep, gstvideo_dep, gstallocators_dep, gstcheck_dep],
+    link_with : mock_mpp)
+  test('rockchipmpp compositor DMA-BUF boundary', enc_dmabuf,
+    depends : [rockchipmpp, rockchiprga, mock_mpp],
+    env : [
+      'GST_PLUGIN_PATH=' + meson.project_build_root() / 'gst/rockchipmpp' + ':' +
+        meson.project_build_root() / 'gst/rockchiprga',
+      'LD_PRELOAD=' + meson.project_build_root() / 'gst/rockchipmpp/libmppmock.so',
+      'GST_MPP_ALLOW_CPU_COPY=0',
+      'GST_MPP_NO_RGA=1',
+    ],
+    workdir : meson.project_build_root(),
+    is_parallel : false)
+endif

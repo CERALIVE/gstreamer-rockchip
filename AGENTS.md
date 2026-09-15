@@ -181,6 +181,13 @@ The following are compatibility contracts, not cleanup opportunities:
 - **Caps and allocation:** existing golden caps are additive-only. The MPP
   encoder's DMA-BUF pool, 1080-to-1088 `GstVideoAlignment`, and DMA32 allocator
   request are runtime contracts.
+  H.264/H.265 sinks additionally accept linear NV12 `memory:DMABuf`, so the
+  DMA-BUF-only compositor can link through a queue and preview tee. Plain caps
+  remain supported; caps features and actual buffer backing are distinct.
+  `tests/check/enc-dmabuf.c` exercises real pad links and the existing FD-import
+  path with CPU copying and RGA conversion disabled. This is host software
+  coverage, not item-30 composition or per-frame board FD qualification; see
+  `docs/ENCODER-RUNTIME-CONTRACT.md` for the separate 1080p30 finding.
 - **Encoder runtime hygiene:** latency follows the tracked pending depth;
   non-timeout MPP failures get at most three context restarts per ten seconds;
   explicit sink colorimetry reaches MPP VUI config without guessing absent

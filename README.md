@@ -110,6 +110,14 @@ pixel operation. Both factories remain discoverable without hardware, but
 NULL→READY fails with a typed error when `/dev/rga` does not pass the shared
 driver-version trial.
 
+The H.264/H.265 encoder sinks accept linear NV12 `video/x-raw(memory:DMABuf)`
+alongside their existing plain raw caps. This lets the compositor negotiate
+through a queue/tee into the encoder's existing FD-import path without a CPU
+converter or feature-stripping adapter. Host regressions cover all six presets
+and both codecs; real-source composition endurance and per-frame FD identity
+still require board qualification. The separate ordinary 1080p30 PLAYING failure
+remains unresolved in the [runtime contract](docs/ENCODER-RUNTIME-CONTRACT.md).
+
 ## Upstream lineage and credits
 
 This repository descends from the Rockchip plugin code through the JeffyCN,

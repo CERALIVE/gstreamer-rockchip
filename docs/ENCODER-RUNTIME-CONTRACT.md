@@ -1,5 +1,80 @@
 # Encoder runtime contract
 
+## Composition DMA-BUF boundary [EXISTS]
+
+The H.264/H.265 sink templates retain their plain raw caps and add **linear
+NV12** with `memory:DMABuf`. No DMA_DRM/modifier, deep-colour, new factory or
+property contract is added. No allocation, alignment, conversion or pixel code
+changes: accepted buffers still use `gst_mpp_enc_convert()`'s existing
+`gst_mpp_allocator_import_gst_memory()` path. Incompatible memory/layouts retain
+the existing fail-closed production behavior; advertising a feature does not
+make every layout directly importable.
+
+### Root cause and single-source contrast
+
+The installed item-30 control refused `rgacompositor ! queue ! tee ! mpph265enc`
+before opening a capture source. The owner is **element pad templates**, not
+engine graph construction: the pre-fix `gstmpph265enc.c:176–182` and
+`gstmpph264enc.c:117–123` advertised plain `video/x-raw` only, whereas
+`gst/rockchiprga/gstrgacompositor.c:22–34` advertises DMA-BUF-only NV12 output.
+Queue and tee propagate that incompatibility; a capsfilter cannot manufacture
+an intersection between those features.
+
+The successful ordinary HDMI control is not contradictory. In cerastream
+`100e84e`, `crates/cerastream/src/engine/encode.rs` constructs plain raw
+`leg_output_caps` for switching. Composition uses explicit DMA-BUF input caps
+and the compositor's DMA-BUF-only src template. **Plain caps do not prove a CPU
+copy:** the actual `GstMemory` can still be DMA-BUF and take the encoder's import
+path. Conversely, explicit DMA-BUF caps alone are not an FD-identity proof.
+
+`tests/check/enc-dmabuf.c` attempts actual `gst_pad_link()` calls through the
+real compositor, queue, tee and encoder elements for all six presets and both
+codecs. Before the template change, the H.265 row reports
+`preview_tee -> mpph265enc refused: no common format`; an explicit-DMA-BUF frame
+push returns `GST_FLOW_NOT_NEGOTIATED`. The plain-caps import control passes.
+After the change, all links succeed with DMA-BUF-only queried caps.
+
+Separate GstHarness cases push aligned NV12 at 1920×1080p30 (1088-row storage)
+and 3840×2160p60000/1001 under both explicit and plain caps. They require mock
+encoded output, the original FD at the real plugin's MPP import call, retained
+negotiated features and zero `conversion-fallback-frames`,
+`conversion-dropped-frames`, and `layout-rejections`, with CPU fallback and RGA
+conversion disabled. The host memfd is marked non-mappable. Mock MPP records
+the import argument but allocates its own stand-in storage: these checks prove
+plugin dispatch, **not hardware FD identity or decoded video**.
+
+Full arm64 builds and all **12/12 Meson suites** pass under host QEMU in
+Bookworm/GStreamer 1.22.0 and Trixie/GStreamer 1.26.2, with no skipped suites.
+Both MPP ABI-closure checks and GLIBC-gate self-tests pass; the declared
+Bookworm target passes its GLIBC floor. The static package contract passes.
+
+### Separate finding: ordinary 1080p30 PLAYING failure [PARTIAL]
+
+Retained `RUN-30-OPI-20260915` evidence at root ledger commit `847318bd`
+(`docs/media-island/ledger/phase7.md`, `job-005-observe.sh.log` and
+`job-008-caps-controls.sh.log`) shows the non-composited 1080p30 request passed
+linking but returned `pipeline did not reach PLAYING: Element failed to change
+its state` at monotonic 41345.672456372. The later native 4K59.94 control decoded
+1,156 frames over 19.285933 seconds with BT.709 primaries/transfer/matrix and
+limited range. That is historical control evidence, not this patch's board QA.
+
+The retained logs do not name the failing element or contain its GStreamer
+ERROR/debug details. Lower output geometry/rate requires additional upstream
+normalization relative to the native mode, but scaling, rate negotiation,
+allocation, capture state and encoder activation are not distinguished by
+these receipts. This is a separate **failure stage**, not a proven independent
+root cause and not a failure this caps-only patch claims to fix. A future
+authorized diagnostic needs caps/state tracing armed before the ordinary
+1080p30 Start, the per-element bus error and conversion counters, followed by
+the unchanged native control. No such board run was authorized for this fix.
+
+Item 30 remains open until the real-source >=600-second composition, per-frame
+FD trace, zero counters, VUI and IDR rows pass. Ten-minute UVC power endurance
+was never exercised and remains **untested**, not power-failed. No board access,
+installation, camera change, merge, tag or release is part of this software fix.
+
+## Latency, recovery and colorimetry
+
 The MPP H.264 and H.265 encoders report one frame of codec work plus the
 currently tracked pending depth as fixed latency. The value is recalculated
 after each successful `MPP_ENC_SET_CFG` application.
