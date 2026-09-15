@@ -293,6 +293,24 @@ trixie/GStreamer 1.26 environments. The mock-MPP suites prove software state,
 ownership, caps construction, and MPP ABI closure; they do not emulate RK3588 DMA
 addresses, RGA2, or the encoder firmware.
 
+The registration/parity checker indexes literal golden lines in Bash rather than
+launching a process per line; the latter exhausted its unchanged 30-second
+deadline under QEMU. Caps multiplicity and every baseline comparison remain
+enforced. `tests/parity-comparator.test.sh` runs inside the registration gate and
+rejects per-line grep launches while covering literal matching and negative cases.
+
+The standalone **test-only MPI interposer [EXISTS]** is in
+[`tests/mpi-interposer/`](tests/mpi-interposer/README.md). Build Check runs its
+separate debug-only gate after the existing tests; it is absent from the
+production build graph and has no install targets. It injects one pre-submit
+`MPP_ERR_STREAM` on an explicitly selected healthy context, never writes the
+counter and never changes plugin recovery or libmpp. Its independently decoded
+synthetic host-output test is **not** a live engine/session or hardware receipt,
+and does **not** discharge item 30's literal island-knob row. The production
+async-error propagation gap and H.265 poll-error overwrite are recorded in
+[`docs/ENCODER-RUNTIME-CONTRACT.md`](docs/ENCODER-RUNTIME-CONTRACT.md#hardware-error-propagation-gap-partial).
+Do not replace that finding with another kernel errno knob or ship this harness.
+
 The board suite is deliberately outside Meson:
 
 | Drill | Hardware claim |
