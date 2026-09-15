@@ -199,6 +199,13 @@ jobs:
       - name: meson test
         run: meson test -C build --print-errorlogs
 
+      - name: Standalone test-only MPI interposer gate
+        run: |
+          set -euo pipefail
+          apt-get install -y --no-install-recommends ffmpeg shellcheck
+          shellcheck tests/mpi-interposer/check.sh
+          CC="ccache gcc" bash tests/mpi-interposer/check.sh build
+
       - name: Verify the plugin was built
         run: |
           set -euo pipefail
