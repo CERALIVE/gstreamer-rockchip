@@ -1,0 +1,2 @@
+option('test-only', type: 'boolean', value: false,
+       description: 'Explicitly authorize the standalone MPI fault-injection test build')
