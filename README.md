@@ -37,7 +37,7 @@ The RK3588 build requires GStreamer development headers, Rockchip MPP, librga,
 libdrm, and X11 development files. The repository's CI scripts install the pinned
 MPP/RGA development packages used by the device contract. RGA uses the paired
 `librga-ceralive-dev` and `librga2-ceralive` packages from the CeraLive librga
-R0 release `1.10.1+ceralive.1`, with URLs and SHA-256 pins in `ci/mpp-pin.env`.
+R1 release `1.10.5+ceralive.1`, with URLs and SHA-256 pins in `ci/mpp-pin.env`.
 The runtime retains `librga.so.2` and provides `librga2 (= 2.2.0)`. The plugin
 package therefore keeps its `librga2` virtual dependency, also allowing the
 legacy Radxa runtime for rollback; it does not depend on the provider's new name.
@@ -46,26 +46,25 @@ The two required Build Check lanes deliberately use different RGA inputs:
 
 | Build environment | RGA runtime / headers | What a green result proves |
 |---|---|---|
-| Bookworm / GStreamer 1.22 / arm64 | Prior Radxa `librga2` / `librga-dev` `2.2.0-1` | Plugin source, tests and packaging work with the older toolchain and RGA pair; **not R0 binary compatibility**. |
-| Trixie / GStreamer 1.26 / arm64 | CeraLive R0 `1.10.1+ceralive.1` | Plugin build and tests with the shipping RGA configuration; not board qualification. |
+| Bookworm / GStreamer 1.22 / arm64 | Prior Radxa `librga2` / `librga-dev` `2.2.0-1` | Plugin source, tests and packaging work with the older toolchain and RGA pair; **not R0/R1 binary compatibility**. |
+| Trixie / GStreamer 1.26 / arm64 | CeraLive R1 `1.10.5+ceralive.1` | Plugin build and tests with the pinned RGA configuration; not board qualification. |
 
 Only Bookworm's dependency-install step sets `RGA_COMPAT_SUITE=bookworm`.
 The installer verifies the actual distro before using the compatibility pair;
-unknown selectors fail. With no selector, `ci/mpp-pin.env` retains R0. Neither
+unknown selectors fail. With no selector, `ci/mpp-pin.env` selects R1. Neither
 lane is optional, and their failures still fail `Build Check summary`.
 
-The published **librga R0 dependency** (`librga2-ceralive`, not this plugin
-package) requires `libc6 (>= 2.38)` and actually imports
-`__isoc23_sscanf@GLIBC_2.38` and `__isoc23_strtol@GLIBC_2.38`. Bookworm has
+The published **librga R0/R1 dependency** (`librga2-ceralive`, not this plugin
+package) requires `libc6 (>= 2.38)`. Bookworm has
 glibc 2.36, so lowering `Depends` or forcing installation is not a solution.
 This is distinct from the plugin's Trixie release contract, which declares
-`libc6 (>= 2.41)`. Retargeting the plugin does not rebuild or alter R0's bytes.
+`libc6 (>= 2.41)`. Retargeting the plugin does not rebuild or alter librga's bytes.
 No Bookworm librga build is planned. CeraLive's APT publishes Trixie variants
 only, so the Bookworm lane's legacy Radxa pair is a permanent input rather than
 a stopgap: it keeps the GStreamer 1.22 build and test coverage alive without
-claiming R0-on-Bookworm support. librga's own Bookworm CI jobs compile and test
-the source there for the same portability reason and publish nothing. R1 is
-not pinned. See [`AGENTS.md`](AGENTS.md#release-publishing-policy).
+claiming R0/R1-on-Bookworm support. librga's own Bookworm CI jobs compile and test
+the source there for the same portability reason and publish nothing.
+See [`AGENTS.md`](AGENTS.md#release-publishing-policy).
 
 ```bash
 bash ci/install-build-deps.sh
@@ -88,7 +87,7 @@ closure and plugin registration. Only the Trixie `.deb` and checksum reach the
 GitHub release and APT dispatch. The Bookworm package has a `~bookworm` suffix
 and stays in an internal `portability-bookworm` artifact; it is not published.
 Both install smokes must pass. This preserves source/package portability,
-not R0 binary compatibility on Bookworm or hardware qualification.
+not R0/R1 binary compatibility on Bookworm or hardware qualification.
 
 Build the arm64 Debian package with:
 

@@ -154,9 +154,9 @@ in `ci/mpp-pin.env`: its `rga/im2d_version.h`
 identifies **1.10.1_[4]**, not API 2.2.0. `rga/im2d_type.h` defines the buffer
 field and `IM_COLOR_SPACE_MODE`; `rga/im2d_single.h` declares the seven-argument
 C `improcess()`. CSC is a buffer attribute, **not a usage flag**.
-Trixie now builds against the paired CeraLive R0 `1.10.1+ceralive.1` assets.
+Trixie now builds against the paired CeraLive R1 `1.10.5+ceralive.1` assets.
 The [build matrix boundary](../README.md#build) distinguishes legacy-source
-portability from R0 binary compatibility; neither lane proves hardware CSC.
+portability from R0/R1 binary compatibility; neither lane proves hardware CSC.
 
 `rgaconvert` reuses the input/output `GstVideoInfo` snapshots parsed in
 `gst_rga_convert_set_caps()`, including the existing DMA_DRM caps path.
