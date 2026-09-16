@@ -323,6 +323,14 @@ The following are compatibility contracts, not cleanup opportunities:
   and the OPi allocation profile are recorded in
   [`docs/notes/allocation-pool-lifetime.md`](docs/notes/allocation-pool-lifetime.md).
 
+  **Compositor allocator lifetime [EXISTS].** Its allocation callback finishes
+  with the configured DMA-BUF pool and explicit 16-byte allocation alignment.
+  Do not re-enter the generic video-aggregator allocation callback: its allocator
+  alignment loop leaks a transfer-full parser reference on the tested GStreamer
+  1.22/1.26 versions. The regression independently weak-watches the compositor
+  and its allocator through real composed-buffer teardown. This is separate from
+  the converter pool-reference fix and from the RSS acceptance criterion.
+
   **Composition remains hardware-blocked on librga R0.** The instrumented OPi-B
   run returns `improcess=-1` (`IM_STATUS_NOT_SUPPORTED`), `errno=0`, with R0's
   `Blend mode background layer unsupport non-RGB format, dst format = 0xa00(nv12)`.
