@@ -26,7 +26,7 @@ if [[ -n "${RGA_COMPAT_SUITE:-}" ]]; then
   fi
 fi
 printf 'RGA inputs: %s + %s (compatibility suite: %s)\n' \
-  "${RGA_RUNTIME_DEB}" "${RGA_DEV_DEB}" "${RGA_COMPAT_SUITE:-none; R0 release pair}"
+  "${RGA_RUNTIME_DEB}" "${RGA_DEV_DEB}" "${RGA_COMPAT_SUITE:-none; R1 release pair}"
 
 export DEBIAN_FRONTEND=noninteractive
 
