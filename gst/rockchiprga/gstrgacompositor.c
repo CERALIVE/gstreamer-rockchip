@@ -951,6 +951,7 @@ gst_rga_compositor_decide_allocation (GstAggregator * aggregator,
     GstQuery * query)
 {
   GstRgaCompositor *self = GST_RGA_COMPOSITOR (aggregator);
+  GstAllocationParams params = { .align = 15 };
   GstAllocator *allocator;
   GstBufferPool *pool;
   GstVideoInfo info;
@@ -976,14 +977,15 @@ gst_rga_compositor_decide_allocation (GstAggregator * aggregator,
   else
     gst_query_set_nth_allocation_pool (query, 0, pool, size, 2, 0);
   if (gst_query_get_n_allocation_params (query) == 0)
-    gst_query_add_allocation_param (query, allocator, NULL);
+    gst_query_add_allocation_param (query, allocator, &params);
   else
-    gst_query_set_nth_allocation_param (query, 0, allocator, NULL);
+    gst_query_set_nth_allocation_param (query, 0, allocator, &params);
   gst_object_unref (pool);
   gst_object_unref (allocator);
 
-  return GST_AGGREGATOR_CLASS
-      (gst_rga_compositor_parent_class)->decide_allocation (aggregator, query);
+  /* Our aligned DMA-BUF pool is complete. Generic video allocation renegotiates
+   * it and leaks an owned allocator reference on GStreamer 1.26.2. */
+  return TRUE;
 }
 
 static gboolean

@@ -1122,6 +1122,46 @@ GST_START_TEST (test_im2d_diagnostics_preserve_status_errno_and_failure_stage)
 }
 GST_END_TEST;
 
+GST_START_TEST (test_allocator_finalizes_after_composed_teardown)
+{
+  FakeRga fake = { .available = TRUE,
+    .process_result = IM_STATUS_SUCCESS,
+    .composite_result = IM_STATUS_SUCCESS };
+  TestHarness test = test_harness_new (&fake, TRUE);
+  GWeakRef lifetime;
+  GWeakRef compositor_lifetime;
+  GstAllocationParams params;
+  GstAllocator *observed;
+  GstElement *owner;
+  GstBuffer *output;
+
+  g_weak_ref_init (&lifetime, test.allocator);
+  g_weak_ref_init (&compositor_lifetime, test.output->element);
+  owner = g_weak_ref_get (&compositor_lifetime);
+  fail_unless (owner == test.output->element);
+  gst_object_unref (owner);
+  output = push_pair_and_pull (&test);
+  fail_unless (gst_buffer_peek_memory (output, 0)->allocator == test.allocator);
+  gst_aggregator_get_allocator (GST_AGGREGATOR (test.output->element),
+      &observed, &params);
+  fail_unless (observed == test.allocator);
+  fail_unless_equals_int (params.align, 15);
+  gst_object_unref (observed);
+  observed = g_weak_ref_get (&lifetime);
+  fail_unless (observed == test.allocator);
+  gst_object_unref (observed);
+  gst_buffer_unref (output);
+  test_harness_clear (&test);
+  fail_unless (g_weak_ref_get (&compositor_lifetime) == NULL,
+      "compositor itself retained after harness teardown");
+  g_weak_ref_clear (&compositor_lifetime);
+  observed = g_weak_ref_get (&lifetime);
+  fail_unless (observed == NULL,
+      "compositor allocator retained after composed pipeline teardown");
+  g_weak_ref_clear (&lifetime);
+}
+GST_END_TEST;
+
 static Suite *
 rgacompositor_suite (void)
 {
@@ -1129,6 +1169,7 @@ rgacompositor_suite (void)
   TCase *test_case = tcase_create ("element");
 
   tcase_set_timeout (test_case, 30);
+  tcase_add_test (test_case, test_allocator_finalizes_after_composed_teardown);
   tcase_add_test (test_case, test_pad_factory_and_property_contract);
   tcase_add_test (test_case, test_blend_colorimetry_reaches_improcess);
   tcase_add_test (test_case, test_primary_color_survives_unconstrained_output);

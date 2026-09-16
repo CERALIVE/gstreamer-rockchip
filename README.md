@@ -189,6 +189,13 @@ The [pool lifetime note](docs/notes/allocation-pool-lifetime.md) distinguishes
 the proven reference leak from allocator RSS warmup; no heap-trimming workaround
 or full acceptance pass is implied.
 
+The compositor also completes allocation negotiation with its own aligned
+DMA-BUF pool, without re-entering the generic video-aggregator allocation path.
+That parent path retains an extra allocator reference on the tested GStreamer
+versions. A composed-buffer lifecycle regression covers allocator destruction
+independently of element destruction; the same lifetime note records the
+call-site profile, positive controls and the separate RSS acceptance limit.
+
 ## Upstream lineage and credits
 
 This repository descends from the Rockchip plugin code through the JeffyCN,
