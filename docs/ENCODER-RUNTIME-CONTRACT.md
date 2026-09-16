@@ -1,5 +1,42 @@
 # Encoder runtime contract
 
+## Composition primary color selection [EXISTS]
+
+The 2026-09-16 OPi trace follows BT.709 from HDMI NV16 through `rgaconvert`,
+rate normalization and the capture queue, then observes BT.601 at compositor
+src and encoder input. Independent ffprobe output reports SMPTE170M primaries,
+transfer and matrix. The encoder maps the caps it receives correctly; the loss
+is compositor format selection, not the already-fixed converter fixation.
+
+`GstVideoAggregator`'s default selector constructs plain-memory possible caps
+from each input's video info. These cannot intersect the compositor's DMA-BUF
+downstream caps, so the parent can fall back to a default color tuple. The
+compositor's subsequent geometry override never repaired that tuple.
+
+The compositor now supplies `find_best_format`, selecting the primary NV12
+accumulator's video info. The parent still constructs preferred caps and retains
+downstream alternatives; no encoder VUI mapping, CSC coefficient, allocation or
+layout changes. `test_primary_color_survives_unconstrained_output` negotiates
+actual compositor output without constraining downstream colorimetry, covering
+BT.709, BT.601 and full-range BT.601. It failed on BT.709 before the fix and
+passes afterwards; a forced-BT.601 mutation fails the same assertion. Existing
+explicit-color and im2d-descriptor tests remain in the suite.
+
+Host tests establish negotiated metadata and backend dispatch, not pixel
+accuracy or a new hardware qualification. A full acceptance rerun remains a
+separate task; no release or installation is implied by this change.
+
+The focused OPi slot-B candidate check subsequently encoded six independent
+1080p30 HEVC sessions, one per preset. `ffprobe -show_entries stream=...`
+reported BT.709 primaries, transfer and matrix in all six bitstreams. The caps
+trace agreed at capture, compositor output and encoder input. All 1,465 observed
+program frames retained compositor-to-encoder identity and matched the MPP
+import inode, with zero recorded CPU-copy calls. These are bounded regression
+checks, not the separate full acceptance rerun or a pixel-accuracy benchmark.
+The candidate used the already-merged pattern-geometry fix and the companion
+librga NV12-pattern candidate. Loader logs confirmed the per-process plugin and
+library paths; installed hashes and saved geometry were restored afterwards.
+
 ## Composition DMA-BUF boundary [EXISTS]
 
 The H.264/H.265 sink templates retain their plain raw caps and add **linear

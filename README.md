@@ -151,8 +151,12 @@ mapping and hardware limitations.
 primary and a BGRA overlay, producing NV12. The RGB overlay is required by
 librga's NV12-output three-channel blend; `rgaconvert` can normalize a YUV
 secondary to BGRA upstream. The compositor offers four corner-PiP presets, two
-side-by-side PbP presets, and raw custom pad rectangles, with per-pad alpha and
-z-order. A two-input frame uses one primary copy/scale, a separate hardware BGRA
+side-by-side PbP presets, and raw custom pad rectangles. Unconstrained output
+colorimetry follows the primary NV12 input, not the generic aggregator's
+plain-memory format-selection fallback. Explicit downstream constraints still
+participate in negotiation. The [runtime contract](docs/ENCODER-RUNTIME-CONTRACT.md)
+records the regression and its bitstream proof boundary. The presets retain
+per-pad alpha and z-order. A two-input frame uses one primary copy/scale, a separate hardware BGRA
 scale when the secondary is not already target-sized, and one geometry-aware
 librga composite pass. The intermediate DMA-BUF pool is reused until its target
 dimensions change and released when streaming stops. A lone primary is passed
