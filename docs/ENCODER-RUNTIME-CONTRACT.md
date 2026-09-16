@@ -22,6 +22,12 @@ BT.709, BT.601 and full-range BT.601. It failed on BT.709 before the fix and
 passes afterwards; a forced-BT.601 mutation fails the same assertion. Existing
 explicit-color and im2d-descriptor tests remain in the suite.
 
+Before the primary has negotiated, the parent initializes the callback's video
+info to UNKNOWN and parses its existing fixed-caps fallback if it stays UNKNOWN.
+`test_unconfigured_primary_uses_parent_caps_fallback` exercises that actual
+`update_caps` chain with a requested but unnegotiated primary on both supported
+GStreamer versions; no uninitialized video info is consumed.
+
 Host tests establish negotiated metadata and backend dispatch, not pixel
 accuracy or a new hardware qualification. A full acceptance rerun remains a
 separate task; no release or installation is implied by this change.
