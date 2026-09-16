@@ -60,13 +60,12 @@ package) requires `libc6 (>= 2.38)` and actually imports
 glibc 2.36, so lowering `Depends` or forcing installation is not a solution.
 This is distinct from the plugin's Trixie release contract, which declares
 `libc6 (>= 2.41)`. Retargeting the plugin does not rebuild or alter R0's bytes.
-Bookworm support remains the preferred direction: librga's own arm64 Bookworm
-jobs built and passed [R0's 17 tests](https://github.com/CERALIVE/librga/actions/runs/34733657589/job/103661050704)
-and [the current R1 source's 39 tests](https://github.com/CERALIVE/librga/actions/runs/35006136405/job/104506329258).
-Those jobs do not publish Bookworm packages. The producer needs a Bookworm
-package/release target, suite-specific ABI/dependency contracts, install gates,
-and distinct immutable artifact identities. That is separate librga work, not
-a source-port requirement or permission to overwrite R0 assets. R1 is not pinned.
+No Bookworm librga build is planned. CeraLive's APT publishes Trixie variants
+only, so the Bookworm lane's legacy Radxa pair is a permanent input rather than
+a stopgap: it keeps the GStreamer 1.22 build and test coverage alive without
+claiming R0-on-Bookworm support. librga's own Bookworm CI jobs compile and test
+the source there for the same portability reason and publish nothing. R1 is
+not pinned. See [`AGENTS.md`](AGENTS.md#release-publishing-policy).
 
 ```bash
 bash ci/install-build-deps.sh
