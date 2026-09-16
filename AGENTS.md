@@ -212,10 +212,18 @@ The following are compatibility contracts, not cleanup opportunities:
   `librga2-ceralive` (with its virtual Provides) or legacy Radxa `librga2` as the
   SONAME owner. Build Check runs the provider regressions and real staged package
   contract on both suites. R1 pinning waits for an actual R1 release.
-  **R0 pin blocker:** the published runtime declares `libc6 (>= 2.38)`, which
-  Bookworm's libc6 2.36 cannot satisfy. The Bookworm CI leg remains required;
-  this pin cannot merge while that dependency-install gate fails. Do not
-  force-install the archive or drop the compatibility leg.
+  **Suite boundary:** published R0 imports `__isoc23_sscanf` and
+  `__isoc23_strtol` at `GLIBC_2.38`; it cannot run on Bookworm's glibc 2.36.
+  Build Check explicitly sets `RGA_COMPAT_SUITE=bookworm` only for that leg's
+  installer, selecting the prior SHA-pinned Radxa `librga2`/`librga-dev`
+  `2.2.0-1` pair. The installer rejects that selection outside Debian Bookworm.
+  Trixie keeps R0; default pins and release callers remain R0. Both required
+  legs retain every test and the staged provider contract. Bookworm green means
+  plugin portability on GStreamer 1.22, **not R0-on-Bookworm support**. The
+  `ci/rga-suite-pins.test.sh` gate pins both pairs and rejects unknown selectors.
+  Bookworm-built librga packages are feasible but require separate producer
+  packaging/publication work; see README's build/release boundary. Do not
+  force-install R0, lower its dependency floor or drop the compatibility leg.
 - **im2d color conversion:** negotiated `GstVideoInfo` matrix/range selects
   `rga_buffer_t.color_space_mode`; format/stride-only work leaves CSC unset.
   YUV-output composition explicitly requests both CSC directions. Unknown or

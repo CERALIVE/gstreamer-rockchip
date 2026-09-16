@@ -42,10 +42,28 @@ The runtime retains `librga.so.2` and provides `librga2 (= 2.2.0)`. The plugin
 package therefore keeps its `librga2` virtual dependency, also allowing the
 legacy Radxa runtime for rollback; it does not depend on the provider's new name.
 
-**R0 compatibility blocker:** the published runtime requires `libc6 (>= 2.38)`.
-It cannot install on Debian Bookworm (libc6 2.36), so the required Bookworm build
-gate currently blocks this pin. Trixie satisfies that dependency; this does not
-waive Bookworm compatibility or authorize a forced install.
+The two required Build Check lanes deliberately use different RGA inputs:
+
+| Build environment | RGA runtime / headers | What a green result proves |
+|---|---|---|
+| Bookworm / GStreamer 1.22 / arm64 | Prior Radxa `librga2` / `librga-dev` `2.2.0-1` | Plugin source, tests and packaging work with the older toolchain and RGA pair; **not R0 binary compatibility**. |
+| Trixie / GStreamer 1.26 / arm64 | CeraLive R0 `1.10.1+ceralive.1` | Plugin build and tests with the shipping RGA configuration; not board qualification. |
+
+Only Bookworm's dependency-install step sets `RGA_COMPAT_SUITE=bookworm`.
+The installer verifies the actual distro before using the compatibility pair;
+unknown selectors fail. With no selector, `ci/mpp-pin.env` retains R0. Neither
+lane is optional, and their failures still fail `Build Check summary`.
+
+The published R0 runtime requires `libc6 (>= 2.38)` and actually imports
+`__isoc23_sscanf@GLIBC_2.38` and `__isoc23_strtol@GLIBC_2.38`. Bookworm has
+glibc 2.36, so lowering `Depends` or forcing installation is not a solution.
+Bookworm support remains the preferred direction: librga's own arm64 Bookworm
+jobs built and passed [R0's 17 tests](https://github.com/CERALIVE/librga/actions/runs/34733657589/job/103661050704)
+and [the current R1 source's 39 tests](https://github.com/CERALIVE/librga/actions/runs/35006136405/job/104506329258).
+Those jobs do not publish Bookworm packages. The producer needs a Bookworm
+package/release target, suite-specific ABI/dependency contracts, install gates,
+and distinct immutable artifact identities. That is separate librga work, not
+a source-port requirement or permission to overwrite R0 assets. R1 is not pinned.
 
 ```bash
 bash ci/install-build-deps.sh
@@ -54,6 +72,16 @@ meson setup build --prefix=/usr \
 meson compile -C build
 meson test -C build --print-errorlogs
 ```
+
+For the Bookworm portability build, prefix the dependency-install command with
+`RGA_COMPAT_SUITE=bookworm`. All subsequent build and test commands are unchanged.
+
+**Build coverage is not release readiness.** The existing `ci/target-suite.env`
+still selects Bookworm for the release build, while current CeraLive device
+images target Trixie. The release workflow also fetches default R0 for both
+install smokes. This CI-only compatibility selection does not fix or waive those
+release-path mismatches; reconcile them before the next release. In particular,
+a Bookworm CI pass must not be cited as a passing R0 release install smoke.
 
 Build the arm64 Debian package with:
 
