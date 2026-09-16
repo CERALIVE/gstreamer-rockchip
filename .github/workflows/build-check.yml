@@ -243,7 +243,7 @@ jobs:
           shellcheck -x ci/target-suite.test.sh ci/install-smoke.sh packaging/build-deb.sh
           bash ci/target-suite.test.sh
           bash ci/rga-suite-pins.test.sh
-          shellcheck packaging/package-contract.sh packaging/rga-provider-contract{,.test}.sh
+          shellcheck -x packaging/package-contract.sh packaging/rga-provider-contract{,.test}.sh
           bash packaging/rga-provider-contract.test.sh
           bash packaging/build-deb.sh
           bash packaging/package-contract.sh stage-deb-arm64 dist
