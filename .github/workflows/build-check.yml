@@ -153,6 +153,8 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install build dependencies (suite packages + pinned MPP/RGA)
+        env:
+          RGA_COMPAT_SUITE: ${{ matrix.suite == 'bookworm' && 'bookworm' || '' }}
         run: bash ci/install-build-deps.sh
 
       - name: Restore ccache
@@ -238,6 +240,16 @@ jobs:
       - name: MPP ABI closure gate
         run: bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so
 
+      - name: Package and RGA provider contracts
+        run: |
+          set -euo pipefail
+          shellcheck -x ci/install-build-deps.sh ci/rga-suite-pins.test.sh
+          bash ci/rga-suite-pins.test.sh
+          shellcheck packaging/package-contract.sh packaging/rga-provider-contract{,.test}.sh
+          bash packaging/rga-provider-contract.test.sh
+          bash packaging/build-deb.sh
+          bash packaging/package-contract.sh stage-deb-arm64 dist
+
       - name: Save ccache
         if: github.event_name != 'pull_request'
         uses: actions/cache/save@v6
@@ -254,6 +266,7 @@ jobs:
             echo "- device target suite: \`${{ needs.resolve-suite.outputs.suite }}\` (GLIBC floor \`${{ needs.resolve-suite.outputs.glibc_floor }}\`)"
             echo "- GLIBC floor gate: ${{ matrix.suite == needs.resolve-suite.outputs.suite && 'enforced' || 'not applicable (forward-compat leg)' }}"
             echo "- MPP ABI closure: checked against the URL+SHA-pinned \`librockchip-mpp1 1.5.0-1\`"
+            echo "- RGA build inputs: ${{ matrix.suite == 'bookworm' && 'legacy Radxa 2.2.0-1 (plugin portability only; NOT R0 support)' || 'CeraLive R0 1.10.1+ceralive.1 (Trixie shipping RGA configuration)' }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The one check a branch-protection rule can require. It runs on every event,
