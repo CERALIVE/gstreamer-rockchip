@@ -152,11 +152,23 @@ primary and a BGRA overlay, producing NV12. The RGB overlay is required by
 librga's NV12-output three-channel blend; `rgaconvert` can normalize a YUV
 secondary to BGRA upstream. The compositor offers four corner-PiP presets, two
 side-by-side PbP presets, and raw custom pad rectangles, with per-pad alpha and
-z-order. A two-input frame uses one primary copy/scale and one geometry-aware
-librga composite pass; a lone primary is passed through without an RGA or CPU
-pixel operation. Both factories remain discoverable without hardware, but
+z-order. A two-input frame uses one primary copy/scale, a separate hardware BGRA
+scale when the secondary is not already target-sized, and one geometry-aware
+librga composite pass. The intermediate DMA-BUF pool is reused until its target
+dimensions change and released when streaming stops. A lone primary is passed
+through without an RGA or CPU pixel operation. Both factories remain discoverable
+without hardware, but
 NULL→READY fails with a typed error when `/dev/rga` does not pass the shared
-driver-version trial.
+driver-version probe. This probe does not execute a trial composite or check pixels.
+
+**PiP is still blocked on librga R0 `1.10.1+ceralive.1`.** The OPi-B repair run
+reached the corrected blend request, but R0 returned `IM_STATUS_NOT_SUPPORTED`
+with `errno=0` because its validator rejects an NV12 destination even with an RGB
+pattern. No decoded inset or composition pass is claimed. The
+[pattern contract and board finding](docs/RGA-MPP-INTERACTION.md#compositor-pattern-contract)
+separate that library blocker from the repaired plugin geometry. Set
+`GST_DEBUG=mpprgabackend:2` to capture raw imconfig/improcess refusals rather than
+diagnosing the compositor's generic negotiation message.
 
 The H.264/H.265 encoder sinks accept linear NV12 `video/x-raw(memory:DMABuf)`
 alongside their existing plain raw caps. This lets the compositor negotiate
