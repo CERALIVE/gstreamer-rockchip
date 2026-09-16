@@ -54,9 +54,12 @@ The installer verifies the actual distro before using the compatibility pair;
 unknown selectors fail. With no selector, `ci/mpp-pin.env` retains R0. Neither
 lane is optional, and their failures still fail `Build Check summary`.
 
-The published R0 runtime requires `libc6 (>= 2.38)` and actually imports
+The published **librga R0 dependency** (`librga2-ceralive`, not this plugin
+package) requires `libc6 (>= 2.38)` and actually imports
 `__isoc23_sscanf@GLIBC_2.38` and `__isoc23_strtol@GLIBC_2.38`. Bookworm has
 glibc 2.36, so lowering `Depends` or forcing installation is not a solution.
+This is distinct from the plugin's Trixie release contract, which declares
+`libc6 (>= 2.41)`. Retargeting the plugin does not rebuild or alter R0's bytes.
 Bookworm support remains the preferred direction: librga's own arm64 Bookworm
 jobs built and passed [R0's 17 tests](https://github.com/CERALIVE/librga/actions/runs/34733657589/job/103661050704)
 and [the current R1 source's 39 tests](https://github.com/CERALIVE/librga/actions/runs/35006136405/job/104506329258).
