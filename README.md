@@ -73,15 +73,20 @@ meson compile -C build
 meson test -C build --print-errorlogs
 ```
 
-For the Bookworm portability build, prefix the dependency-install command with
-`RGA_COMPAT_SUITE=bookworm`. All subsequent build and test commands are unchanged.
+For the Bookworm portability build, export `TARGET_SUITE=bookworm` and prefix
+the dependency-install command with `RGA_COMPAT_SUITE=bookworm`. Subsequent
+build and test commands are unchanged. Packaging refuses a container whose
+actual suite differs from the selected target.
 
-**Build coverage is not release readiness.** The existing `ci/target-suite.env`
-still selects Bookworm for the release build, while current CeraLive device
-images target Trixie. The release workflow also fetches default R0 for both
-install smokes. This CI-only compatibility selection does not fix or waive those
-release-path mismatches; reconcile them before the next release. In particular,
-a Bookworm CI pass must not be cited as a passing R0 release install smoke.
+**Production matches Debian 13 Trixie.** `ci/target-suite.env` defaults to
+Trixie / glibc 2.41 / GStreamer 1.26. Publish Release gates both suite builds,
+then installs each package in a fresh matching container with its selected RGA
+runtime. The smoke verifies build-suite metadata, runtime checksums, dependency
+closure and plugin registration. Only the Trixie `.deb` and checksum reach the
+GitHub release and APT dispatch. The Bookworm package has a `~bookworm` suffix
+and stays in an internal `portability-bookworm` artifact; it is not published.
+Both install smokes must pass. This preserves source/package portability,
+not R0 binary compatibility on Bookworm or hardware qualification.
 
 Build the arm64 Debian package with:
 
