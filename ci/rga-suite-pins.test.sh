@@ -19,11 +19,11 @@ check_pair() (
 )
 
 check_pair '' \
-  librga2-ceralive_1.10.1+ceralive.1_arm64.deb \
-  librga-ceralive-dev_1.10.1+ceralive.1_arm64.deb \
-  7c59bade43e2f8bb4c31e0ae965bee480128aa128528fdc88e8bc082e98ec498 \
-  b0eba393b056b68f6bca346c4d6e18edcd91cd44066e5a69630435752bed6e11 \
-  https://github.com/CERALIVE/librga/releases/download/1.10.1+ceralive.1
+  librga2-ceralive_1.10.5+ceralive.1_arm64.deb \
+  librga-ceralive-dev_1.10.5+ceralive.1_arm64.deb \
+  5f8ea1f259b95d5bf6fbe68edf03bf08820ab7bc8d4d17bfc1fc4a00344c7bb3 \
+  8dd35334ed1022ff8e64a86b3ac426abb847bf36f3ccff2746a658ccc0d8577a \
+  https://github.com/CERALIVE/librga/releases/download/1.10.5+ceralive.1
 check_pair bookworm \
   librga2_2.2.0-1_arm64.deb librga-dev_2.2.0-1_arm64.deb \
   ca4f18666f6c5d5290c7e41e5901350ecf76530f24364e37b81fa6be4ab5f344 \
