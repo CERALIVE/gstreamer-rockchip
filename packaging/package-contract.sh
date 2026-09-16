@@ -44,6 +44,7 @@ readonly EXPECT_PLUGIN_PATH="${EXPECT_PLUGIN_DIR}/${EXPECT_PLUGIN_SO}"
 readonly EXPECT_RGA_PLUGIN_PATH="${EXPECT_PLUGIN_DIR}/${EXPECT_RGA_PLUGIN_SO}"
 readonly DEP5_FORMAT="https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/"
 readonly SOURCE_URL="https://github.com/CERALIVE/gstreamer-rockchip"
+# Keep librga2 virtual: both the CeraLive provider and the Radxa rollback satisfy it.
 readonly EXPECT_DEPENDS="libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, libglib2.0-0, libc6 (>= 2.36), libdrm2, libx11-6, librockchip-mpp1, librga2"
 # Every SONAME the four shipped plugins link, mapped to the Debian package that
 # supplies it. Resolved with `dpkg -S` on the arm64 build container, not guessed.
@@ -62,7 +63,7 @@ libgstvideo-1.0.so.0=libgstreamer-plugins-base1.0-0
 libgstallocators-1.0.so.0=libgstreamer-plugins-base1.0-0
 libgstpbutils-1.0.so.0=libgstreamer-plugins-base1.0-0
 librockchip_mpp.so.1=librockchip-mpp1
-librga.so.2=librga2"
+librga.so.2=librga2-ceralive"
 # Every distinct copyright holder in the compiled sources under gst/. Derived
 # from the tree, not assumed: the scan below fails if gst/ grows a holder that
 # is not in this list, so a new upstream contributor cannot reach a release
@@ -135,6 +136,8 @@ fi
 # other direction.
 while IFS='=' read -r _soname pkg; do
 	[ -n "${pkg}" ] || continue
+	# The staged provider gate verifies this Provides relationship against dpkg.
+	[[ "${pkg}" != librga2-ceralive ]] || pkg=librga2
 	case ", ${EXPECT_DEPENDS}," in
 		*", ${pkg},"*|*", ${pkg} ("*) ;;
 		*) fail "Depends omits ${pkg}, which supplies a linked SONAME" ;;
@@ -251,6 +254,7 @@ fi
 stage="$1"
 out="${2:-${root}/dist}"
 [ -d "${stage}" ] || fail "staged tree ${stage} does not exist"
+bash "${root}/packaging/rga-provider-contract.sh"
 
 for staged_path in "${EXPECT_PLUGIN_PATH}" "${EXPECT_RGA_PLUGIN_PATH}"; do
 	[ -f "${stage}${staged_path}" ] \
@@ -286,6 +290,7 @@ control="${stage}/DEBIAN/control"
 [ -f "${control}" ] || fail "staged DEBIAN/control is missing"
 grep -qxF "Package: ${EXPECT_PACKAGE}" "${control}" || fail "staged control Package is wrong"
 grep -qxF "Architecture: ${EXPECT_ARCH}" "${control}" || fail "staged control Architecture must be ${EXPECT_ARCH}"
+grep -qxF "Depends: ${EXPECT_DEPENDS}" "${control}" || fail "staged control Depends is wrong"
 grep -qxF 'Provides: gstreamer1.0-rockchip1' "${control}" || fail "staged control Provides is wrong"
 if grep -E '^Provides:' "${control}" | grep -q '('; then
 	fail "staged control Provides gained a version"
