@@ -49,6 +49,8 @@ struct _GstRgaCompositor
   GMutex lock;
   GstMppRgaBackend *backend;
   GstAllocator *allocator;
+  GstBufferPool *overlay_pool;
+  GstVideoInfo overlay_info;
   GstRgaCompositorLayout layout;
 };
 
@@ -111,6 +113,7 @@ enum
 
 static void gst_rga_compositor_child_proxy_init (gpointer g_iface,
     gpointer iface_data);
+static GstAllocator *gst_rga_compositor_get_allocator (GstRgaCompositor * self);
 
 G_DEFINE_TYPE (GstRgaCompositorPad, gst_rga_compositor_pad,
     GST_TYPE_VIDEO_AGGREGATOR_PAD);
@@ -645,6 +648,62 @@ gst_rga_compositor_refuse_frame (GstRgaCompositor * self,
   return GST_FLOW_NOT_NEGOTIATED;
 }
 
+static void
+gst_rga_compositor_clear_overlay_pool (GstRgaCompositor * self)
+{
+  if (self->overlay_pool)
+    gst_buffer_pool_set_active (self->overlay_pool, FALSE);
+  gst_clear_object (&self->overlay_pool);
+}
+
+static gboolean
+gst_rga_compositor_acquire_overlay (GstRgaCompositor * self,
+    const GstRgaCompositorRectangle * rectangle, GstBuffer ** buffer,
+    GstRgaCompositorFrame * frame, const gchar ** reason)
+{
+  if (self->overlay_pool &&
+      (GST_VIDEO_INFO_WIDTH (&self->overlay_info) != rectangle->width ||
+          GST_VIDEO_INFO_HEIGHT (&self->overlay_info) != rectangle->height))
+    gst_rga_compositor_clear_overlay_pool (self);
+
+  if (!self->overlay_pool) {
+    GstAllocator *allocator = gst_rga_compositor_get_allocator (self);
+    GstCaps *caps;
+    guint size;
+
+    *reason = "cannot allocate the scaled BGRA overlay DMA-BUF";
+    if (!allocator)
+      return FALSE;
+    if (!gst_video_info_set_format (&self->overlay_info, GST_VIDEO_FORMAT_BGRA,
+            rectangle->width, rectangle->height)) {
+      gst_object_unref (allocator);
+      return FALSE;
+    }
+    caps = gst_video_info_to_caps (&self->overlay_info);
+    self->overlay_pool = gst_rga_dma_heap_pool_new (GST_OBJECT (self), allocator,
+        caps, &self->overlay_info, &size);
+    gst_caps_unref (caps);
+    gst_object_unref (allocator);
+    if (!self->overlay_pool)
+      return FALSE;
+    if (!gst_buffer_pool_set_active (self->overlay_pool, TRUE)) {
+      gst_rga_compositor_clear_overlay_pool (self);
+      return FALSE;
+    }
+  }
+
+  if (gst_buffer_pool_acquire_buffer (self->overlay_pool, buffer, NULL) !=
+      GST_FLOW_OK) {
+    *reason = "cannot acquire the scaled BGRA overlay DMA-BUF";
+    return FALSE;
+  }
+  if (!gst_rga_compositor_frame_from_buffer (*buffer, &self->overlay_info,
+          GST_VIDEO_FORMAT_BGRA, frame, reason))
+    return FALSE;
+  frame->hstride = GST_ROUND_UP_N (frame->height, GST_RGA_DMA_HEAP_ALIGNMENT);
+  return TRUE;
+}
+
 static GstFlowReturn
 gst_rga_compositor_aggregate_frames (GstVideoAggregator * videoaggregator,
     GstBuffer * output_buffer)
@@ -653,6 +712,8 @@ gst_rga_compositor_aggregate_frames (GstVideoAggregator * videoaggregator,
   GstRgaCompositorInput inputs[2] = { {0,}, {0,} };
   GstRgaCompositorFrame input_frame[2] = { {0,}, {0,} };
   GstRgaCompositorFrame output_frame = { 0, };
+  GstRgaCompositorFrame pat_frame = { 0, };
+  GstBuffer *scaled_overlay = NULL;
   GstRgaCompositorRectangle rectangles[2] = { {0,}, {0,} };
   GstMppRgaIm2dRequest copy_request = { 0, };
   GstMppRgaIm2dCompositeRequest composite_request = { 0, };
@@ -729,18 +790,40 @@ gst_rga_compositor_aggregate_frames (GstVideoAggregator * videoaggregator,
   if (result != GST_MPP_RGA_SUCCESS) {
     reason = result == GST_MPP_RGA_TUPLE_DEMOTED ?
         "the background-copy tuple is temporarily demoted" :
-        "the trial-verified RGA backend rejected the background copy";
+        "the driver-probed RGA backend rejected the background copy";
     flow = gst_rga_compositor_refuse_frame (self, reason, FALSE);
     goto out;
   }
 
   if (inputs[1].buffer) {
-    /*
-     * librga's NV12-output recipe is the three-channel improcess form:
-     * the already-written NV12 output is the accumulator/source, BGRA is the
-     * pat channel, and the same NV12 DMA-BUF is the destination. This keeps
-     * v1 at one primary copy plus exactly one N-1 blend pass.
-     */
+    pat_frame = input_frame[1];
+    if (pat_frame.width != (guint) rectangles[1].width ||
+        pat_frame.height != (guint) rectangles[1].height) {
+      GstMppRgaIm2dRequest scale_request = { 0, };
+      GstRgaCompositorRectangle scale_rect = {
+        0, 0, rectangles[1].width, rectangles[1].height
+      };
+
+      /* pat/src1 cannot scale. A smaller prect alone would crop the picture. */
+      if (!gst_rga_compositor_acquire_overlay (self, &scale_rect,
+              &scaled_overlay, &pat_frame, &reason)) {
+        flow = gst_rga_compositor_refuse_frame (self, reason, FALSE);
+        goto out;
+      }
+      gst_rga_compositor_fill_request (&scale_request, &input_frame[1],
+          &pat_frame, &scale_rect);
+      result = gst_mpp_rga_backend_process (backend,
+          GST_MPP_RGA_OP_COMPOSITOR_COPY, GST_VIDEO_FORMAT_BGRA,
+          GST_VIDEO_FORMAT_BGRA, &scale_request);
+      if (result != GST_MPP_RGA_SUCCESS) {
+        reason = result == GST_MPP_RGA_TUPLE_DEMOTED ?
+            "the overlay-scale tuple is temporarily demoted" :
+            "the driver-probed RGA backend rejected the overlay scale";
+        flow = gst_rga_compositor_refuse_frame (self, reason, FALSE);
+        goto out;
+      }
+    }
+
     gst_rga_compositor_fill_request (&composite_request.transform,
         &output_frame, &output_frame, &rectangles[1]);
     composite_request.transform.src_x = rectangles[1].x;
@@ -751,14 +834,14 @@ gst_rga_compositor_aggregate_frames (GstVideoAggregator * videoaggregator,
         (inputs[1].config.zorder >= inputs[0].config.zorder ?
         IM_ALPHA_BLEND_DST_OVER : IM_ALPHA_BLEND_SRC_OVER) |
         IM_ALPHA_BLEND_PRE_MUL;
-    composite_request.pat_fd = input_frame[1].fd;
-    composite_request.pat_width = input_frame[1].width;
-    composite_request.pat_height = input_frame[1].height;
-    composite_request.pat_wstride = input_frame[1].wstride;
-    composite_request.pat_hstride = input_frame[1].hstride;
-    composite_request.pat_format = input_frame[1].rga_format;
-    composite_request.pat_rect_width = input_frame[1].width;
-    composite_request.pat_rect_height = input_frame[1].height;
+    composite_request.pat_fd = pat_frame.fd;
+    composite_request.pat_width = pat_frame.width;
+    composite_request.pat_height = pat_frame.height;
+    composite_request.pat_wstride = pat_frame.wstride;
+    composite_request.pat_hstride = pat_frame.hstride;
+    composite_request.pat_format = pat_frame.rga_format;
+    composite_request.pat_rect_width = pat_frame.width;
+    composite_request.pat_rect_height = pat_frame.height;
     composite_request.src_alpha =
         (guint8) (inputs[0].config.alpha * 255.0 + 0.5);
     composite_request.pat_alpha =
@@ -768,12 +851,14 @@ gst_rga_compositor_aggregate_frames (GstVideoAggregator * videoaggregator,
     if (result != GST_MPP_RGA_SUCCESS) {
       reason = result == GST_MPP_RGA_TUPLE_DEMOTED ?
           "the composite tuple is temporarily demoted" :
-          "the trial-verified RGA backend rejected the composite pass";
+          "the driver-probed RGA backend rejected the composite pass";
       flow = gst_rga_compositor_refuse_frame (self, reason, FALSE);
     }
   }
 
 out:
+  /* Both im2d passes are IM_SYNC; keep the intermediate alive until they end. */
+  gst_clear_buffer (&scaled_overlay);
   for (i = 0; i < 2; i++)
     gst_rga_compositor_input_clear (&inputs[i]);
   return flow;
@@ -1159,7 +1244,7 @@ gst_rga_compositor_change_state (GstElement * element,
     g_mutex_unlock (&self->lock);
     if (!gst_mpp_rga_backend_init (backend)) {
       GST_ELEMENT_ERROR (self, RESOURCE, NOT_FOUND,
-          ("rgacompositor cannot enter READY: trial-verified RGA backend unavailable"),
+          ("rgacompositor cannot enter READY: driver-probed RGA backend unavailable"),
           ("/dev/rga did not pass the driver-version probe"));
       return GST_STATE_CHANGE_FAILURE;
     }
@@ -1182,6 +1267,7 @@ gst_rga_compositor_finalize (GObject * object)
 {
   GstRgaCompositor *self = GST_RGA_COMPOSITOR (object);
 
+  gst_rga_compositor_clear_overlay_pool (self);
   gst_clear_object (&self->allocator);
   g_mutex_clear (&self->lock);
   G_OBJECT_CLASS (gst_rga_compositor_parent_class)->finalize (object);
@@ -1217,6 +1303,16 @@ gst_rga_compositor_init (GstRgaCompositor * self)
   self->backend = gst_mpp_rga_backend_get_default ();
   self->layout = GST_RGA_COMPOSITOR_LAYOUT_PIP_TOP_RIGHT;
   gst_mpp_conversion_stats_attach (G_OBJECT (self));
+}
+
+static gboolean
+gst_rga_compositor_stop (GstAggregator * aggregator)
+{
+  gboolean result = GST_AGGREGATOR_CLASS
+      (gst_rga_compositor_parent_class)->stop (aggregator);
+
+  gst_rga_compositor_clear_overlay_pool (GST_RGA_COMPOSITOR (aggregator));
+  return result;
 }
 
 static void
@@ -1274,6 +1370,7 @@ gst_rga_compositor_class_init (GstRgaCompositorClass * klass)
 
   aggregator_class->decide_allocation = GST_DEBUG_FUNCPTR
       (gst_rga_compositor_decide_allocation);
+  aggregator_class->stop = GST_DEBUG_FUNCPTR (gst_rga_compositor_stop);
   aggregator_class->propose_allocation = GST_DEBUG_FUNCPTR
       (gst_rga_compositor_propose_allocation);
   aggregator_class->sink_query = GST_DEBUG_FUNCPTR

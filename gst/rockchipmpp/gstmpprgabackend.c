@@ -183,14 +183,29 @@ static gint
 gst_mpp_rga_real_configure_im2d (guint core_mask, gint priority)
 {
   IM_STATUS status;
+  gint saved_errno;
 
   if (core_mask != 0) {
+    errno = 0;
     status = imconfig (IM_CONFIG_SCHEDULER_CORE, core_mask);
-    if (status <= IM_STATUS_FAILED)
+    saved_errno = errno;
+    if (status <= IM_STATUS_FAILED) {
+      GST_WARNING
+          ("imconfig scheduler-core=%u returned status=%d errno=%d (%s)",
+          core_mask, status, saved_errno, g_strerror (saved_errno));
+      errno = saved_errno;
       return status;
+    }
   }
 
-  return imconfig (IM_CONFIG_PRIORITY, priority);
+  errno = 0;
+  status = imconfig (IM_CONFIG_PRIORITY, priority);
+  saved_errno = errno;
+  if (status <= IM_STATUS_FAILED)
+    GST_WARNING ("imconfig priority=%d returned status=%d errno=%d (%s)",
+        priority, status, saved_errno, g_strerror (saved_errno));
+  errno = saved_errno;
+  return status;
 }
 
 static gint
@@ -261,6 +276,7 @@ gst_mpp_rga_real_composite (const GstMppRgaIm2dCompositeRequest * request,
     request->pat_rect_height,
   };
   IM_STATUS status;
+  gint saved_errno;
 
   (void) user_data;
   status = gst_mpp_rga_real_configure_im2d (transform->core_mask,
@@ -282,8 +298,30 @@ gst_mpp_rga_real_composite (const GstMppRgaIm2dCompositeRequest * request,
   source.color_space_mode = transform->src_color_space_mode;
   output.color_space_mode = transform->dst_color_space_mode;
 
-  return improcess (source, output, pat, source_rect, output_rect, pat_rect,
+  errno = 0;
+  status = improcess (source, output, pat, source_rect, output_rect, pat_rect,
       transform->usage | IM_SYNC);
+  saved_errno = errno;
+  if (status <= IM_STATUS_FAILED)
+    GST_WARNING ("improcess composite returned status=%d errno=%d (%s): %s; "
+        "src={fd=%d fmt=%#x size=%dx%d stride=%dx%d rect=%d,%d,%d,%d} "
+        "dst={fd=%d fmt=%#x size=%dx%d stride=%dx%d rect=%d,%d,%d,%d} "
+        "pat={fd=%d fmt=%#x size=%dx%d stride=%dx%d rect=%d,%d,%d,%d} "
+        "usage=%#x csc=%#x/%#x alpha=%u/%u",
+        status, saved_errno, g_strerror (saved_errno), imStrError (status),
+        source.fd, source.format, source.width, source.height,
+        source.wstride, source.hstride, source_rect.x, source_rect.y,
+        source_rect.width, source_rect.height,
+        output.fd, output.format, output.width, output.height,
+        output.wstride, output.hstride, output_rect.x, output_rect.y,
+        output_rect.width, output_rect.height,
+        pat.fd, pat.format, pat.width, pat.height, pat.wstride, pat.hstride,
+        pat_rect.x, pat_rect.y, pat_rect.width, pat_rect.height,
+        transform->usage | IM_SYNC, source.color_space_mode,
+        output.color_space_mode, request->src_alpha, request->pat_alpha);
+  /* Logging must not change the errno used by tuple/device-loss accounting. */
+  errno = saved_errno;
+  return status;
 }
 #endif
 
