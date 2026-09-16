@@ -45,7 +45,7 @@ readonly EXPECT_RGA_PLUGIN_PATH="${EXPECT_PLUGIN_DIR}/${EXPECT_RGA_PLUGIN_SO}"
 readonly DEP5_FORMAT="https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/"
 readonly SOURCE_URL="https://github.com/CERALIVE/gstreamer-rockchip"
 # Keep librga2 virtual: both the CeraLive provider and the Radxa rollback satisfy it.
-readonly EXPECT_DEPENDS="libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, libglib2.0-0, libc6 (>= 2.36), libdrm2, libx11-6, librockchip-mpp1, librga2"
+readonly DEPENDS_TEMPLATE='libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, libglib2.0-0, libc6 (>= ${GLIBC_FLOOR}), libdrm2, libx11-6, librockchip-mpp1, librga2'
 # Every SONAME the four shipped plugins link, mapped to the Debian package that
 # supplies it. Resolved with `dpkg -S` on the arm64 build container, not guessed.
 # The staged check below re-derives the plugins' NEEDED set and refuses anything
@@ -71,6 +71,9 @@ librga.so.2=librga2-ceralive"
 readonly KNOWN_HOLDERS_RE='Rockchip Electronics|Collabora Ltd|Igalia|Julien Moutte|CERALIVE'
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=ci/target-suite.env
+source "${root}/ci/target-suite.env"
+readonly EXPECT_DEPENDS="${DEPENDS_TEMPLATE//'${GLIBC_FLOOR}'/${GLIBC_FLOOR}}"
 builder="${root}/packaging/build-deb.sh"
 copyright="${root}/packaging/copyright"
 
@@ -93,8 +96,8 @@ grep -qF 'Architecture: ${arch}' "${builder}" \
 	|| fail "control must declare Architecture from the resolved \${arch}"
 grep -qF 'Maintainer: CERALIVE <contact@ceralive.tv>' "${builder}" \
 	|| fail "control Maintainer must be CERALIVE <contact@ceralive.tv>"
-grep -qF "Depends: ${EXPECT_DEPENDS}" "${builder}" \
-	|| fail "control Depends must be: ${EXPECT_DEPENDS}"
+grep -qF "Depends: ${DEPENDS_TEMPLATE}" "${builder}" \
+	|| fail "control Depends must be: ${DEPENDS_TEMPLATE}"
 grep -qF 'Provides: gstreamer1.0-rockchip1' "${builder}" \
 	|| fail "control must Provides: gstreamer1.0-rockchip1"
 grep -qF 'Conflicts: gstreamer1.0-rockchip1, belabox-gstreamer1.0-rockchip' "${builder}" \

@@ -2,6 +2,13 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=ci/target-suite.env
+source "${root}/ci/target-suite.env"
+build_suite="$(. /etc/os-release; printf '%s' "${VERSION_CODENAME}")"
+[[ "${build_suite}" == "${TARGET_SUITE}" ]] || {
+	printf 'build suite %s does not match TARGET_SUITE=%s\n' "${build_suite}" "${TARGET_SUITE}" >&2
+	exit 1
+}
 arch="${DEB_ARCH:-$(dpkg --print-architecture)}"
 version="${CERALIVE_GSTREAMER_ROCKCHIP_VERSION:-1.14.4+ceralive.1}"
 triplet="$(dpkg-architecture -a "${arch}" -qDEB_HOST_MULTIARCH)"
@@ -122,9 +129,10 @@ cat >"${stage_dir}/DEBIAN/control" <<EOF
 Package: gstreamer1.0-rockchip-ceralive
 Version: ${version}
 Architecture: ${arch}
+X-CeraLive-Build-Suite: ${build_suite}
 Maintainer: CERALIVE <contact@ceralive.tv>
 Installed-Size: ${installed_size}
-Depends: libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, libglib2.0-0, libc6 (>= 2.36), libdrm2, libx11-6, librockchip-mpp1, librga2
+Depends: libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, libglib2.0-0, libc6 (>= ${GLIBC_FLOOR}), libdrm2, libx11-6, librockchip-mpp1, librga2
 Provides: gstreamer1.0-rockchip1
 Conflicts: gstreamer1.0-rockchip1, belabox-gstreamer1.0-rockchip
 Replaces: gstreamer1.0-rockchip1, belabox-gstreamer1.0-rockchip

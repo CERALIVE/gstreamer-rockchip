@@ -137,6 +137,7 @@ jobs:
             gst_minor: "1.26"
             experimental: false
     env:
+      TARGET_SUITE: ${{ matrix.suite }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 200M
     steps:
@@ -219,21 +220,16 @@ jobs:
       - name: Prove the GLIBC gate fails red
         run: bash ci/check-glibc-floor.test.sh
 
-      # Enforced only on the TARGET leg, and the condition reads the declared
-      # suite rather than a literal. A forward-compatibility leg builds against a
-      # NEWER glibc by construction, so gating it would fail every trixie build
-      # for a reason that says nothing about the device.
-      - name: GLIBC floor gate (target suite only)
-        if: matrix.suite == needs.resolve-suite.outputs.suite
+      - name: GLIBC floor gate (suite-matched)
         run: bash ci/check-glibc-floor.sh build/gst/rockchipmpp/libgstrockchipmpp.so
 
-      - name: Note the forward-compatibility leg
+      - name: Note the portability leg
         if: matrix.suite != needs.resolve-suite.outputs.suite
         run: |
-          echo "${{ matrix.suite }} is a forward-compatibility leg, not the device"
+          echo "${{ matrix.suite }} is a portability leg, not the device"
           echo "target (${{ needs.resolve-suite.outputs.suite }}). It proves the"
           echo "source still builds on GStreamer ${{ matrix.gst_minor }}; the GLIBC"
-          echo "floor is a property of the target suite and is not asserted here."
+          echo "floor is checked against this leg's explicit suite contract."
 
       # Suite-independent: it asks whether the MPP entry points this build calls
       # exist in the exact library the device installs.
@@ -244,6 +240,8 @@ jobs:
         run: |
           set -euo pipefail
           shellcheck -x ci/install-build-deps.sh ci/rga-suite-pins.test.sh
+          shellcheck -x ci/target-suite.test.sh ci/install-smoke.sh packaging/build-deb.sh
+          bash ci/target-suite.test.sh
           bash ci/rga-suite-pins.test.sh
           shellcheck packaging/package-contract.sh packaging/rga-provider-contract{,.test}.sh
           bash packaging/rga-provider-contract.test.sh
@@ -264,7 +262,7 @@ jobs:
             echo "## ${{ matrix.suite }} · GStreamer ${{ matrix.gst_minor }} · arm64"
             echo
             echo "- device target suite: \`${{ needs.resolve-suite.outputs.suite }}\` (GLIBC floor \`${{ needs.resolve-suite.outputs.glibc_floor }}\`)"
-            echo "- GLIBC floor gate: ${{ matrix.suite == needs.resolve-suite.outputs.suite && 'enforced' || 'not applicable (forward-compat leg)' }}"
+            echo "- GLIBC floor gate: enforced against each leg's suite contract"
             echo "- MPP ABI closure: checked against the URL+SHA-pinned \`librockchip-mpp1 1.5.0-1\`"
             echo "- RGA build inputs: ${{ matrix.suite == 'bookworm' && 'legacy Radxa 2.2.0-1 (plugin portability only; NOT R0 support)' || 'CeraLive R0 1.10.1+ceralive.1 (Trixie shipping RGA configuration)' }}"
           } >> "$GITHUB_STEP_SUMMARY"
