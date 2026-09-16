@@ -204,7 +204,18 @@ The following are compatibility contracts, not cleanup opportunities:
   and format pair. MPP/`rgaconvert` CPU staging remains debug-only behind
   `GST_MPP_ALLOW_CPU_COPY=1`; `rgacompositor` has no CPU pixel path at all.
   Normal operation fails negotiation instead. The three read-only conversion
-  counters are additive element properties.
+  counters are additive element properties. The build pins matching
+  `librga-ceralive-dev` and `librga2-ceralive` R0 `1.10.1+ceralive.1` assets from
+  `CERALIVE/librga` in `ci/mpp-pin.env`; `ci/install-build-deps.sh` installs both.
+  The runtime owns `librga.so.2` and provides `librga2 (= 2.2.0)`, so the plugin's
+  `Depends: librga2` remains unchanged. The staged package contract accepts only
+  `librga2-ceralive` (with its virtual Provides) or legacy Radxa `librga2` as the
+  SONAME owner. Build Check runs the provider regressions and real staged package
+  contract on both suites. R1 pinning waits for an actual R1 release.
+  **R0 pin blocker:** the published runtime declares `libc6 (>= 2.38)`, which
+  Bookworm's libc6 2.36 cannot satisfy. The Bookworm CI leg remains required;
+  this pin cannot merge while that dependency-install gate fails. Do not
+  force-install the archive or drop the compatibility leg.
 - **im2d color conversion:** negotiated `GstVideoInfo` matrix/range selects
   `rga_buffer_t.color_space_mode`; format/stride-only work leaves CSC unset.
   YUV-output composition explicitly requests both CSC directions. Unknown or

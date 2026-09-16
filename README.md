@@ -35,7 +35,17 @@ hardware evidence and remaining limits.
 
 The RK3588 build requires GStreamer development headers, Rockchip MPP, librga,
 libdrm, and X11 development files. The repository's CI scripts install the pinned
-MPP/RGA development packages used by the device contract.
+MPP/RGA development packages used by the device contract. RGA uses the paired
+`librga-ceralive-dev` and `librga2-ceralive` packages from the CeraLive librga
+R0 release `1.10.1+ceralive.1`, with URLs and SHA-256 pins in `ci/mpp-pin.env`.
+The runtime retains `librga.so.2` and provides `librga2 (= 2.2.0)`. The plugin
+package therefore keeps its `librga2` virtual dependency, also allowing the
+legacy Radxa runtime for rollback; it does not depend on the provider's new name.
+
+**R0 compatibility blocker:** the published runtime requires `libc6 (>= 2.38)`.
+It cannot install on Debian Bookworm (libc6 2.36), so the required Bookworm build
+gate currently blocks this pin. Trixie satisfies that dependency; this does not
+waive Bookworm compatibility or authorize a forced install.
 
 ```bash
 bash ci/install-build-deps.sh
@@ -51,6 +61,11 @@ Build the arm64 Debian package with:
 bash packaging/build-deb.sh
 bash packaging/package-contract.sh
 ```
+
+Build Check also runs `packaging/rga-provider-contract.test.sh` and the staged
+contract (`bash packaging/package-contract.sh stage-deb-arm64 dist`) on both
+Debian suites. The latter checks the installed SONAME owner and its virtual
+dependency relationship, not just the package's declared dependency text.
 
 Hardware-independent tests use the mock MPP seam. RK3588-only acceptance is in
 `tests/board/`; those scripts are explicitly gated and record their own verdicts.
