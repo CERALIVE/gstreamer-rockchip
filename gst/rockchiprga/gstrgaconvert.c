@@ -815,12 +815,15 @@ gst_rga_convert_decide_allocation (GstBaseTransform * transform,
 
   for (i = 0; i < gst_query_get_n_allocation_pools (query); i++) {
     GstBufferPool *pool;
+    gboolean uses_dmabuf;
     guint size;
     guint min;
     guint max;
 
     gst_query_parse_nth_allocation_pool (query, i, &pool, &size, &min, &max);
-    if (gst_rga_buffer_pool_uses_dmabuf (pool)) {
+    uses_dmabuf = gst_rga_buffer_pool_uses_dmabuf (pool);
+    gst_clear_object (&pool);
+    if (uses_dmabuf) {
       selected = i;
       break;
     }
@@ -844,6 +847,8 @@ gst_rga_convert_decide_allocation (GstBaseTransform * transform,
         selected_min, selected_max);
     gst_query_set_nth_allocation_pool (query, selected, first_pool, first_size,
         first_min, first_max);
+    gst_clear_object (&first_pool);
+    gst_clear_object (&selected_pool);
   } else if (selected == G_MAXUINT && memory != GST_RGA_MEMORY_SYSTEM) {
     GstBufferPool *pool;
     guint size;
@@ -872,6 +877,7 @@ gst_rga_convert_decide_allocation (GstBaseTransform * transform,
     if (allocator)
       gst_query_add_allocation_param (query, allocator, &params);
     gst_structure_free (config);
+    gst_object_unref (pool);
   }
 
   return GST_BASE_TRANSFORM_CLASS (parent_class)->decide_allocation (transform,

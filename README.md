@@ -151,8 +151,12 @@ mapping and hardware limitations.
 primary and a BGRA overlay, producing NV12. The RGB overlay is required by
 librga's NV12-output three-channel blend; `rgaconvert` can normalize a YUV
 secondary to BGRA upstream. The compositor offers four corner-PiP presets, two
-side-by-side PbP presets, and raw custom pad rectangles, with per-pad alpha and
-z-order. A two-input frame uses one primary copy/scale, a separate hardware BGRA
+side-by-side PbP presets, and raw custom pad rectangles. Unconstrained output
+colorimetry follows the primary NV12 input, not the generic aggregator's
+plain-memory format-selection fallback. Explicit downstream constraints still
+participate in negotiation. The [runtime contract](docs/ENCODER-RUNTIME-CONTRACT.md)
+records the regression and its bitstream proof boundary. The presets retain
+per-pad alpha and z-order. A two-input frame uses one primary copy/scale, a separate hardware BGRA
 scale when the secondary is not already target-sized, and one geometry-aware
 librga composite pass. The intermediate DMA-BUF pool is reused until its target
 dimensions change and released when streaming stops. A lone primary is passed
@@ -177,6 +181,13 @@ converter or feature-stripping adapter. Host regressions cover all six presets
 and both codecs; real-source composition endurance and per-frame FD identity
 still require board qualification. The separate ordinary 1080p30 PLAYING failure
 remains unresolved in the [runtime contract](docs/ENCODER-RUNTIME-CONTRACT.md).
+
+`rgaconvert` releases the owned pool references it reads from allocation queries,
+including rejected proposals and reordered pools. This fixes retained host-side
+pool metadata across start/stop even when DMA-BUF occupancy returns to baseline.
+The [pool lifetime note](docs/notes/allocation-pool-lifetime.md) distinguishes
+the proven reference leak from allocator RSS warmup; no heap-trimming workaround
+or full acceptance pass is implied.
 
 ## Upstream lineage and credits
 

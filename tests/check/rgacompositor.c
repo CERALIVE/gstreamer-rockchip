@@ -988,6 +988,62 @@ GST_START_TEST (test_blend_colorimetry_reaches_improcess)
 }
 GST_END_TEST;
 
+GST_START_TEST (test_unconfigured_primary_uses_parent_caps_fallback)
+{
+  GstElement *element = g_object_new (GST_TYPE_RGA_COMPOSITOR, NULL);
+  GstVideoAggregatorClass *klass = GST_VIDEO_AGGREGATOR_GET_CLASS (element);
+  GstCaps *caps = gst_caps_from_string (PRIMARY_CAPS);
+  GstPad *primary = gst_element_request_pad_simple (element, "sink_0");
+  GstCaps *output;
+  GstVideoInfo info;
+
+  fail_unless (primary != NULL);
+  output = klass->update_caps (GST_VIDEO_AGGREGATOR (element), caps);
+  fail_unless (output != NULL);
+  output = gst_caps_fixate (output);
+  fail_unless (gst_video_info_from_caps (&info, output));
+  fail_unless_equals_int (GST_VIDEO_INFO_FORMAT (&info), GST_VIDEO_FORMAT_NV12);
+  fail_unless_equals_int (GST_VIDEO_INFO_WIDTH (&info), 1920);
+  fail_unless_equals_int (GST_VIDEO_INFO_HEIGHT (&info), 1080);
+  gst_caps_unref (output);
+  gst_caps_unref (caps);
+  gst_element_release_request_pad (element, primary);
+  gst_object_unref (primary);
+  gst_object_unref (element);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_primary_color_survives_unconstrained_output)
+{
+  const gchar *primary_colors[] = { "bt709", "bt601", "1:4:16:4" };
+  guint i;
+
+  for (i = 0; i < G_N_ELEMENTS (primary_colors); i++) {
+    FakeRga fake = { .available = TRUE,
+      .process_result = IM_STATUS_SUCCESS,
+      .composite_result = IM_STATUS_SUCCESS };
+    TestHarness test = test_harness_new_with_color (&fake, TRUE, primary_colors[i]);
+    GstCaps *caps;
+    GstVideoInfo info;
+    GstVideoColorimetry expected;
+    GstBuffer *output;
+
+    gst_harness_set_sink_caps_str (test.output,
+        "video/x-raw(memory:DMABuf),format=NV12");
+    output = push_pair_and_pull (&test);
+    caps = gst_pad_get_current_caps (test.output->sinkpad);
+    fail_unless (caps != NULL);
+    fail_unless (gst_video_info_from_caps (&info, caps));
+    fail_unless (gst_video_colorimetry_from_string (&expected, primary_colors[i]));
+    fail_unless (gst_video_colorimetry_is_equal (&info.colorimetry, &expected),
+        "unconstrained output lost primary color %s", primary_colors[i]);
+    gst_caps_unref (caps);
+    gst_buffer_unref (output);
+    test_harness_clear (&test);
+  }
+}
+GST_END_TEST;
+
 GST_START_TEST (test_blend_rejects_unrepresentable_colorimetry)
 {
   GstMppRgaIm2dCompositeRequest request = { 0, };
@@ -1075,6 +1131,8 @@ rgacompositor_suite (void)
   tcase_set_timeout (test_case, 30);
   tcase_add_test (test_case, test_pad_factory_and_property_contract);
   tcase_add_test (test_case, test_blend_colorimetry_reaches_improcess);
+  tcase_add_test (test_case, test_primary_color_survives_unconstrained_output);
+  tcase_add_test (test_case, test_unconfigured_primary_uses_parent_caps_fallback);
   tcase_add_test (test_case, test_blend_rejects_unrepresentable_colorimetry);
   tcase_add_test (test_case,
       test_im2d_diagnostics_preserve_status_errno_and_failure_stage);

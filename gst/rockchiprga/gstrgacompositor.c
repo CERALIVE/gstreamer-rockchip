@@ -1039,6 +1039,19 @@ gst_rga_compositor_update_caps (GstVideoAggregator * videoaggregator,
   return updated;
 }
 
+static void
+gst_rga_compositor_find_best_format (GstVideoAggregator * videoaggregator,
+    GstCaps * downstream_caps, GstVideoInfo * best_info,
+    gboolean * at_least_one_alpha)
+{
+  (void) downstream_caps;
+  *at_least_one_alpha = FALSE;
+  /* The base format selector tests plain caps against DMA-BUF caps and falls back to
+   * defaults. Our NV12 accumulator, not the BGRA overlay, defines output color. */
+  gst_rga_compositor_primary_info (GST_RGA_COMPOSITOR (videoaggregator),
+      best_info);
+}
+
 static GstFlowReturn
 gst_rga_compositor_create_output_buffer (GstVideoAggregator * videoaggregator,
     GstBuffer ** output_buffer)
@@ -1377,6 +1390,8 @@ gst_rga_compositor_class_init (GstRgaCompositorClass * klass)
       (gst_rga_compositor_sink_query);
   videoaggregator_class->update_caps = GST_DEBUG_FUNCPTR
       (gst_rga_compositor_update_caps);
+  videoaggregator_class->find_best_format = GST_DEBUG_FUNCPTR
+      (gst_rga_compositor_find_best_format);
   videoaggregator_class->create_output_buffer = GST_DEBUG_FUNCPTR
       (gst_rga_compositor_create_output_buffer);
   videoaggregator_class->aggregate_frames = GST_DEBUG_FUNCPTR

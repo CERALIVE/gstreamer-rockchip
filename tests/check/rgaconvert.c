@@ -665,6 +665,7 @@ GST_START_TEST (test_allocation_offers_and_accepts_dmabuf_pool)
   fail_unless (pool_allocator == allocator);
   fail_unless (size > 1919 * 1079 * 3);
   gst_structure_free (config);
+  gst_object_unref (pool);
 
   config = gst_buffer_pool_get_config (downstream_pool);
   gst_buffer_pool_config_set_params (config, output_caps, 1280 * 720 * 3 / 2,
@@ -683,6 +684,7 @@ GST_START_TEST (test_allocation_offers_and_accepts_dmabuf_pool)
   fail_unless (pool_allocator == allocator);
   gst_structure_free (config);
 
+  gst_object_unref (pool);
   gst_object_unref (downstream_pool);
   gst_query_unref (decide);
   gst_query_unref (propose);
@@ -690,6 +692,71 @@ GST_START_TEST (test_allocation_offers_and_accepts_dmabuf_pool)
   gst_caps_unref (input_caps);
   gst_object_unref (allocator);
   test_convert_clear (&test);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_allocation_query_pool_references_are_released)
+{
+  guint variant;
+
+  for (variant = 0; variant < 4; variant++) {
+    FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS };
+    TestConvert test = test_convert_new (&fake);
+    GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+    GstAllocator *allocator = gst_dmabuf_allocator_new ();
+    GstCaps *caps = caps_from_string
+        ("video/x-raw(memory:DMABuf),format=NV12,width=1280,height=720,framerate=30/1,interlace-mode=progressive");
+    GstQuery *query = gst_query_new_allocation (caps, TRUE);
+    GWeakRef weak[2];
+    guint count;
+    guint i;
+
+    gst_rga_convert_set_allocator_for_test (test.convert, allocator);
+    if (variant == 1 || variant == 3) {
+      GstBufferPool *first = variant == 1 ? gst_video_buffer_pool_new () : NULL;
+
+      gst_query_add_allocation_pool (query, first, 1280 * 720 * 3 / 2, 2, 0);
+      gst_clear_object (&first);
+    }
+    if (variant != 2) {
+      GstBufferPool *pool = gst_video_buffer_pool_new ();
+      GstStructure *config = gst_buffer_pool_get_config (pool);
+
+      gst_buffer_pool_config_set_params (config, caps, 1280 * 720 * 3 / 2, 2, 0);
+      gst_buffer_pool_config_set_allocator (config, allocator, NULL);
+      fail_unless (gst_buffer_pool_set_config (pool, config));
+      gst_query_add_allocation_pool (query, pool, 1280 * 720 * 3 / 2, 2, 0);
+      gst_object_unref (pool);
+    }
+
+    fail_unless (klass->decide_allocation (GST_BASE_TRANSFORM (test.convert),
+            query));
+    count = gst_query_get_n_allocation_pools (query);
+    fail_unless (count > 0 && count <= G_N_ELEMENTS (weak));
+    for (i = 0; i < count; i++) {
+      GstBufferPool *pool;
+      gpointer alive;
+
+      gst_query_parse_nth_allocation_pool (query, i, &pool, NULL, NULL, NULL);
+      g_weak_ref_init (&weak[i], pool);
+      alive = g_weak_ref_get (&weak[i]);
+      fail_unless (i != 0 || alive != NULL);
+      gst_clear_object (&alive);
+      gst_clear_object (&pool);
+    }
+    gst_query_unref (query);
+    gst_caps_unref (caps);
+    gst_object_unref (allocator);
+    test_convert_clear (&test);
+    for (i = 0; i < count; i++) {
+      gpointer retained = g_weak_ref_get (&weak[i]);
+
+      fail_unless (retained == NULL,
+          "variant %u pool %u retained after query and converter teardown",
+          variant, i);
+      g_weak_ref_clear (&weak[i]);
+    }
+  }
 }
 GST_END_TEST;
 
@@ -914,6 +981,8 @@ rgaconvert_suite (void)
       test_unavailable_backend_fails_ready_with_typed_error);
   tcase_add_test (test_case,
       test_allocation_offers_and_accepts_dmabuf_pool);
+  tcase_add_test (test_case,
+      test_allocation_query_pool_references_are_released);
   suite_add_tcase (suite, test_case);
   return suite;
 }
