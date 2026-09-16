@@ -238,6 +238,14 @@ jobs:
       - name: MPP ABI closure gate
         run: bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so
 
+      - name: Package and RGA provider contracts
+        run: |
+          set -euo pipefail
+          shellcheck packaging/package-contract.sh packaging/rga-provider-contract{,.test}.sh
+          bash packaging/rga-provider-contract.test.sh
+          bash packaging/build-deb.sh
+          bash packaging/package-contract.sh stage-deb-arm64 dist
+
       - name: Save ccache
         if: github.event_name != 'pull_request'
         uses: actions/cache/save@v6
