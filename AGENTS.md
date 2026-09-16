@@ -292,7 +292,12 @@ The following are compatibility contracts, not cleanup opportunities:
   NV12-output three-channel blend: the NV12 accumulator is the source/dst and
   the RGB overlay is the `pat` channel. Upstream `rgaconvert` supplies BGRA when
   a secondary source starts as YUV. Two inputs run one primary `improcess`
-  copy/scale followed by one geometry-aware composite pass; output allocation
+  copy/scale, a BGRA scale when the secondary dimensions differ from its target,
+  then one geometry-aware composite pass. `pat` cannot scale: reducing its crop
+  alone would discard part of the secondary. The intermediate uses a reusable
+  16-aligned DMA-BUF pool, recreated on target-size changes and released at stop;
+  equal-size secondaries need no intermediate. Both passes are synchronous and
+  keep the intermediate alive through the blend. Output allocation
   uses the same 16-aligned dma-heap allocator as `rgaconvert`. With only
   `sink_0` connected and output caps unchanged, the input buffer is passed
   through by reference with no RGA or CPU pixel operation. The element exposes
@@ -300,6 +305,18 @@ The following are compatibility contracts, not cleanup opportunities:
   `layout-rejections` through `gstmppconversionstats.c`; fallback remains zero
   because no CPU path exists. Its rank and READY failure contract match
   `rgaconvert`.
+
+  **Composition remains hardware-blocked on librga R0.** The instrumented OPi-B
+  run returns `improcess=-1` (`IM_STATUS_NOT_SUPPORTED`), `errno=0`, with R0's
+  `Blend mode background layer unsupport non-RGB format, dst format = 0xa00(nv12)`.
+  This separate userspace guard precedes pat geometry validation; the corrected
+  geometry does not fix that library defect. See the source citations and bounded
+  board receipt in `docs/RGA-MPP-INTERACTION.md#compositor-pattern-contract`.
+  `GST_DEBUG=mpprgabackend:2` preserves composite status, errno, librga error text
+  and descriptors, and distinguishes imconfig refusal. The backend is
+  **driver-probed**, not trial-composite/pixel-verified. Host geometry tests now
+  enforce a documented rectangle contract at the improcess seam and were proven
+  RED by mutation; they do not substitute for real-library or decoded-pixel proof.
 
 `tests/parity-check.sh`, `tests/golden/`, `packaging/package-contract.sh`, and
 the board drills are the executable authorities. Update a frozen contract only

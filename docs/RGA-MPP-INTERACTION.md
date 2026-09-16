@@ -28,6 +28,7 @@ share a single availability decision and a single health table:
 | `mppjpegdec` output conversion | legacy `c_RkRgaBlit` | `jpeg-convert` |
 | `rgaconvert` | im2d `improcess` | `rgaconvert` |
 | `rgacompositor` primary copy/scale | im2d `improcess` | `rgacompositor-copy` |
+| `rgacompositor` secondary BGRA pre-scale, when needed | im2d `improcess` | `rgacompositor-copy` (separate BGRA/BGRA health tuple) |
 | `rgacompositor` secondary blend | geometry-aware im2d `improcess` composite | `rgacompositor` |
 
 `gstmpprgabackend.c` owns both. `gst_mpp_rga_backend_blit()` and
@@ -38,7 +39,7 @@ in which op they invoke; they enter through the same
 handling behave identically whichever API ran. The composite helper uses
 `improcess` because librga 2.2.0's C `imcomposite` macro has no rectangle
 arguments; `improcess` is the geometry-bearing primitive behind the same blend
-mode and keeps scale, placement, and alpha in one hardware pass. For NV12
+mode. Its primary source can scale, but its pattern input cannot. For NV12
 output, librga requires the NV12 accumulator on the source/dst channels and the
 BGRA overlay on the `pat` channel.
 
@@ -51,6 +52,98 @@ conversions.
 
 The MPP plugin compiles without the im2d operation; `rockchiprga` enables it in
 its own DSO via `-DGST_MPP_RGA_ENABLE_IM2D`. Both link the same sources.
+
+## Compositor pattern contract
+
+[EXISTS] `pat` is the second input image (hardware `src1`), and `prect` selects
+its source crop; it is not a destination canvas or an instruction to scale that
+image into `drect`. Larger backing storage is legal, but its **active crop** must
+have exactly the destination rectangle's width and height. Merely shrinking
+`prect` crops the secondary instead of shrinking the whole picture.
+
+Primary sources:
+
+- [R0 `rga_check_blend`, lines 1097–1128](https://github.com/CERALIVE/librga/blob/f4c3ee62ab354c2cbe22718f543fc0ba6e58365c/im2d_api/src/im2d_impl.cpp#L1097-L1128):
+  explicit `src1 don't support scale` check, comparing both active axes and
+  returning `IM_STATUS_NOT_SUPPORTED` on mismatch.
+- [R1 `rga_check_blend`, lines 1157–1193](https://github.com/CERALIVE/librga/blob/57a1067a246c71fa6c9a355d1668884fda155dd5/im2d_api/src/im2d_impl.cpp#L1157-L1193):
+  the same pattern-size restriction. `rga_task_submit` applies src/dst/pat
+  rectangles before calling `rga_check`, before blit submission.
+- [Rockchip FAQ A2.12](https://github.com/CERALIVE/librga/blob/57a1067a246c71fa6c9a355d1668884fda155dd5/docs/Rockchip_FAQ_RGA_EN.md#L1138-L1154):
+  YUV output uses YUV background on `src`, RGB overlay on `src1/pat`, and
+  `DST_OVER` to put the overlay above the background; blending happens in RGB.
+
+`gst_rga_compositor_aggregate_frames()` therefore pre-scales the **entire** BGRA
+secondary through the ordinary two-buffer im2d path when its dimensions differ
+from its target. It then blends the target-sized pattern with equal-sized active
+src/dst rectangles. The intermediate pool uses the existing 16-aligned DMA-heap
+allocator and video metadata, is reused between frames, recreated on target-size
+changes, and deactivated on stop. `IM_SYNC` keeps reuse safe after the blend.
+An already-sized overlay bypasses allocation and scaling. No CPU pixels are
+mapped or copied, and either allocation or scale failure drops the frame before
+blending instead of producing primary-only output for that failed frame.
+
+### OPi B, 2026-09-16: geometry corrected, composition still blocked
+
+Bounded real-source reproduction: Orange Pi 5 Plus, slot B booted/good, A
+inactive/good, kernel `7.2.0-ceralive-rk3588 #ceralive1 @1789515465`, engine
+`2026.9.3`, installed plugin `.5`, librga R0 `1.10.1+ceralive.1`. HDMI was
+rediscovered as `/dev/video0`, native NV16 3840×2160 at 59.94; BRIO colour as
+`/dev/video3`, Device Caps `0x04200001`, YUYV 1920×1080 at 30 fps. A bounded
+direct GStreamer graph converted these to NV12/BGRA, composed at 1080p30 and
+encoded HEVC. This is not an engine start-lifecycle or endurance receipt.
+
+The instrument-only plugin returned **`improcess=-1`, `errno=0`**, with active
+src/dst `864,54,960,540` and active pat `0,0,1920,1080`. `imStrError` preserved:
+
+```text
+Unsupported function: Blend mode background layer unsupport non-RGB format,
+dst format = 0xa00(nv12)
+```
+
+R0's `else if (!dst_isRGB)` at the first source citation rejects an NV12
+destination **even with valid RGB pat**, before reaching the pat-size check.
+R1 nests that guard under the no-pattern case. Thus the pattern geometry was
+independently wrong, but it was not the first validator refusing this board run.
+This is a userspace `IM_STATUS`, not a captured ioctl errno or a kernel failure.
+
+The corrected plugin completed its added scale and reached the blend with:
+
+```text
+src/dst: size=1920x1080 stride=1920x1088 rect=864,54,960,540
+pat:     size=960x540   stride=960x544  rect=0,0,960,540
+status=-1 errno=0, same NV12-destination refusal
+```
+
+**Verdict: BLOCKED, not composed.** FFprobe decoded 30 HEVC frames emitted before
+the blend failure; the inspected final frame was dark with no visible inset.
+No 600-second soak or 20 teardown cycles ran. No plan acceptance is discharged.
+The plugin was staged under `/tmp` only; the engine service was stopped to release
+capture and restored after each run. Installed plugin/library hashes were
+unchanged, staging removed, and both slots stayed good. No package, pin, driver,
+UART, image or Rock change was made.
+
+### Diagnostic and host-test boundaries
+
+`GST_DEBUG=mpprgabackend:2` records failing composite status, immediately captured
+errno, librga error text, surface/stride/crop descriptors, blend flags, alpha and
+CSC. It distinguishes imconfig failures, where improcess was never called.
+Logging restores errno before the existing device-loss/tuple accounting.
+
+`tests/check/rgacompositor.c` runs geometry cases through the real backend's
+wrapping and a **modeled, hardware-independent** improcess contract that checks
+rectangle bounds, live FDs, and equal active pat/dst dimensions. It also asserts
+whole-source scaling, both single-axis PbP mismatches, all PiP corners/custom,
+alpha/zorder, equal-size bypass, aligned allocation, reuse, resize, stop and
+failure cleanup. This is not real-library acceptance or pixel emulation.
+
+Failing first: `pat cannot scale: active pat 1920x1080 differs from dst 960x540`.
+With the fix, the compositor suite passes. Mutating only production
+`pat_rect_width` to `pat_frame.width - 2` makes the same test fail with active
+pat `958x540` versus dst `960x540`; the restored code passes. The fake-success
+geometry oracle no longer accepts the defect. A separate log-capture test
+deliberately clobbers errno during logging and verifies the original status,
+errno and failure stage survive.
 
 ## im2d colorimetry
 
@@ -156,7 +249,7 @@ Its 40 dB threshold is unchanged. **The updated d5 has not run on a board**;
 the historical six failing cells in `tests/board/DRILL-RESULTS.md` remain
 historical evidence, not a claimed pass for this fix.
 
-## The trial-verified initialization sequence
+## The driver-version-probed initialization sequence
 
 `gst_mpp_rga_backend_init()` runs once per process, behind a `GOnce` in
 `gst_mpp_rga_backend_get_default()`. In order:
@@ -174,11 +267,13 @@ historical evidence, not a claimed pass for this fix.
    Below that, the backend stays unavailable and logs the version it saw.
 5. **Only then** set `available`, and only then call `c_RkRgaInit()`. Its result
    is logged and otherwise ignored — it is a compatibility call, never an
-   availability test.
+    availability test.
 
 The ordering is the whole point. `c_RkRgaInit()` can succeed against a device
 this plugin cannot drive, so treating it as the availability oracle is what
 produced the historical "RGA is fine" reports on boards where every blit failed.
+This sequence submits no trial composite and checks no pixels. A successful
+driver probe is not evidence that a later format/geometry tuple will compose.
 
 Two escape hatches sit outside this sequence. `GST_MPP_NO_RGA=1` refuses RGA
 before the backend is consulted at all (`gst_mpp_use_rga()`), and
@@ -389,7 +484,7 @@ submitted, and names why.
 | `rgaconvert` | YUY2 | NV12 | im2d | mapped | *not yet measured* |
 | `rgaconvert` | NV24 | any | im2d | **refused** — not in the element's caps | n/a, by construction |
 | `rgaconvert` | NV12_10LE40 / P010 | any | im2d | **refused** at caps — 10-bit is out of scope | n/a, by construction |
-| `rgacompositor` | NV12 + BGRA DMA-BUF | NV12 DMA-BUF | im2d | one primary copy/scale + one three-channel composite pass | *not yet measured* |
+| `rgacompositor` | NV12 + BGRA DMA-BUF | NV12 DMA-BUF | im2d | primary copy/scale + optional BGRA pre-scale + three-channel blend | *R0 blend blocked; see board finding above* |
 | `rgacompositor` | NV12 DMA-BUF × 1 | NV12 DMA-BUF | passthrough | matching `sink_0` buffer forwarded by reference | *not yet measured* |
 | `rgacompositor` | system memory / wrong pad-role format | NV12 DMA-BUF | none | **refused** at caps; no CPU path | n/a, by construction |
 | `mpph26xenc` | NV16 | NV12 | legacy blit | mapped | *not yet measured* |

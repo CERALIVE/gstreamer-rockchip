@@ -5,6 +5,23 @@ preserves the same outcomes as the retained raw transcripts; a command finishing
 or a failure later being classified as pre-existing does not turn that drill
 into a pass.
 
+## 2026-09-16 — PiP pattern repair, Orange Pi B: BLOCKED on librga R0
+
+The bounded HDMI + BRIO run captured real `improcess=-1`, `errno=0` and
+`imStrError`: `Blend mode background layer unsupport non-RGB format, dst format
+= 0xa00(nv12)`. R0 rejects the destination before validating pattern size.
+The plugin's separate full-size-pattern/inset defect was repaired with a
+whole-image BGRA pre-scale. On the same board, that scale succeeds and the blend
+receives equal active 960×540 pattern/destination dimensions, but R0 still
+returns the same error. Thirty pre-failure HEVC frames decoded; the final one
+has no visible inset. **No composition pass.**
+
+The [full scoped receipt and source citations](../../docs/RGA-MPP-INTERACTION.md#compositor-pattern-contract)
+record the exact kernel/packages, temporary-plugin procedure, diagnostic and
+mutation evidence. Engine service restored, installed libraries unchanged,
+temporary staging removed, B good and rollback A untouched/good. Neither the
+600-second soak nor the 20-cycle teardown drill ran; items 30/31 remain open.
+
 ## 2026-09-01 — mainline 7.2 track
 
 The suite ran on the reachable Rock 5B+ named `ceralive2`, running
