@@ -314,6 +314,15 @@ The following are compatibility contracts, not cleanup opportunities:
   authority. Keep the parent's downstream-alternative negotiation; the regression
   uses unconstrained output caps rather than pre-forcing the expected color.
 
+  **Allocation-query ownership [EXISTS].**
+  `gst_query_parse_nth_allocation_pool()` returns an owned reference, including
+  during inspection and reordering. `rgaconvert` must release every parsed pool,
+  whether selected or rejected, after installing replacement query references.
+  A NULL pool remains a valid proposal. Returning DMA buffers at stop does not
+  prove the pool/config/allocator objects were freed. Weak-reference regressions
+  and the OPi allocation profile are recorded in
+  [`docs/notes/allocation-pool-lifetime.md`](docs/notes/allocation-pool-lifetime.md).
+
   **Composition remains hardware-blocked on librga R0.** The instrumented OPi-B
   run returns `improcess=-1` (`IM_STATUS_NOT_SUPPORTED`), `errno=0`, with R0's
   `Blend mode background layer unsupport non-RGB format, dst format = 0xa00(nv12)`.

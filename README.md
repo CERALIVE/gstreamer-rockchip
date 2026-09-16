@@ -182,6 +182,13 @@ and both codecs; real-source composition endurance and per-frame FD identity
 still require board qualification. The separate ordinary 1080p30 PLAYING failure
 remains unresolved in the [runtime contract](docs/ENCODER-RUNTIME-CONTRACT.md).
 
+`rgaconvert` releases the owned pool references it reads from allocation queries,
+including rejected proposals and reordered pools. This fixes retained host-side
+pool metadata across start/stop even when DMA-BUF occupancy returns to baseline.
+The [pool lifetime note](docs/notes/allocation-pool-lifetime.md) distinguishes
+the proven reference leak from allocator RSS warmup; no heap-trimming workaround
+or full acceptance pass is implied.
+
 ## Upstream lineage and credits
 
 This repository descends from the Rockchip plugin code through the JeffyCN,
