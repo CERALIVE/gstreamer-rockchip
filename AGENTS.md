@@ -76,7 +76,7 @@ builds run all four gates and package contracts; each smoke starts in a fresh
 matching container and verifies the package's `X-CeraLive-Build-Suite` field.
 Only Trixie's `release-assets` is published. Bookworm's `~bookworm` package is
 an internal `portability-bookworm` artifact, never a GitHub release asset or APT
-input. Its green smoke is not a claim that the Trixie/R0 binary runs on Bookworm.
+input. Its green smoke is not a claim that the Trixie/R1 binary runs on Bookworm.
 
 ## Release publishing policy
 
@@ -116,13 +116,13 @@ entry for it names both versions. Dropping the Bookworm leg would delete that
 coverage. Not publishing Bookworm is a reason to keep the leg internal, not a
 reason to remove it.
 
-**The Bookworm leg builds against legacy Radxa librga, not our R0.** Published
-R0 imports `__isoc23_sscanf` and `__isoc23_strtol` at `GLIBC_2.38` and cannot
+**The Bookworm leg builds against legacy Radxa librga, not our R0/R1.** Published
+R0/R1 require `libc6 (>= 2.38)` and cannot
 install on Bookworm's glibc 2.36, so the Bookworm leg selects the SHA-pinned
 Radxa `librga2`/`librga-dev` `2.2.0-1` pair through `RGA_COMPAT_SUITE=bookworm`
 in `ci/mpp-pin.env`. A Bookworm artifact would therefore not be a supported
 configuration even if it were published. `build-check.yml`'s summary already
-labels the leg "legacy Radxa 2.2.0-1 (plugin portability only; NOT R0
+labels the leg "legacy Radxa 2.2.0-1 (plugin portability only; NOT R0/R1
 support)" (line 267). No Bookworm librga is needed under this policy and none
 is planned; the legacy pin is permanent, not a placeholder.
 
@@ -142,7 +142,7 @@ same file got this right in one job and wrong in another because the selector
 is per-step `env:`, not job-level, so a new step or job that installs librga
 does not inherit it. Any future step that sources `ci/mpp-pin.env` or runs
 `ci/install-build-deps.sh` inside a suite matrix needs the selector added
-explicitly, or the Bookworm leg will try to install R0 again.
+explicitly, or the Bookworm leg will try to install the incompatible release pair.
 
 ## Repository map
 
@@ -280,25 +280,25 @@ The following are compatibility contracts, not cleanup opportunities:
   `GST_MPP_ALLOW_CPU_COPY=1`; `rgacompositor` has no CPU pixel path at all.
   Normal operation fails negotiation instead. The three read-only conversion
   counters are additive element properties. The build pins matching
-  `librga-ceralive-dev` and `librga2-ceralive` R0 `1.10.1+ceralive.1` assets from
+  `librga-ceralive-dev` and `librga2-ceralive` R1 `1.10.5+ceralive.1` assets from
   `CERALIVE/librga` in `ci/mpp-pin.env`; `ci/install-build-deps.sh` installs both.
   The runtime owns `librga.so.2` and provides `librga2 (= 2.2.0)`, so the plugin's
   `Depends: librga2` remains unchanged. The staged package contract accepts only
   `librga2-ceralive` (with its virtual Provides) or legacy Radxa `librga2` as the
   SONAME owner. Build Check runs the provider regressions and real staged package
-  contract on both suites. R1 pinning waits for an actual R1 release.
-  **Suite boundary:** published R0 imports `__isoc23_sscanf` and
-  `__isoc23_strtol` at `GLIBC_2.38`; it cannot run on Bookworm's glibc 2.36.
+  contract on both suites.
+  **Suite boundary:** published R0/R1 require `libc6 (>= 2.38)`;
+  they cannot run on Bookworm's glibc 2.36.
   Build Check and Publish Release set `RGA_COMPAT_SUITE=bookworm` only for that leg's
   installer, selecting the prior SHA-pinned Radxa `librga2`/`librga-dev`
   `2.2.0-1` pair. The installer rejects that selection outside Debian Bookworm.
-  Trixie keeps R0; default pins and published release artifacts remain R0. Both required
+  Trixie uses released R1; the default headers/runtime pins move together. Both required
   legs retain every test and the staged provider contract. Bookworm green means
-  plugin portability on GStreamer 1.22, **not R0-on-Bookworm support**. The
+  plugin portability on GStreamer 1.22, **not R0/R1-on-Bookworm support**. The
   `ci/rga-suite-pins.test.sh` gate pins both pairs and rejects unknown selectors.
   No Bookworm librga build is planned: our APT publishes Trixie only, so the
   legacy pair is the permanent Bookworm input (see **Release publishing
-  policy**). Do not force-install R0, lower its dependency floor or drop the
+  policy**). Do not force-install R0/R1, lower their dependency floor or drop the
   compatibility leg.
 - **im2d color conversion:** negotiated `GstVideoInfo` matrix/range selects
   `rga_buffer_t.color_space_mode`; format/stride-only work leaves CSC unset.
