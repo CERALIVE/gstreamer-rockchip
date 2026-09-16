@@ -9,12 +9,24 @@
 #     in a suite container rather than on the runner's Ubuntu. Pinning them here
 #     would defeat the parity the container exists to provide.
 #   * MPP and RGA are NOT in Debian. They come from ci/mpp-pin.env, URL+SHA
-#     pinned to exactly the packages the device image installs.
+#     pinned to the device inputs, except the explicit Bookworm portability pair.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=ci/mpp-pin.env
 source "${here}/mpp-pin.env"
+
+if [[ -n "${RGA_COMPAT_SUITE:-}" ]]; then
+  # shellcheck source=/dev/null
+  source /etc/os-release
+  if [[ "${ID:-}" != debian || "${VERSION_CODENAME:-}" != "${RGA_COMPAT_SUITE}" ]]; then
+    printf 'RGA compatibility pins require Debian %s, not %s/%s\n' \
+      "${RGA_COMPAT_SUITE}" "${ID:-unknown}" "${VERSION_CODENAME:-unknown}" >&2
+    exit 1
+  fi
+fi
+printf 'RGA inputs: %s + %s (compatibility suite: %s)\n' \
+  "${RGA_RUNTIME_DEB}" "${RGA_DEV_DEB}" "${RGA_COMPAT_SUITE:-none; R0 release pair}"
 
 export DEBIAN_FRONTEND=noninteractive
 
