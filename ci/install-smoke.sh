@@ -66,6 +66,19 @@ grep -E '^(PRETTY_NAME|VERSION_CODENAME)=' /etc/os-release
 suite="$(sed -n 's/^VERSION_CODENAME=//p' /etc/os-release)"
 printf 'dpkg architecture: %s\n' "$(dpkg --print-architecture)"
 printf 'package under test: %s\n' "${deb}"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=ci/target-suite.env
+source "${here}/target-suite.env"
+[[ "${suite}" == "${TARGET_SUITE}" ]] || fail "container ${suite} does not match artifact suite ${TARGET_SUITE}"
+[[ "$(dpkg-deb -f "${deb}" X-CeraLive-Build-Suite)" == "${suite}" ]] \
+  || fail "package build suite does not match smoke container ${suite}"
+case "${suite}:${RGA_COMPAT_SUITE:-}" in
+  trixie:|bookworm:bookworm) ;;
+  *) fail "RGA selector does not match smoke suite ${suite}" ;;
+esac
+# shellcheck source=ci/mpp-pin.env
+source "${here}/mpp-pin.env"
+printf 'artifact suite: %s; RGA runtime: %s\n' "${TARGET_SUITE}" "${RGA_RUNTIME_DEB}"
 
 # This assertion is only worth anything if it can distinguish "nothing is
 # installed" from "nothing could be READ". Three outcomes, three answers:
@@ -112,13 +125,9 @@ apt-get update -qq
 assert_no_gstreamer "at baseline"
 
 step "install ONLY the two pinned runtime libraries the device image installs"
-runtime_debs=()
-for pattern in 'librockchip-mpp1_*.deb' 'librga2_*.deb'; do
-	mapfile -t matches < <(find "${runtime_dir}" -maxdepth 1 -name "${pattern}" | sort)
-	[ "${#matches[@]}" -eq 1 ] \
-		|| fail "${pattern} matched ${#matches[@]} files in ${runtime_dir} (expected exactly 1)"
-	runtime_debs+=("${matches[0]}")
-done
+runtime_debs=("${runtime_dir}/${MPP_RUNTIME_DEB}" "${runtime_dir}/${RGA_RUNTIME_DEB}")
+printf '%s  %s\n' "${MPP_RUNTIME_SHA256}" "${runtime_debs[0]}" \
+  "${RGA_RUNTIME_SHA256}" "${runtime_debs[1]}" | sha256sum -c -
 apt-get install -y --no-install-recommends "${runtime_debs[@]}"
 
 assert_no_gstreamer "after the pinned runtime libraries"

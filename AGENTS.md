@@ -63,11 +63,20 @@ Release through `.github/workflows/publish-release.yml` on `main` only, after
 the merged commit's Build Check passes. Dispatch with `release_type=stable`
 and `dry_run=false` for publication; `dry_run=true` rehearses without publishing.
 The workflow derives the next upstream-style version from existing tags, gates
-the build and both suite install smokes, publishes exactly one arm64 `.deb` plus
+both suite builds and their suite-matched install smokes, publishes exactly one arm64 `.deb` plus
 its `.sha256`, then dispatches `apt-reindex` to `CERALIVE/apt-worker`. Do not
 pre-create the tag. Independently download and checksum the release archive
 before image pinning, and verify the stable arm64 APT index and package bytes
 after reindexing; a successful dispatch alone is not serving proof.
+
+Production defaults to **Trixie / glibc 2.41 / GStreamer 1.26** in
+`ci/target-suite.env`. Bookworm builds explicitly set `TARGET_SUITE=bookworm`
+and select the existing `RGA_COMPAT_SUITE=bookworm` legacy pair. Both release
+builds run all four gates and package contracts; each smoke starts in a fresh
+matching container and verifies the package's `X-CeraLive-Build-Suite` field.
+Only Trixie's `release-assets` is published. Bookworm's `~bookworm` package is
+an internal `portability-bookworm` artifact, never a GitHub release asset or APT
+input. Its green smoke is not a claim that the Trixie/R0 binary runs on Bookworm.
 
 ## Repository map
 
@@ -214,10 +223,10 @@ The following are compatibility contracts, not cleanup opportunities:
   contract on both suites. R1 pinning waits for an actual R1 release.
   **Suite boundary:** published R0 imports `__isoc23_sscanf` and
   `__isoc23_strtol` at `GLIBC_2.38`; it cannot run on Bookworm's glibc 2.36.
-  Build Check explicitly sets `RGA_COMPAT_SUITE=bookworm` only for that leg's
+  Build Check and Publish Release set `RGA_COMPAT_SUITE=bookworm` only for that leg's
   installer, selecting the prior SHA-pinned Radxa `librga2`/`librga-dev`
   `2.2.0-1` pair. The installer rejects that selection outside Debian Bookworm.
-  Trixie keeps R0; default pins and release callers remain R0. Both required
+  Trixie keeps R0; default pins and published release artifacts remain R0. Both required
   legs retain every test and the staged provider contract. Bookworm green means
   plugin portability on GStreamer 1.22, **not R0-on-Bookworm support**. The
   `ci/rga-suite-pins.test.sh` gate pins both pairs and rejects unknown selectors.
