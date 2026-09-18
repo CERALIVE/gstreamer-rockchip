@@ -241,11 +241,14 @@ explicit BT.709 output still fails with librga's `Not support full csc mode
 [300]`. This is a genuine CSC capability gap, not a regression; its fix is
 deferred to convergence todo 49 after librga R1 `1.10.5+ceralive.1`.
 
-The strict d5 matrix records four PASS cells, five expected U3 chroma failures,
-and three rotation submission failures. Same-kernel A/B reproduces all three
-rotations identically on baseline: they are pre-existing, tracked separately,
-and not waived as U3. The owner authorizes `1.14.4+ceralive.3` with these explicit
-limitations; this is not a claim of complete board qualification. See the
+The corrected D24/d5 harness measures all 12 cells PASS on Orange Pi 5+, each
+at or above the unchanged 30 dB PSNR threshold. BGR software references now set
+`colorimetry=sRGB` on `rawvideoparse` itself, and DMA-BUF evidence markers are
+matched even when interleaved with `GST_DEBUG` text. The five stale expected
+chroma failures are removed; any below-threshold cell still fails the gate.
+Rock's D24 half has **not been run**; the OPi measurements do not qualify Rock.
+The earlier four-PASS/five-chroma-failure/three-rotation-failure result and the
+owner's `1.14.4+ceralive.3` disposition remain historical evidence. See the
 [board results](tests/board/DRILL-RESULTS.md#2026-09-08--u1-fixation-candidate-orange-pi-5-partial)
 for the tested packages, PSNR cells, and proof limits.
 
