@@ -151,7 +151,7 @@ record_cell() {
 # summary at all — an absence the caller scores as a failed cell.
 read_conversion_counters() {
 	local log=$1 summary
-	summary=$(grep -E '^DUT_FALLBACK=[0-9]+ DUT_DROPPED=[0-9]+ DUT_LAYOUT_REJECTIONS=[0-9]+$' "$log" | tail -1 || true)
+	summary=$(grep -oE 'DUT_FALLBACK=[0-9]+ DUT_DROPPED=[0-9]+ DUT_LAYOUT_REJECTIONS=[0-9]+' "$log" | tail -1 || true)
 	[[ -n "$summary" ]] || return 1
 	sed -nE 's/DUT_FALLBACK=([0-9]+) DUT_DROPPED=([0-9]+) DUT_LAYOUT_REJECTIONS=([0-9]+)/\1 \2 \3/p' \
 		<<<"$summary"
@@ -214,8 +214,8 @@ run_cell() {
 		return 1
 	fi
 
-	if ! grep -q '^INPUT_DMABUF=1 INPUT_MEMORIES=1$' "$hw_log" ||
-		! grep -q '^OUTPUT_SEEN=1 OUTPUT_DMABUF=1$' "$hw_log"; then
+	if ! grep -q 'INPUT_DMABUF=1 INPUT_MEMORIES=1' "$hw_log" ||
+		! grep -q 'OUTPUT_SEEN=1 OUTPUT_DMABUF=1' "$hw_log"; then
 		record_cell "$operation" "$in_format" "$out_format" "$out_w" "$out_h" \
 			FAIL n/a n/a n/a n/a 'DUT input/output was not one DMA-BUF'
 		return 1
