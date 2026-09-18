@@ -143,6 +143,7 @@ enum
   PROP_CONVERSION_FALLBACK_FRAMES,
   PROP_CONVERSION_DROPPED_FRAMES,
   PROP_LAYOUT_REJECTIONS,
+  PROP_CSC_FALLBACK_FRAMES,
   PROP_ENCODER_RESTARTS,
   PROP_LAST,
 };
@@ -524,6 +525,7 @@ gst_mpp_enc_get_property (GObject * object,
       break;
     case PROP_CONVERSION_FALLBACK_FRAMES:
     case PROP_CONVERSION_DROPPED_FRAMES:
+    case PROP_CSC_FALLBACK_FRAMES:
     case PROP_LAYOUT_REJECTIONS:{
       GstMppConversionStatsSnapshot stats;
       gst_mpp_conversion_stats_snapshot (gst_mpp_conversion_stats_get (object),
@@ -532,6 +534,8 @@ gst_mpp_enc_get_property (GObject * object,
         g_value_set_uint64 (value, stats.fallback_frames);
       else if (prop_id == PROP_CONVERSION_DROPPED_FRAMES)
         g_value_set_uint64 (value, stats.dropped_frames);
+      else if (prop_id == PROP_CSC_FALLBACK_FRAMES)
+        g_value_set_uint64 (value, stats.csc_fallback_frames);
       else
         g_value_set_uint64 (value, stats.layout_rejections);
       break;
@@ -2063,7 +2067,8 @@ convert:
    * keeping a second name for it alive across the error paths below. */
   rga_result = gst_mpp_rga_convert (inbuf, &src_info,
       gst_buffer_peek_memory (outbuf, 0), &dst_info, rotation,
-      GST_MPP_RGA_OP_ENCODE_CONVERT);
+      GST_MPP_RGA_OP_ENCODE_CONVERT,
+      gst_mpp_conversion_stats_get (G_OBJECT (self)));
   if (rga_result == GST_MPP_RGA_SUCCESS) {
     GST_DEBUG_OBJECT (self, "using RGA converted buffer");
     goto out;
@@ -2716,6 +2721,10 @@ gst_mpp_enc_class_init (GstMppEncClass * klass)
       g_param_spec_uint64 ("layout-rejections", "Layout rejections",
           "Frames rejected for an unsupported conversion layout", 0,
           G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_CSC_FALLBACK_FRAMES,
+      g_param_spec_uint64 ("csc-fallback-frames", "CSC fallback frames",
+          "Frames submitted with an unexpressible CSC using the library default",
+          0, G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
   g_object_class_install_property (gobject_class, PROP_ENCODER_RESTARTS,
       g_param_spec_uint64 ("encoder-restarts", "Encoder restarts",
           "Successful bounded MPP context restarts", 0, G_MAXUINT64, 0,
