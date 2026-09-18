@@ -46,13 +46,14 @@ The two required Build Check lanes deliberately use different RGA inputs:
 
 | Build environment | RGA runtime / headers | What a green result proves |
 |---|---|---|
-| Bookworm / GStreamer 1.22 / arm64 | Prior Radxa `librga2` / `librga-dev` `2.2.0-1` | Plugin source, tests and packaging work with the older toolchain and RGA pair; **not R0/R1 binary compatibility**. |
+| Bookworm / GStreamer 1.22 / arm64 | R1 header-only overlay; Radxa `librga2` / dev link `2.2.0-1` | GStreamer 1.22 portability and older-runtime fallback; **not R1 runtime support on Bookworm**. |
 | Trixie / GStreamer 1.26 / arm64 | CeraLive R1 `1.10.5+ceralive.1` | Plugin build and tests with the pinned RGA configuration; not board qualification. |
 
 Only Bookworm's dependency-install step sets `RGA_COMPAT_SUITE=bookworm`.
 The installer verifies the actual distro before using the compatibility pair;
 unknown selectors fail. With no selector, `ci/mpp-pin.env` selects R1. Neither
-lane is optional, and their failures still fail `Build Check summary`.
+lane is optional, and their failures still fail `Build Check summary`. The
+installer extracts only R1 headers on Bookworm, never installing R1 packages.
 
 The published **librga R0/R1 dependency** (`librga2-ceralive`, not this plugin
 package) requires `libc6 (>= 2.38)`. Bookworm has
@@ -122,6 +123,18 @@ color keys. Cold-start and color-only renegotiation regressions run without a
 board; they do not qualify hardware output or live-switch continuity.
 
 ## RGA conversion safety
+
+**C6b-colour (host implementation; hardware qualification pending):** the shared
+backend requires im2d ≥1.10.5 **headers**, resolves `improcessOpt` dynamically,
+and loads with an older runtime through seven-argument `improcess` (one warning;
+interpolation/async disabled). Encoder/decoder blits use im2d;
+`GST_MPP_RGA_LEGACY_BLIT=1` retains their one-release rollback. `rgaconvert`
+adds `interpolation=default|linear|cubic`, default `default`. Unsupported CSC
+combinations retain D29's default-matrix path, warn once per element and count
+`csc-fallback-frames`, separately from CPU copies. The
+[C6b contract](docs/RGA-MPP-INTERACTION.md#c6b-colour-host-implementation-board-qualification-pending)
+supersedes historical full-CSC/refusal wording below. Both board matrices remain
+NOT-RUN. C6b-perf and C6b-async are NOT-STARTED, measurement-gated.
 
 The MPP encoder and decoders treat librga as available only after `/dev/rga`
 answers `RGA_IOC_GET_DRVIER_VERSION` with driver version 1.2.4 or newer.

@@ -147,6 +147,77 @@ errno and failure stage survive.
 
 ## im2d colorimetry
 
+### C6b-colour (host implementation; board qualification pending)
+
+This contract supersedes the historical full-CSC/refusal policy below. Build
+against **R1 headers, im2d API ≥1.10.5**; the shared backend asserts the version.
+That is not a minimum runtime version. It retains an explicit module from
+`g_module_open("librga.so.2", G_MODULE_BIND_LAZY | G_MODULE_BIND_LOCAL)` for the
+plugin lifetime and resolves `improcessOpt` with `g_module_symbol`, never as an
+undefined ELF dependency. Older runtimes use seven-argument `improcess`, with
+interpolation/async disabled and one warning per backend initialization.
+`GST_DEBUG=mpprgabackend:4` reports `improcessOpt resolved`; level 6 reports
+actual synchronous Opt submissions. MPP encoder/decoder blits use this same
+dispatcher, preserving pixel strides, crops, rotations and virtual-address input.
+`GST_MPP_RGA_LEGACY_BLIT=1` selects the original blit rollback for one release,
+with a warning. Neither route enables CPU copying.
+
+The pure mapper retains complete input/output `GstVideoColorimetry` (range,
+matrix, transfer and primaries). `imsetColorSpace` applies the directional enums
+on the descriptors, **not** the transform usage bitfield: the namespaces overlap.
+
+| Request | Selection |
+|---|---|
+| YUV→RGB, source 601 limited/full | `IM_YUV_TO_RGB_BT601_LIMIT/FULL` |
+| YUV→RGB, source 709 limited | `IM_YUV_TO_RGB_BT709_LIMIT` |
+| RGB→YUV, destination 601 limited/full | `IM_RGB_TO_YUV_BT601_LIMIT/FULL` |
+| RGB→YUV, destination 709 limited | `IM_RGB_TO_YUV_BT709_LIMIT` |
+| Equal complete YUV colorimetry; RGB→RGB | No CSC |
+| 709 full, other/unknown matrix or range, limited RGB, differing YUV colorimetry (including primaries/transfer) | D29 default-matrix fallback; no full-CSC endpoint request |
+
+Unsupported rows remain negotiable. They warn once per element, naming both
+colorimetries, and increment read-only `csc-fallback-frames` after successful RGA
+conversion (at most once per compositor frame). This does not claim requested
+primaries/transfer were converted: RGA is not a gamut/transfer converter.
+`conversion-fallback-frames` still counts CPU copies only. Failed/unavailable
+submissions do not increment the CSC counter. Encoder input uses negotiated
+video info; decoder input uses the MPP frame's ISO colour metadata, retaining
+missing metadata as unknown instead of guessing.
+
+`rgaconvert.interpolation` is additive: enum `default`, `linear`, `cubic`,
+default `default`. The zeroed `im_opt_t` carries
+`version=RGA_CURRENT_API_HEADER_VERSION`; Opt gets `-1`, `NULL`, `&opt` and
+synchronous usage. No fences, cache or batching are added. Only
+`IM_STATUS_SUCCESS` and `IM_STATUS_NOERROR` succeed. Unsupported/invalid requests
+map to `GST_FLOW_NOT_NEGOTIATED`; execution/resource/unknown statuses map to
+`GST_FLOW_ERROR`, retaining dropped-frame accounting.
+
+Both suite builds use R1 headers. Bookworm keeps the Radxa runtime and dev link,
+extracting **only headers** from the checksum-verified R1 archive into
+`/usr/local/include/rga`. No R1 package is installed there and no glibc floor is
+changed. Only Trixie is publishable. Build Check retains `plugin-<suite>`
+candidate archives for exact-binary board testing.
+
+d5 now uses an extracted candidate, isolated plugin path and fresh registry,
+explicit BT.709 YUV caps/reference for every geometry, and the five D24 quality
+limits in `tests/board/d5-quality-contract.sh`. Every cell executes. Unexpected
+PASS, new FAIL and submission errors fail the drill; rotations are not waived.
+The host test proves that removing a known-limit row fails.
+
+**BOARD ROWS: NOT-RUN.** Both boards still need all twelve d5 cells and
+BT.709-versus-601-reference PSNR deltas; d2 300/300 H.265 and H.264 with zero
+`RGA_BLIT fail`; legacy rollback; older-Radxa-runtime load, one warning and
+seven-argument execution; R1 lookup and actual 4K Opt execution. Stubs prove no
+pixels or silicon. Do not APT-swap libraries on sysext-backed `/usr`: use the
+separately approved restoration procedure, or label process-local selection as
+isolated evidence, not an installed-runtime restoration.
+
+**C6b-perf: NOT-STARTED — measurement-gated, both-board gate not runnable in this lane.**
+
+**C6b-async: NOT-STARTED — measurement-gated, both-board gate not runnable in this lane.**
+
+### Historical pre-C6b implementation and evidence
+
 [EXISTS] Both `improcess()` submission paths set `rga_buffer_t.color_space_mode`
 after `wrapbuffer_fd()`. The API was checked against the SHA-pinned
 `librga-dev_2.2.0-1_arm64.deb`, retained as the Bookworm compatibility pair
