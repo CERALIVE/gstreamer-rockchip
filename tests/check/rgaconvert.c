@@ -1007,6 +1007,7 @@ GST_START_TEST (test_mpp_blit_uses_im2d_and_explicit_rollback)
   const gint usages[] = { 0, IM_HAL_TRANSFORM_ROT_90,
     IM_HAL_TRANSFORM_ROT_180, IM_HAL_TRANSFORM_ROT_270 };
   rga_info_t src = { 0, }, dst = { 0, };
+  guint8 virtual_input;
   guint i;
 
   gst_mpp_rga_backend_get_default ();
@@ -1026,14 +1027,26 @@ GST_START_TEST (test_mpp_blit_uses_im2d_and_explicit_rollback)
     fail_unless_equals_int (submitted_srect.y, 32);
     fail_unless_equals_int (submitted_src.wstride, 672);
     fail_unless_equals_int (submitted_src.hstride, 528);
+    fail_unless_equals_int (submitted_src.width, 656);
+    fail_unless_equals_int (submitted_src.height, 512);
     fail_unless_equals_int (submitted_dst.color_space_mode, IM_YUV_TO_RGB_BT709_LIMIT);
+    src.virAddr = &virtual_input;
+    fail_unless_equals_int (gst_mpp_rga_real_blit (&src, &dst, NULL), 0);
+    fail_unless_equals_int (submitted_usage, usages[i] | IM_SYNC);
+    fail_unless_equals_int (submitted_srect.x, 16);
+    fail_unless_equals_int (submitted_srect.y, 32);
+    fail_unless_equals_int (submitted_src.width, 656);
+    fail_unless_equals_int (submitted_src.height, 512);
+    fail_unless_equals_int (submitted_src.wstride, 672);
+    fail_unless_equals_int (submitted_src.hstride, 528);
+    src.virAddr = NULL;
   }
-  fail_unless_equals_int (submitted_calls, 4);
+  fail_unless_equals_int (submitted_calls, 8);
   fail_unless_equals_int (legacy_calls, 0);
   g_setenv ("GST_MPP_RGA_LEGACY_BLIT", "1", TRUE);
   fail_unless_equals_int (gst_mpp_rga_real_blit (&src, &dst, NULL), 0);
   fail_unless_equals_int (legacy_calls, 1);
-  fail_unless_equals_int (submitted_calls, 4);
+  fail_unless_equals_int (submitted_calls, 8);
   g_unsetenv ("GST_MPP_RGA_LEGACY_BLIT");
 }
 GST_END_TEST;

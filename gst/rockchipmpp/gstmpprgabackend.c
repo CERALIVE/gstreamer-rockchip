@@ -166,9 +166,10 @@ gst_mpp_rga_real_blit (rga_info_t * src, rga_info_t * dst, gpointer user_data)
         return -EINVAL;
     }
     source = src->virAddr ?
-        wrapbuffer_virtualaddr (src->virAddr, src->rect.width,
-        src->rect.height, src->rect.format, src->rect.wstride,
-        src->rect.hstride) : wrapbuffer_fd (src->fd,
+        wrapbuffer_virtualaddr (src->virAddr,
+        src->rect.width + src->rect.xoffset,
+        src->rect.height + src->rect.yoffset, src->rect.format,
+        src->rect.wstride, src->rect.hstride) : wrapbuffer_fd (src->fd,
         src->rect.width + src->rect.xoffset,
         src->rect.height + src->rect.yoffset, src->rect.format,
         src->rect.wstride, src->rect.hstride);
