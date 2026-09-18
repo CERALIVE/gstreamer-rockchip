@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
 # D24: only measured chroma-quality limits, never pipeline/submission errors.
-EXPECTED_FAIL_CELLS=(
-  'csc:BGR->NV12'
-  'scale:NV12->NV16'
-  'scale:NV16->NV12'
-  'scale:BGR->NV12'
-  'crop:BGR->NV12'
-)
+EXPECTED_FAIL_CELLS=()
 
 d5_quality_verdict() {
   local cell=$1 quality_pass=$2 known=0 expected
