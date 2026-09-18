@@ -28,6 +28,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=tests/board/board-lib.sh
 source "$ROOT/tests/board/board-lib.sh"
+source "$ROOT/tests/board/d5-quality-contract.sh"
 
 : "${FORK_DEB:?FORK_DEB must name the CeraLive arm64 .deb}"
 readonly PSNR_MIN="${D5_PSNR_MIN:-30}"
@@ -48,7 +49,6 @@ command -v podman >/dev/null 2>&1 || {
 new_report_dir d5-rgaconvert-matrix
 exec > >(tee "$REPORT_DIR/transcript.log") 2>&1
 board_preflight
-install_deb "$FORK_DEB"
 
 remote_scratch="/tmp/ceralive-rgaconvert-matrix-$$"
 helper_dir=$(mktemp -d)
@@ -59,6 +59,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 board_ssh "mkdir -p '$remote_scratch'"
+board_scp "$FORK_DEB" "$BOARD_TARGET:$remote_scratch/candidate.deb"
+board_ssh "dpkg-deb -x '$remote_scratch/candidate.deb' '$remote_scratch/package'; mkdir -p '$remote_scratch/plugin'; cp '$remote_scratch/package/usr/lib/aarch64-linux-gnu/gstreamer-1.0/'libgst*.so '$remote_scratch/plugin/'"
+d5_gst_ssh() {
+  board_ssh "export GST_PLUGIN_PATH='$remote_scratch/plugin' GST_REGISTRY='$remote_scratch/registry.bin'; $*"
+}
+d5_gst_ssh 'gst-inspect-1.0 rockchiprga' >"$REPORT_DIR/plugin-identity.log"
+grep -F "$remote_scratch/plugin/libgstrockchiprga.so" "$REPORT_DIR/plugin-identity.log"
+sha256sum "$FORK_DEB" >"$REPORT_DIR/candidate.sha256"
 podman run --rm --platform linux/arm64 --userns=keep-id \
 	-v "$ROOT:/src:ro" -v "$helper_dir:/out" "$BUILD_IMAGE" bash -lc \
 	'gcc -std=c11 -Wall -Wextra -Werror /src/tests/board/dmabuf-rgaconvert.c -o /out/dmabuf-rgaconvert $(pkg-config --cflags --libs gstreamer-1.0 gstreamer-app-1.0 gstreamer-allocators-1.0 gstreamer-video-1.0)'
@@ -72,7 +80,7 @@ board_ssh 'test -c /dev/rga' || {
 	exit 1
 }
 for element in rgaconvert videotestsrc rawvideoparse videoconvert videoscale videocrop videoflip filesink; do
-	board_ssh "GST_DEBUG=0 gst-inspect-1.0 '$element' >/dev/null" || {
+	d5_gst_ssh "GST_DEBUG=0 gst-inspect-1.0 '$element' >/dev/null" || {
 		echo "FAIL: required element unavailable on the board: $element"
 		seal_report FAIL || true
 		exit 1
@@ -152,8 +160,8 @@ read_conversion_counters() {
 run_cell() {
 	local operation=$1 in_format=$2 out_format=$3
 	local parse_format=${in_format,,}
-	local input_colorimetry=",colorimetry=bt601"
-	local output_colorimetry=bt601
+	local input_colorimetry=",colorimetry=bt709"
+	local output_colorimetry=bt709
 	local label="$operation-$in_format-to-$out_format"
 	local reference_filter="videoconvert" out_w out_h
 	local hw_log="$REPORT_DIR/$label.hw.log"
@@ -161,9 +169,8 @@ run_cell() {
 	local hw_raw="$REPORT_DIR/$label.hw.raw"
 	local ref_raw="$REPORT_DIR/$label.ref.raw"
 	local remote_input="$remote_scratch/$label.input.raw"
-	local counters fallback dropped rejections psnr_line luma chroma worst
-	(( SRC_HEIGHT > 576 )) && input_colorimetry=",colorimetry=bt709"
-	[[ "$in_format" == BGR ]] && input_colorimetry=""
+	local counters fallback dropped rejections psnr_line luma chroma worst verdict quality_pass=1
+	[[ "$in_format" == BGR ]] && input_colorimetry=",colorimetry=sRGB"
 
 	case "$operation" in
 		csc)
@@ -186,21 +193,20 @@ run_cell() {
 			return 1
 			;;
 	esac
-	(( out_h > 576 )) && output_colorimetry=bt709
 	if [[ "$in_format" == NV16 && ("$operation" == crop || "$operation" == rotate) ]]; then
 		reference_filter="videoconvert ! video/x-raw,format=I420 ! $reference_filter"
 	fi
 
 	printf '\n== cell %s -> %s (%sx%s) ==\n' "$label" "$out_format" "$out_w" "$out_h"
 
-	if ! board_ssh "timeout 60 gst-launch-1.0 -e videotestsrc num-buffers=1 pattern=smpte100 ! video/x-raw,format=$in_format,$SRC_CAPS ! filesink location='$remote_input'" \
+	if ! d5_gst_ssh "timeout 60 gst-launch-1.0 -e videotestsrc num-buffers=1 pattern=smpte100 ! video/x-raw,format=$in_format,$SRC_CAPS$input_colorimetry ! filesink location='$remote_input'" \
 		>"$REPORT_DIR/$label.source.log" 2>&1; then
 		record_cell "$operation" "$in_format" "$out_format" "$out_w" "$out_h" \
 			FAIL n/a n/a n/a n/a 'source frame generation failed'
 		return 1
 	fi
 
-	if ! board_ssh "GST_DEBUG_NO_COLOR=1 GST_DEBUG=rgaconvert:5 timeout 60 '$remote_scratch/dmabuf-rgaconvert' '$remote_input' '$in_format' '$remote_scratch/$label.hw.raw' '$out_format' '$out_w' '$out_h' '$operation'" \
+	if ! d5_gst_ssh "GST_DEBUG_NO_COLOR=1 GST_DEBUG=rgaconvert:5,mpprgabackend:6 timeout 60 '$remote_scratch/dmabuf-rgaconvert' '$remote_input' '$in_format' '$remote_scratch/$label.hw.raw' '$out_format' '$out_w' '$out_h' '$operation'" \
 		>"$hw_log" 2>&1; then
 		record_cell "$operation" "$in_format" "$out_format" "$out_w" "$out_h" \
 			FAIL n/a n/a n/a n/a 'hardware pipeline failed'
@@ -214,7 +220,7 @@ run_cell() {
 		return 1
 	fi
 
-	if ! board_ssh "timeout 60 gst-launch-1.0 -e filesrc location='$remote_input' ! rawvideoparse format=$parse_format width=$SRC_WIDTH height=$SRC_HEIGHT framerate=1/1 ! video/x-raw,format=$in_format,width=$SRC_WIDTH,height=$SRC_HEIGHT$input_colorimetry ! $reference_filter ! video/x-raw,format=$out_format,width=$out_w,height=$out_h,colorimetry=$output_colorimetry ! filesink location='$remote_scratch/$label.ref.raw'" \
+	if ! d5_gst_ssh "timeout 60 gst-launch-1.0 -e filesrc location='$remote_input' ! rawvideoparse format=$parse_format width=$SRC_WIDTH height=$SRC_HEIGHT framerate=1/1 ! video/x-raw,format=$in_format,width=$SRC_WIDTH,height=$SRC_HEIGHT$input_colorimetry ! $reference_filter ! video/x-raw,format=$out_format,width=$out_w,height=$out_h,colorimetry=$output_colorimetry ! filesink location='$remote_scratch/$label.ref.raw'" \
 		>"$ref_log" 2>&1; then
 		record_cell "$operation" "$in_format" "$out_format" "$out_w" "$out_h" \
 			FAIL n/a n/a n/a n/a 'software reference pipeline failed'
@@ -252,13 +258,15 @@ run_cell() {
 
 	if [[ "$worst" != inf ]] &&
 		! awk -v worst="$worst" -v floor="$PSNR_MIN" 'BEGIN { exit !(worst >= floor) }'; then
+		quality_pass=0
+	fi
+	if ! verdict=$(d5_quality_verdict "$operation:$in_format->$out_format" "$quality_pass"); then
 		record_cell "$operation" "$in_format" "$out_format" "$out_w" "$out_h" \
-			FAIL "$luma" "$chroma" "$fallback" "$dropped" "worst PSNR ${worst} dB below ${PSNR_MIN} dB"
+			FAIL "$luma" "$chroma" "$fallback" "$dropped" "D24 unexpected quality verdict; worst ${worst} dB"
 		return 1
 	fi
-
 	record_cell "$operation" "$in_format" "$out_format" "$out_w" "$out_h" \
-		PASS "$luma" "$chroma" "$fallback" "$dropped" "worst ${worst} dB"
+		"$verdict" "$luma" "$chroma" "$fallback" "$dropped" "worst ${worst} dB; D24 chroma-quality contract"
 }
 
 result=0
