@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <gst/check/gstcheck.h>
+#include <rga/im2d.h>
 
 #include "../../gst/rockchipmpp/gstmpprgabackend.h"
 
@@ -73,6 +74,110 @@ static const GstMppRgaBackendOps fake_ops = {
   .init = fake_init,
   .blit = fake_blit,
 };
+
+static gint
+fake_process (const GstMppRgaIm2dRequest * request, gpointer user_data)
+{
+  (void) request;
+  return ((FakeRga *) user_data)->blit_result;
+}
+
+static gint
+fake_composite (const GstMppRgaIm2dCompositeRequest * request, gpointer user_data)
+{
+  return fake_process (&request->transform, user_data);
+}
+
+GST_START_TEST (test_im_status_boundary_rejects_unknown_positive_values)
+{
+  const gint statuses[] = { IM_STATUS_SUCCESS, IM_STATUS_NOERROR, 0, 3, 42,
+    IM_STATUS_FAILED, IM_STATUS_NOT_SUPPORTED, IM_STATUS_OUT_OF_MEMORY,
+    IM_STATUS_INVALID_PARAM, IM_STATUS_ILLEGAL_PARAM, IM_STATUS_ERROR_VERSION,
+    IM_STATUS_NO_SESSION };
+  guint i;
+
+  for (i = 0; i < G_N_ELEMENTS (statuses); i++) {
+    FakeRga fake = {.probe_available = TRUE, .blit_result = statuses[i]};
+    GstMppRgaBackendOps ops = fake_ops;
+    GstMppRgaBackend *backend;
+    GstMppRgaIm2dCompositeRequest request = { 0, };
+    GstFlowReturn expected = GST_FLOW_ERROR;
+    ops.process = fake_process;
+    ops.composite = fake_composite;
+    backend = gst_mpp_rga_backend_new (&ops, &fake);
+    if (statuses[i] == IM_STATUS_SUCCESS || statuses[i] == IM_STATUS_NOERROR)
+      expected = GST_FLOW_OK;
+    else if (statuses[i] == IM_STATUS_NOT_SUPPORTED ||
+        statuses[i] == IM_STATUS_INVALID_PARAM ||
+        statuses[i] == IM_STATUS_ILLEGAL_PARAM ||
+        statuses[i] == IM_STATUS_ERROR_VERSION)
+      expected = GST_FLOW_NOT_NEGOTIATED;
+    fail_unless_equals_int (gst_mpp_rga_result_to_flow (
+            gst_mpp_rga_backend_process (backend, GST_MPP_RGA_OP_CONVERT,
+                GST_VIDEO_FORMAT_NV12, GST_VIDEO_FORMAT_BGR,
+                &request.transform)), expected);
+    fail_unless_equals_int (gst_mpp_rga_result_to_flow (
+            gst_mpp_rga_backend_composite (backend, GST_VIDEO_FORMAT_NV12,
+                GST_VIDEO_FORMAT_NV12, &request)), expected);
+    gst_mpp_rga_backend_free (backend);
+  }
+}
+GST_END_TEST;
+
+GST_START_TEST (test_csc_direction_matrix_range_table)
+{
+  const GstVideoColorMatrix matrices[] = { GST_VIDEO_COLOR_MATRIX_BT601,
+    GST_VIDEO_COLOR_MATRIX_BT709, GST_VIDEO_COLOR_MATRIX_BT2020,
+    GST_VIDEO_COLOR_MATRIX_UNKNOWN };
+  const GstVideoColorRange ranges[] = { GST_VIDEO_COLOR_RANGE_16_235,
+    GST_VIDEO_COLOR_RANGE_0_255, GST_VIDEO_COLOR_RANGE_UNKNOWN };
+  const gint expected[2][2][2] = {
+    {{IM_YUV_TO_RGB_BT601_LIMIT, IM_YUV_TO_RGB_BT601_FULL},
+      {IM_YUV_TO_RGB_BT709_LIMIT, 0}},
+    {{IM_RGB_TO_YUV_BT601_LIMIT, IM_RGB_TO_YUV_BT601_FULL},
+      {IM_RGB_TO_YUV_BT709_LIMIT, 0}} };
+  guint m, r, direction;
+  GstVideoInfo rgb, yuv;
+  GstMppRgaIm2dRequest request;
+
+  gst_video_info_set_format (&rgb, GST_VIDEO_FORMAT_BGR, 640, 480);
+  gst_video_info_set_format (&yuv, GST_VIDEO_FORMAT_NV12, 640, 480);
+  for (direction = 0; direction < 2; direction++) {
+    for (m = 0; m < G_N_ELEMENTS (matrices); m++) {
+      for (r = 0; r < G_N_ELEMENTS (ranges); r++) {
+        gint flag = m < 2 && r < 2 ? expected[direction][m][r] : 0;
+        yuv.colorimetry.matrix = matrices[m];
+        yuv.colorimetry.range = ranges[r];
+        memset (&request, 0, sizeof (request));
+        fail_unless_equals_int (gst_mpp_rga_request_set_colorimetry (&request,
+                direction ? &rgb : &yuv, direction ? &yuv : &rgb), flag != 0);
+        fail_unless_equals_int (request.src_color_space_mode, 0);
+        fail_unless_equals_int (request.dst_color_space_mode, flag);
+        fail_unless_equals_int (request.csc_fallback, flag == 0);
+        fail_unless (gst_video_colorimetry_is_equal (&request.colorspace_in,
+                direction ? &rgb.colorimetry : &yuv.colorimetry));
+      }
+    }
+  }
+  fail_unless (gst_mpp_rga_request_set_colorimetry (&request, &rgb, &rgb));
+  fail_unless (gst_mpp_rga_request_set_colorimetry (&request, &yuv, &yuv));
+  {
+    GstVideoInfo different = yuv;
+    GstMppConversionStats stats;
+    GstMppConversionStatsSnapshot snapshot;
+    different.colorimetry.primaries = GST_VIDEO_COLOR_PRIMARIES_BT2020;
+    fail_if (gst_mpp_rga_request_set_colorimetry (&request, &yuv, &different));
+    gst_mpp_conversion_stats_init (&stats);
+    gst_mpp_rga_count_csc_fallback (&request, &stats);
+    gst_mpp_rga_count_csc_fallback (&request, &stats);
+    gst_mpp_conversion_stats_snapshot (&stats, &snapshot);
+    fail_unless_equals_uint64 (snapshot.csc_fallback_frames, 2);
+    fail_unless_equals_uint64 (snapshot.fallback_frames, 0);
+    fail_unless (stats.csc_warned);
+    gst_mpp_conversion_stats_clear (&stats);
+  }
+}
+GST_END_TEST;
 
 static GstMppRgaBackend *
 new_backend (FakeRga * fake)
@@ -243,6 +348,8 @@ mpp_rga_backend_suite (void)
 {
   Suite *suite = suite_create ("mpp_rga_backend");
   TCase *test_case = tcase_create ("backend");
+  tcase_add_test (test_case, test_im_status_boundary_rejects_unknown_positive_values);
+  tcase_add_test (test_case, test_csc_direction_matrix_range_table);
 
   tcase_add_test (test_case, test_unavailable_backend_takes_typed_refusal_path);
   tcase_add_test (test_case,

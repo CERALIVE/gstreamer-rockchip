@@ -21,6 +21,8 @@ typedef struct
   guint64 fallback_frames;
   guint64 dropped_frames;
   guint64 layout_rejections;
+  guint64 csc_fallback_frames;
+  gboolean csc_warned;
 } GstMppConversionStats;
 
 typedef struct
@@ -28,6 +30,7 @@ typedef struct
   guint64 fallback_frames;
   guint64 dropped_frames;
   guint64 layout_rejections;
+  guint64 csc_fallback_frames;
 } GstMppConversionStatsSnapshot;
 
 void gst_mpp_conversion_stats_init (GstMppConversionStats * stats);

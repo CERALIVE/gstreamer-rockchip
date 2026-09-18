@@ -37,9 +37,11 @@ typedef enum
   GST_MPP_RGA_BLIT_FAILED,
   GST_MPP_RGA_DEVICE_LOST,
   GST_MPP_RGA_LAYOUT_REJECTED,
+  GST_MPP_RGA_NOT_SUPPORTED,
 } GstMppRgaResult;
 
 const gchar *gst_mpp_rga_operation_name (GstMppRgaOperation operation);
+GstFlowReturn gst_mpp_rga_result_to_flow (GstMppRgaResult result);
 
 #ifdef HAVE_RGA
 typedef struct
@@ -77,6 +79,10 @@ typedef struct
   gint priority;
   gint src_color_space_mode;
   gint dst_color_space_mode;
+  GstVideoColorimetry colorspace_in;
+  GstVideoColorimetry colorspace_out;
+  gboolean csc_fallback;
+  gint interp;
 } GstMppRgaIm2dRequest;
 
 typedef struct
@@ -113,6 +119,8 @@ gboolean gst_mpp_rga_request_set_colorimetry (GstMppRgaIm2dRequest * request,
     const GstVideoInfo * input, const GstVideoInfo * output);
 gboolean gst_mpp_rga_composite_set_colorimetry (GstMppRgaIm2dCompositeRequest *
     request, const GstVideoInfo * accumulator, const GstVideoInfo * overlay);
+void gst_mpp_rga_count_csc_fallback (const GstMppRgaIm2dRequest * request,
+    GstMppConversionStats * stats);
 
 GstMppRgaBackend *gst_mpp_rga_backend_new (const GstMppRgaBackendOps * ops,
     gpointer user_data);
