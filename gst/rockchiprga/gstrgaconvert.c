@@ -82,6 +82,7 @@ struct _GstRgaConvert
   gboolean vflip;
   guint core_mask;
   gint priority;
+  gint interpolation;
   guint crop_x;
   guint crop_y;
   guint crop_w;
@@ -106,7 +107,26 @@ enum
   PROP_CONVERSION_FALLBACK_FRAMES,
   PROP_CONVERSION_DROPPED_FRAMES,
   PROP_LAYOUT_REJECTIONS,
+  PROP_INTERPOLATION,
+  PROP_CSC_FALLBACK_FRAMES,
 };
+
+static GType
+gst_rga_interpolation_get_type (void)
+{
+  static gsize type;
+  static const GEnumValue values[] = {
+    {IM_INTERP_DEFAULT, "Library default", "default"},
+    {IM_INTERP_LINEAR, "Linear", "linear"},
+    {IM_INTERP_CUBIC, "Cubic", "cubic"},
+    {0, NULL, NULL},
+  };
+  if (g_once_init_enter (&type)) {
+    GType registered = g_enum_register_static ("GstRgaInterpolation", values);
+    g_once_init_leave (&type, registered);
+  }
+  return type;
+}
 
 GType
 gst_rga_rotation_get_type (void)
@@ -955,6 +975,7 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
   GstMppRgaResult result;
   gint input_fd;
   gint output_fd;
+  GstFlowReturn failure_flow = GST_FLOW_NOT_NEGOTIATED;
 
   g_mutex_lock (&self->lock);
   if (!self->have_caps) {
@@ -970,16 +991,14 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
   vflip = self->vflip;
   core_mask = self->core_mask;
   priority = self->priority;
+  request.interp = self->interpolation;
   crop_x = self->crop_x;
   crop_y = self->crop_y;
   crop_w = self->crop_w;
   crop_h = self->crop_h;
   g_mutex_unlock (&self->lock);
 
-  if (!gst_mpp_rga_request_set_colorimetry (&request, &input_info,
-          &output_info))
-    return gst_rga_convert_not_negotiated (self,
-        "negotiated matrix or range is unsupported by librga CSC", FALSE);
+  gst_mpp_rga_request_set_colorimetry (&request, &input_info, &output_info);
 
   if (!gst_rga_convert_layout_from_buffer (input, &input_info, &input_layout,
           &reason) ||
@@ -1062,11 +1081,15 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
   result = gst_mpp_rga_backend_process (backend, GST_MPP_RGA_OP_CONVERT,
       input_layout.format, output_layout.format, &request);
   if (result != GST_MPP_RGA_SUCCESS) {
+    failure_flow = gst_mpp_rga_result_to_flow (result);
     reason = result == GST_MPP_RGA_TUPLE_DEMOTED ?
         "the conversion tuple is temporarily demoted" :
         "the trial-verified RGA backend rejected the conversion";
     goto refuse;
   }
+
+  gst_mpp_rga_count_csc_fallback (&request,
+      gst_mpp_conversion_stats_get (G_OBJECT (self)));
 
   if (output_staging &&
       !gst_rga_convert_copy_from_staging (output_staging, output,
@@ -1085,7 +1108,8 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
 refuse:
   gst_clear_buffer (&input_staging);
   gst_clear_buffer (&output_staging);
-  return gst_rga_convert_not_negotiated (self, reason, FALSE);
+  gst_rga_convert_not_negotiated (self, reason, FALSE);
+  return failure_flow;
 }
 
 static void
@@ -1097,6 +1121,9 @@ gst_rga_convert_set_property (GObject * object, guint prop_id,
 
   g_mutex_lock (&self->lock);
   switch (prop_id) {
+    case PROP_INTERPOLATION:
+      self->interpolation = g_value_get_enum (value);
+      break;
     case PROP_ROTATION:
       self->rotation = g_value_get_enum (value);
       reconfigure = TRUE;
@@ -1147,7 +1174,7 @@ gst_rga_convert_get_property (GObject * object, guint prop_id, GValue * value,
 
   if (prop_id == PROP_CONVERSION_FALLBACK_FRAMES ||
       prop_id == PROP_CONVERSION_DROPPED_FRAMES ||
-      prop_id == PROP_LAYOUT_REJECTIONS) {
+      prop_id == PROP_LAYOUT_REJECTIONS || prop_id == PROP_CSC_FALLBACK_FRAMES) {
     GstMppConversionStatsSnapshot stats;
 
     gst_mpp_conversion_stats_snapshot (gst_mpp_conversion_stats_get (object),
@@ -1156,6 +1183,8 @@ gst_rga_convert_get_property (GObject * object, guint prop_id, GValue * value,
       g_value_set_uint64 (value, stats.fallback_frames);
     else if (prop_id == PROP_CONVERSION_DROPPED_FRAMES)
       g_value_set_uint64 (value, stats.dropped_frames);
+    else if (prop_id == PROP_CSC_FALLBACK_FRAMES)
+      g_value_set_uint64 (value, stats.csc_fallback_frames);
     else
       g_value_set_uint64 (value, stats.layout_rejections);
     return;
@@ -1163,6 +1192,9 @@ gst_rga_convert_get_property (GObject * object, guint prop_id, GValue * value,
 
   g_mutex_lock (&self->lock);
   switch (prop_id) {
+    case PROP_INTERPOLATION:
+      g_value_set_enum (value, self->interpolation);
+      break;
     case PROP_ROTATION:
       g_value_set_enum (value, self->rotation);
       break;
@@ -1293,6 +1325,15 @@ gst_rga_convert_class_init (GstRgaConvertClass * klass)
   element_class->change_state = GST_DEBUG_FUNCPTR
       (gst_rga_convert_change_state);
 
+  g_object_class_install_property (gobject_class, PROP_INTERPOLATION,
+      g_param_spec_enum ("interpolation", "Interpolation",
+          "RGA scaling interpolation (older runtimes use the library default)",
+          gst_rga_interpolation_get_type (), IM_INTERP_DEFAULT,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_CSC_FALLBACK_FRAMES,
+      g_param_spec_uint64 ("csc-fallback-frames", "CSC fallback frames",
+          "Frames submitted with an unexpressible CSC using the library default",
+          0, G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
   g_object_class_install_property (gobject_class, PROP_ROTATION,
       g_param_spec_enum ("rotation", "Rotation",
           "Clockwise rotation applied by RGA", GST_TYPE_RGA_ROTATION,

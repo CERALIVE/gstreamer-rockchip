@@ -18,6 +18,24 @@
 static rga_buffer_t submitted_src;
 static rga_buffer_t submitted_dst;
 static guint submitted_calls;
+static gint submitted_interp;
+static gint submitted_usage;
+static im_rect submitted_srect;
+static guint legacy_calls;
+
+static IM_STATUS
+fake_process_opt (rga_buffer_t src, rga_buffer_t dst, rga_buffer_t pat,
+    im_rect srect, im_rect drect, im_rect prect, int acquire, int *release,
+    im_opt_t *opt, int usage)
+{
+  fail_unless_equals_int (acquire, -1);
+  fail_unless (release == NULL);
+  fail_unless (opt != NULL);
+  fail_unless_equals_int (opt->version, RGA_CURRENT_API_HEADER_VERSION);
+  fail_unless (usage & IM_SYNC);
+  submitted_interp = opt->interp;
+  return improcess (src, dst, pat, srect, drect, prect, usage);
+}
 
 int
 c_RkRgaInit (void)
@@ -28,6 +46,7 @@ c_RkRgaInit (void)
 int
 c_RkRgaBlit (rga_info_t * src, rga_info_t * dst, rga_info_t * src1)
 {
+  legacy_calls++;
   (void) src;
   (void) dst;
   (void) src1;
@@ -64,6 +83,8 @@ improcess (rga_buffer_t src, rga_buffer_t dst, rga_buffer_t pat,
   submitted_src = src;
   submitted_dst = dst;
   submitted_calls++;
+  submitted_usage = usage;
+  submitted_srect = src_rect;
   (void) pat;
   (void) src_rect;
   (void) dst_rect;
@@ -146,6 +167,7 @@ test_convert_new (FakeRga * fake)
 
   test.backend = gst_mpp_rga_backend_new (&fake_ops, fake);
   test.convert = g_object_new (GST_TYPE_RGA_CONVERT, NULL);
+  rga_process_opt = fake_process_opt;
   gst_rga_convert_set_backend_for_test (test.convert, test.backend);
   return test;
 }
@@ -771,7 +793,7 @@ GST_START_TEST (test_colorimetry_reaches_improcess)
     {"bt601", IM_YUV_TO_RGB_BT601_LIMIT, IM_RGB_TO_YUV_BT601_LIMIT},
     {"bt709", IM_YUV_TO_RGB_BT709_LIMIT, IM_RGB_TO_YUV_BT709_LIMIT},
     {"1:4:16:4", IM_YUV_TO_RGB_BT601_FULL, IM_RGB_TO_YUV_BT601_FULL},
-    {"1:3:5:1", IM_YUV_BT709_FULL_RANGE, IM_YUV_BT709_FULL_RANGE},
+    {"1:3:5:1", 0, 0},
   };
   FakeRga fake = {.available = TRUE, .submit_im2d = TRUE};
   TestConvert test = test_convert_new (&fake);
@@ -798,16 +820,9 @@ GST_START_TEST (test_colorimetry_reaches_improcess)
       fail_unless_equals_int (klass->transform (GST_BASE_TRANSFORM (test.convert),
               direction ? rgb : yuv, direction ? yuv : rgb), GST_FLOW_OK);
       fail_unless_equals_int (submitted_calls, 1);
-      if (i == 3) {
-        fail_unless_equals_int (submitted_src.color_space_mode,
-            direction ? IM_RGB_FULL : IM_YUV_BT709_FULL_RANGE);
-        fail_unless_equals_int (submitted_dst.color_space_mode,
-            direction ? IM_YUV_BT709_FULL_RANGE : IM_RGB_FULL);
-      } else {
-        fail_unless_equals_int (submitted_src.color_space_mode, 0);
-        fail_unless_equals_int (submitted_dst.color_space_mode,
-            direction ? cases[i].r2y : cases[i].y2r);
-      }
+      fail_unless_equals_int (submitted_src.color_space_mode, 0);
+      fail_unless_equals_int (submitted_dst.color_space_mode,
+          direction ? cases[i].r2y : cases[i].y2r);
       gst_buffer_unref (rgb);
       gst_buffer_unref (yuv);
       g_free (yuv_caps);
@@ -897,9 +912,9 @@ GST_START_TEST (test_color_space_changes_and_unsupported_modes)
     {GST_VIDEO_FORMAT_BGR, GST_VIDEO_FORMAT_RGBA, "sRGB", "sRGB",
         TRUE, 0, 0},
     {GST_VIDEO_FORMAT_NV12, GST_VIDEO_FORMAT_NV12, "bt601", "bt709",
-        TRUE, IM_YUV_BT601_LIMIT_RANGE, IM_YUV_BT709_LIMIT_RANGE},
+        FALSE, 0, 0},
     {GST_VIDEO_FORMAT_NV12, GST_VIDEO_FORMAT_NV12, "bt709", "1:3:5:1",
-        TRUE, IM_YUV_BT709_LIMIT_RANGE, IM_YUV_BT709_FULL_RANGE},
+        FALSE, 0, 0},
     {GST_VIDEO_FORMAT_NV12, GST_VIDEO_FORMAT_BGR, "bt2020", "sRGB",
         FALSE, 0, 0},
     {GST_VIDEO_FORMAT_BGR, GST_VIDEO_FORMAT_NV12, "sRGB", "bt2020",
@@ -917,6 +932,8 @@ GST_START_TEST (test_color_space_changes_and_unsupported_modes)
     GstBuffer *buffers[2];
     guint side;
     gchar *caps[2];
+    guint64 before;
+    guint64 after;
 
     for (side = 0; side < 2; side++) {
       GstVideoFormat format = side ? cases[i].output_format :
@@ -932,15 +949,15 @@ GST_START_TEST (test_color_space_changes_and_unsupported_modes)
           infos[side].stride, infos[side].size);
     }
     set_convert_caps (test.convert, caps[0], caps[1]);
+    g_object_get (test.convert, "csc-fallback-frames", &before, NULL);
     submitted_calls = 0;
     fail_unless_equals_int (klass->transform (GST_BASE_TRANSFORM (test.convert),
-            buffers[0], buffers[1]),
-        cases[i].supported ? GST_FLOW_OK : GST_FLOW_NOT_NEGOTIATED);
-    fail_unless_equals_int (submitted_calls, cases[i].supported ? 1 : 0);
-    if (cases[i].supported) {
-      fail_unless_equals_int (submitted_src.color_space_mode, cases[i].src_mode);
-      fail_unless_equals_int (submitted_dst.color_space_mode, cases[i].dst_mode);
-    }
+            buffers[0], buffers[1]), GST_FLOW_OK);
+    fail_unless_equals_int (submitted_calls, 1);
+    fail_unless_equals_int (submitted_src.color_space_mode, cases[i].src_mode);
+    fail_unless_equals_int (submitted_dst.color_space_mode, cases[i].dst_mode);
+    g_object_get (test.convert, "csc-fallback-frames", &after, NULL);
+    fail_unless_equals_uint64 (after - before, cases[i].supported ? 0 : 1);
     for (side = 0; side < 2; side++) {
       gst_buffer_unref (buffers[side]);
       g_free (caps[side]);
@@ -950,11 +967,84 @@ GST_START_TEST (test_color_space_changes_and_unsupported_modes)
 }
 GST_END_TEST;
 
+GST_START_TEST (test_interpolation_and_seven_argument_fallback)
+{
+  FakeRga fake = {.available = TRUE, .submit_im2d = TRUE};
+  TestConvert test = test_convert_new (&fake);
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+  const gchar *caps = "video/x-raw(memory:DMABuf),format=NV12,width=640,height=480,colorimetry=bt709";
+  GstBuffer *input = new_nv12_buffer (TRUE, 640, 480, 672, 496);
+  GstBuffer *output = new_nv12_buffer (TRUE, 640, 480, 640, 480);
+  gint mode;
+
+  set_convert_caps (test.convert, caps, caps);
+  g_object_get (test.convert, "interpolation", &mode, NULL);
+  fail_unless_equals_int (mode, IM_INTERP_DEFAULT);
+  for (mode = IM_INTERP_DEFAULT; mode <= IM_INTERP_CUBIC; mode++) {
+    g_object_set (test.convert, "interpolation", mode, NULL);
+    submitted_interp = -1;
+    fail_unless_equals_int (klass->transform (GST_BASE_TRANSFORM (test.convert),
+            input, output), GST_FLOW_OK);
+    fail_unless_equals_int (submitted_interp, mode);
+  }
+  rga_process_opt = NULL;
+  submitted_interp = -1;
+  submitted_calls = 0;
+  fail_unless_equals_int (klass->transform (GST_BASE_TRANSFORM (test.convert),
+          input, output), GST_FLOW_OK);
+  fail_unless_equals_int (submitted_calls, 1);
+  fail_unless_equals_int (submitted_interp, -1);
+  gst_buffer_unref (input);
+  gst_buffer_unref (output);
+  test_convert_clear (&test);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_mpp_blit_uses_im2d_and_explicit_rollback)
+{
+  const gint rotations[] = { 0, HAL_TRANSFORM_ROT_90,
+    HAL_TRANSFORM_ROT_180, HAL_TRANSFORM_ROT_270 };
+  const gint usages[] = { 0, IM_HAL_TRANSFORM_ROT_90,
+    IM_HAL_TRANSFORM_ROT_180, IM_HAL_TRANSFORM_ROT_270 };
+  rga_info_t src = { 0, }, dst = { 0, };
+  guint i;
+
+  gst_mpp_rga_backend_get_default ();
+  rga_process_opt = fake_process_opt;
+  src.fd = 11;
+  dst.fd = 12;
+  rga_set_rect (&src.rect, 16, 32, 640, 480, 672, 528, RK_FORMAT_YCbCr_420_SP);
+  rga_set_rect (&dst.rect, 0, 0, 320, 240, 320, 240, RK_FORMAT_BGR_888);
+  dst.color_space_mode = IM_YUV_TO_RGB_BT709_LIMIT;
+  g_unsetenv ("GST_MPP_RGA_LEGACY_BLIT");
+  legacy_calls = submitted_calls = 0;
+  for (i = 0; i < G_N_ELEMENTS (rotations); i++) {
+    src.rotation = rotations[i];
+    fail_unless_equals_int (gst_mpp_rga_real_blit (&src, &dst, NULL), 0);
+    fail_unless_equals_int (submitted_usage, usages[i] | IM_SYNC);
+    fail_unless_equals_int (submitted_srect.x, 16);
+    fail_unless_equals_int (submitted_srect.y, 32);
+    fail_unless_equals_int (submitted_src.wstride, 672);
+    fail_unless_equals_int (submitted_src.hstride, 528);
+    fail_unless_equals_int (submitted_dst.color_space_mode, IM_YUV_TO_RGB_BT709_LIMIT);
+  }
+  fail_unless_equals_int (submitted_calls, 4);
+  fail_unless_equals_int (legacy_calls, 0);
+  g_setenv ("GST_MPP_RGA_LEGACY_BLIT", "1", TRUE);
+  fail_unless_equals_int (gst_mpp_rga_real_blit (&src, &dst, NULL), 0);
+  fail_unless_equals_int (legacy_calls, 1);
+  fail_unless_equals_int (submitted_calls, 4);
+  g_unsetenv ("GST_MPP_RGA_LEGACY_BLIT");
+}
+GST_END_TEST;
+
 static Suite *
 rgaconvert_suite (void)
 {
   Suite *suite = suite_create ("rgaconvert");
   TCase *test_case = tcase_create ("element");
+  tcase_add_test (test_case, test_interpolation_and_seven_argument_fallback);
+  tcase_add_test (test_case, test_mpp_blit_uses_im2d_and_explicit_rollback);
 
   tcase_set_timeout (test_case, 15);
   tcase_add_checked_fixture (test_case, clear_cpu_copy_env,
