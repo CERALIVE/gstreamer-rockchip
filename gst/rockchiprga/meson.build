@@ -37,6 +37,9 @@ test('rockchiprga rgaconvert negotiation and DMA-BUF transform',
   workdir : meson.project_build_root(),
   is_parallel : false)
 
+test('rockchiprga d5 exact quality limits', find_program('bash'),
+  args : [meson.project_source_root() / 'tests/d5-quality-contract.test.sh'])
+
 rgacompositor_check = executable('rgacompositor-check',
   ['../../tests/check/rgacompositor.c', 'gstrgacompositor.c', 'gstrgautil.c',
    '../rockchipmpp/gstmppconversionstats.c',
