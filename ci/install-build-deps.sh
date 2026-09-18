@@ -66,6 +66,17 @@ apt-get install -y --no-install-recommends \
   "${work}/${RGA_RUNTIME_DEB}" \
   "${work}/${RGA_DEV_DEB}"
 
+if [[ "${RGA_COMPAT_SUITE:-}" == bookworm ]]; then
+  bash "${here}/fetch-pinned-deb.sh" "${RGA_HEADER_URL}" "${RGA_HEADER_SHA256}" \
+    "${work}/${RGA_HEADER_DEB}"
+  dpkg-deb -x "${work}/${RGA_HEADER_DEB}" "${work}/r1-headers"
+  # Header-only overlay: never install the Trixie runtime or its package into
+  # Bookworm. GCC searches /usr/local/include before the legacy /usr headers.
+  install -d /usr/local/include/rga
+  install -m 0644 "${work}/r1-headers/usr/include/rga/"*.h /usr/local/include/rga/
+  printf 'C6b headers: %s; runtime remains %s\n' "${RGA_HEADER_DEB}" "${RGA_RUNTIME_DEB}"
+fi
+
 # Fail loudly here rather than letting meson's `auto` features silently drop the
 # rockchipmpp plugin — an absent MPP would build a green, EMPTY matrix leg.
 pkg-config --modversion rockchip_mpp
