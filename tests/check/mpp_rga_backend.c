@@ -93,7 +93,10 @@ GST_START_TEST (test_im_status_boundary_rejects_unknown_positive_values)
   const gint statuses[] = { IM_STATUS_SUCCESS, IM_STATUS_NOERROR, 0, 3, 42,
     IM_STATUS_FAILED, IM_STATUS_NOT_SUPPORTED, IM_STATUS_OUT_OF_MEMORY,
     IM_STATUS_INVALID_PARAM, IM_STATUS_ILLEGAL_PARAM, IM_STATUS_ERROR_VERSION,
-    IM_STATUS_NO_SESSION };
+#if RGA_CURRENT_API_HEADER_VERSION >= ((1 << 24) | (10 << 16) | (5 << 8))
+    IM_STATUS_NO_SESSION,
+#endif
+  };
   guint i;
 
   for (i = 0; i < G_N_ELEMENTS (statuses); i++) {
