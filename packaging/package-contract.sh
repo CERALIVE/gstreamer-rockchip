@@ -57,6 +57,7 @@ libdrm.so.2=libdrm2
 libX11.so.6=libx11-6
 libglib-2.0.so.0=libglib2.0-0
 libgobject-2.0.so.0=libglib2.0-0
+libgmodule-2.0.so.0=libglib2.0-0
 libgstreamer-1.0.so.0=libgstreamer1.0-0
 libgstbase-1.0.so.0=libgstreamer1.0-0
 libgstvideo-1.0.so.0=libgstreamer-plugins-base1.0-0
