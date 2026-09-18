@@ -222,6 +222,9 @@ gst_mpp_jpeg_enc_handle_frame (GstVideoEncoder * encoder,
 {
   GstVideoEncoderClass *pclass = GST_VIDEO_ENCODER_CLASS (parent_class);
 
+  if (G_UNLIKELY (g_atomic_int_get (&GST_MPP_ENC (encoder)->flushing)))
+    return pclass->handle_frame (encoder, frame);
+
   if (G_UNLIKELY (!gst_mpp_jpeg_enc_apply_properties (encoder))) {
     gst_video_codec_frame_unref (frame);
     return GST_FLOW_NOT_NEGOTIATED;
