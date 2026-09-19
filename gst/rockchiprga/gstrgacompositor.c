@@ -1064,6 +1064,16 @@ gst_rga_compositor_create_output_buffer (GstVideoAggregator * videoaggregator,
   guint count;
 
   count = gst_rga_compositor_collect_inputs (videoaggregator, inputs);
+  if (!inputs[0].buffer) {
+    /* A queued primary can start after this output interval. NULL output with
+     * OK lets GstVideoAggregator advance time without publishing unwritten DMA
+     * memory; NEED_DATA would retry this same interval with the same buffers. */
+    GST_DEBUG_OBJECT (videoaggregator,
+        "skipping output interval without a primary frame");
+    *output_buffer = NULL;
+    gst_rga_compositor_input_clear (&inputs[1]);
+    return GST_FLOW_OK;
+  }
   if (count == 1 && inputs[0].index == 0 &&
       inputs[0].info.finfo && videoaggregator->info.finfo &&
       GST_VIDEO_INFO_FORMAT (&inputs[0].info) == GST_VIDEO_FORMAT_NV12 &&

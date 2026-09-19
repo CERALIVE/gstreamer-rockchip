@@ -1122,6 +1122,53 @@ GST_START_TEST (test_im2d_diagnostics_preserve_status_errno_and_failure_stage)
 }
 GST_END_TEST;
 
+GST_START_TEST (test_primary_starting_after_secondary_does_not_fail_negotiation)
+{
+  FakeRga fake = { .available = TRUE,
+    .process_result = IM_STATUS_SUCCESS,
+    .composite_result = IM_STATUS_SUCCESS };
+  TestHarness test = test_harness_new (&fake, TRUE);
+  GstBus *bus = gst_bus_new ();
+  GstBuffer *primary = new_nv12_buffer (1920, 1080);
+  GstBuffer *secondary = new_bgra_buffer (1920, 1080);
+  GstBuffer *output;
+  GstMessage *error;
+
+  gst_element_set_bus (test.output->element, bus);
+  /* Both pads have data, but only the overlay covers the first three output
+   * intervals. This is valid scheduling, not a caps or RGA failure. */
+  GST_BUFFER_PTS (primary) = 100 * GST_MSECOND;
+  GST_BUFFER_DURATION (secondary) = 200 * GST_MSECOND;
+  fail_unless_equals_int (gst_harness_push (test.primary, primary), GST_FLOW_OK);
+  fail_unless_equals_int (gst_harness_push (test.secondary, secondary), GST_FLOW_OK);
+  fail_unless (gst_harness_push_event (test.primary, gst_event_new_eos ()));
+  fail_unless (gst_harness_push_event (test.secondary, gst_event_new_eos ()));
+  error = gst_bus_timed_pop_filtered (bus, GST_SECOND, GST_MESSAGE_ERROR);
+  fail_unless (error == NULL, "a future primary frame must not fail negotiation");
+  output = gst_harness_try_pull (test.output);
+  fail_unless (output != NULL, "composition must resume when primary PTS is due");
+  fail_unless (GST_BUFFER_PTS (output) >= 100 * GST_MSECOND,
+      "must not publish uninitialized output before the primary exists");
+  fail_unless (fake.composite_calls > 0);
+  gst_buffer_unref (output);
+  test_harness_clear (&test);
+  gst_object_unref (bus);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_no_primary_never_allocates_unwritten_output)
+{
+  GstElement *element = g_object_new (GST_TYPE_RGA_COMPOSITOR, NULL);
+  GstVideoAggregatorClass *klass = GST_VIDEO_AGGREGATOR_GET_CLASS (element);
+  GstBuffer *output = NULL;
+
+  fail_unless_equals_int (klass->create_output_buffer (
+          GST_VIDEO_AGGREGATOR (element), &output), GST_FLOW_OK);
+  fail_unless (output == NULL);
+  gst_object_unref (element);
+}
+GST_END_TEST;
+
 GST_START_TEST (test_allocator_finalizes_after_composed_teardown)
 {
   FakeRga fake = { .available = TRUE,
@@ -1169,6 +1216,9 @@ rgacompositor_suite (void)
   TCase *test_case = tcase_create ("element");
 
   tcase_set_timeout (test_case, 30);
+  tcase_add_test (test_case,
+      test_primary_starting_after_secondary_does_not_fail_negotiation);
+  tcase_add_test (test_case, test_no_primary_never_allocates_unwritten_output);
   tcase_add_test (test_case, test_allocator_finalizes_after_composed_teardown);
   tcase_add_test (test_case, test_pad_factory_and_property_contract);
   tcase_add_test (test_case, test_blend_colorimetry_reaches_improcess);
