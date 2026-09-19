@@ -204,17 +204,117 @@ limits in `tests/board/d5-quality-contract.sh`. Every cell executes. Unexpected
 PASS, new FAIL and submission errors fail the drill; rotations are not waived.
 The host test proves that removing a known-limit row fails.
 
-**BOARD ROWS: NOT-RUN.** Both boards still need all twelve d5 cells and
+**BOARD ROWS: the d5 matrix is now GREEN on both boards; the rest are NOT-RUN.**
+All twelve d5 cells PASS against the BT.709 reference with an empty
+expected-FAIL list, on Orange Pi 5+ and — as of 2026-09-19, against the same CI
+candidate `.deb` (`bd6f0cbe8080400216f870ec355f0d5f622aff486d95e5f168fd3ba3dbd2304d`,
+plugin resolved out of `/tmp/.../plugin/libgstrockchiprga.so`, never the
+installed package) — on Rock 5B+ (`7.2.0-ceralive-rk3588`), worst chroma
+33.72 dB against the unchanged 30 dB floor, `fallback=0 dropped=0
+layout_rejections=0` on every cell. Still outstanding on both boards:
 BT.709-versus-601-reference PSNR deltas; d2 300/300 H.265 and H.264 with zero
 `RGA_BLIT fail`; legacy rollback; older-Radxa-runtime load, one warning and
-seven-argument execution; R1 lookup and actual 4K Opt execution. Stubs prove no
+seven-argument execution; R1 lookup and actual 4K Opt execution — noting that
+the D6 harness below has now exercised the R1 `improcessOpt` entry point with
+release fences at 4K on Rock, which is adjacent evidence for that last row
+rather than the in-element proof it asks for. Stubs prove no
 pixels or silicon. Do not APT-swap libraries on sysext-backed `/usr`: use the
 separately approved restoration procedure, or label process-local selection as
 isolated evidence, not an installed-runtime restoration.
 
-**C6b-perf: NOT-STARTED — measurement-gated, both-board gate not runnable in this lane.**
+### C6b-perf: NOT-ADOPTABLE at this pin — the handle path is refused by the driver
 
-**C6b-async: NOT-STARTED — measurement-gated, both-board gate not runnable in this lane.**
+**Verdict: BLOCKED. No DMA-BUF handle import cache is implemented, and none can
+be while librga R1 and the current island driver disagree about `v_addr`.**
+
+The proposal was to `importbuffer_fd()` once per pool buffer and describe each
+frame with `wrapbuffer_handle()`, so the per-job DMA-BUF attach/map is paid once
+instead of per frame. Measured on a Rock 5B+ (kernel `7.2.0-ceralive-rk3588`,
+`librga2-ceralive 1.10.5+ceralive.1`, RGA api `v1.10.5_[11]`) with
+`tests/board/d6-c6b-measurement.sh`, **every handle-described submission failed**
+— 440 of 440 at 4K NV16→NV12 and 440 of 440 at 1080p, on two independent runs:
+
+```text
+PROBE_rgba_handles src=1325 dst=1326          # import succeeds
+PROBE_rgba_handle_copy status=0 errno=22 …    # the SAME buffers, by handle: EINVAL
+PROBE_rgba_fd_copy    status=1 errno=0        # the SAME buffers, by fd: success
+```
+
+The RGBA 256×256 single-plane control is what makes the cause unambiguous: the
+same two DMA-BUFs, the same geometry and the same `improcess()` call succeed when
+described by fd and fail when described by handle, so the refusal is the handle
+mechanism itself and not a chroma-plane, stride or format question.
+
+Root cause, in two places that are each individually defensible:
+
+- librga R1 `generate_blit_req()`
+  ([`im2d_api/src/im2d_impl.cpp:3498-3502` at `1.10.5+ceralive.1`](https://github.com/CERALIVE/librga/blob/d57bc86e65b331948953442449618cadd3b0c7bc/im2d_api/src/im2d_impl.cpp#L3498-L3502))
+  passes the handle as `yrgb_addr` and then derives the other two plane
+  addresses from the *virtual* base pointer, which on the handle path is `NULL`:
+  `uv_addr = (uintptr_t) srcBuf` is `0`, but
+  `v_addr = (uintptr_t) srcBuf + srcVirW * srcVirH` is a non-zero integer that is
+  not a handle. For 1920×1080 it is exactly `2073600`, which is what the driver
+  then reports.
+- The island's `rga_job_judgment_support_core()` validates the RGA2 capability
+  of **all nine** `{src,dst,pat}.{yrgb,uv,v}_addr` fields whenever
+  `handle_flag & 1`, skipping only fields that are zero. The stray `v_addr`
+  therefore reaches `rga_mm_lookup_rga2_support()`, misses the handle table and
+  returns `-EINVAL` before the job is ever scheduled:
+
+```text
+rga: This handle[2073600] is illegal.
+rga: ID[2594]: task[0] job_commit failed.
+rga: ID[2594]: request commit failed!
+rga: ID[2594]: submit failed!
+```
+
+Neither side is obviously the defect: leaving a garbage `v_addr` in a
+handle-mode request is a librga bug, and validating every non-zero address field
+is the island being strict about a buffer it is about to program into hardware.
+Fixing it is a change to one of those two repositories, not to this plugin, so it
+is recorded here and not worked around. **Do not "fix" this in the plugin by
+zeroing plane addresses behind librga's back** — the plugin does not own the
+`rga_req` that `generate_blit_req()` builds.
+
+What the cache would have been worth, if the path worked, is not left unstated.
+The explicit import/release ioctl pair — the same dma_buf attach + map + page
+array construction the fd path performs inside every job — costs **833 µs per
+buffer at 4K** and **226 µs at 1080p**, against a whole-frame `fd_sync` time of
+4859 µs and 1321 µs. Two buffers per frame therefore plausibly account for a
+third of 4K frame time. That is an inference from an adjacent measurement, not a
+measurement of the cache, and it is exactly why this stays BLOCKED rather than
+NO-MEASURABLE-GAIN: the proposal is not refuted, it is unrunnable.
+
+### C6b-async: measured on one board, gate met there, second board queued
+
+**Verdict: ADOPT-RECOMMENDED on Rock 5B+; Orange Pi 5 Plus leg NOT RUN.** The
+default stays synchronous regardless, so nothing in this claim changes shipped
+behaviour.
+
+Depth-1 pipelining — submit frame N with `IM_ASYNC`, retire frame N-1's release
+fence while N is in flight — measured against the synchronous path on the same
+buffers, in the same process, in one run:
+
+| Geometry | sync fps | async depth-1 fps | gain | gate |
+|---|---:|---:|---:|---|
+| 3840×2160 NV16→NV12 | 208.2 | 243.9 | **+17.1 %** | ≥ 5 % |
+| 1920×1080 NV16→NV12 | 757.3 | 974.5 | **+28.7 %** | ≥ 5 % |
+
+A second independent run of the same harness on the same board gave +17.5 % and
++26.0 %. The run is bracketed by two synchronous measurements, one taken before
+every other mode and one after every other mode; at 4K they read 4859 µs and
+4804 µs per frame, so no clock or thermal drift large enough to explain the async
+gain occurred across the run.
+
+Latency does not regress by more than the contract allows: per-call p95 rises
+from 4943 µs to 5331 µs at 4K, `+388 µs`, which is well inside one 60 fps frame
+period (16 667 µs) — the frame is retired one submission later by construction,
+not held longer.
+
+The Orange Pi 5 Plus leg is **not run**: the board was held by another session
+for the whole of this work. A one-board result does not satisfy the both-board
+adoption rule, so this is recorded as a measurement, not as an adoption, and the
+element ships no async property until the second board agrees.
 
 ### Historical pre-C6b implementation and evidence
 

@@ -246,7 +246,12 @@ at or above the unchanged 30 dB PSNR threshold. BGR software references now set
 `colorimetry=sRGB` on `rawvideoparse` itself, and DMA-BUF evidence markers are
 matched even when interleaved with `GST_DEBUG` text. The five stale expected
 chroma failures are removed; any below-threshold cell still fails the gate.
-Rock's D24 half has **not been run**; the OPi measurements do not qualify Rock.
+Rock's D24 half has now been run against the same CI candidate bytes and also
+measures **all 12 cells PASS** (worst chroma 33.72 dB, `csc-BGR-to-NV12`
+38.54 dB, zero fallbacks, zero drops, zero layout rejections), so the matrix is
+green on both supported boards with the BT.709 reference and an empty
+expected-FAIL list. That is a conversion-quality result only: it opens no HDMI
+input, starts no engine session and qualifies no release.
 The earlier four-PASS/five-chroma-failure/three-rotation-failure result and the
 owner's `1.14.4+ceralive.3` disposition remain historical evidence. See the
 [board results](tests/board/DRILL-RESULTS.md#2026-09-08--u1-fixation-candidate-orange-pi-5-partial)

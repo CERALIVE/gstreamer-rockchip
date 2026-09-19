@@ -5,6 +5,29 @@ preserves the same outcomes as the retained raw transcripts; a command finishing
 or a failure later being classified as pre-existing does not turn that drill
 into a pass.
 
+## 2026-09-19 — C6b: d5 green on Rock, perf BLOCKED, async one-board
+
+Rock 5B+ `ceralive2`, `7.2.0-ceralive-rk3588`, `librga2-ceralive
+1.10.5+ceralive.1`, RGA api `v1.10.5_[11]`. The plugin under test is the CI
+candidate `.deb` from this branch's Build Check run
+(`bd6f0cbe8080400216f870ec355f0d5f622aff486d95e5f168fd3ba3dbd2304d`), staged
+under `/tmp` and resolved through a private registry; `gst-inspect-1.0` confirms
+`Filename` inside that staging directory, so the installed package was never the
+subject.
+
+| Drill | Verdict | Recorded finding |
+|---|---|---|
+| d5 rgaconvert matrix | **PASS** | All 12 cells PASS against the BT.709 reference with an empty expected-FAIL list. Worst chroma 33.72 dB (`rotate-BGR-to-NV12`) against the unchanged 30 dB floor; `fallback=0 dropped=0 layout_rejections=0` on every cell. With the existing Orange Pi 5+ result this makes the matrix green on **both** boards. |
+| d6 C6b-perf gate | **BLOCKED** | Handle-described `improcess()` fails 440/440 at both 4K and 1080p, twice. An RGBA 256×256 single-plane control on the *same* buffers passes by fd and fails by handle, so the refusal is the handle mechanism, not format or geometry. Driver reports `This handle[2073600] is illegal` — librga R1 leaves a non-handle `v_addr` in handle mode and the island validates every non-zero address field. Not a plugin defect and not fixable here. |
+| d6 C6b-async gate | **ADOPT-RECOMMENDED (one board)** | Depth-1 `IM_ASYNC`: 4K 208.2→243.9 fps (**+17.1 %**), 1080p 757.3→974.5 fps (**+28.7 %**) against a ≥5 % gate; p95 per-call latency +388 µs at 4K, far inside one 60 fps frame period. A second run gave +17.5 % / +26.0 %. The two bracketing synchronous runs agree to within 1 %, so the gain is not drift. |
+
+**The Orange Pi 5+ leg of d6 is NOT RUN** — the board was held by another
+session throughout. One board does not satisfy the both-board adoption rule, so
+async ships no property and submission stays synchronous. Nothing was installed,
+no engine session ran, no capture device was opened, and every fence was polled
+to a terminal state before its buffers were released, so the known
+`rga_job_commit` use-after-free path was not exercised.
+
 ## 2026-09-16 — PiP pattern repair, Orange Pi B: BLOCKED on librga R0
 
 The bounded HDMI + BRIO run captured real `improcess=-1`, `errno=0` and

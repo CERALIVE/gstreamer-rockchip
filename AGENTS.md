@@ -311,7 +311,19 @@ The following are compatibility contracts, not cleanup opportunities:
   MPP blits use synchronous im2d; `GST_MPP_RGA_LEGACY_BLIT=1` retains rollback.
   Build against ≥1.10.5 headers, retain the explicit GModule handle and resolve
   Opt dynamically, never link it. See `docs/RGA-MPP-INTERACTION.md`; both-board
-  qualification remains NOT-RUN, perf/async NOT-STARTED and measurement-gated.
+  qualification remains NOT-RUN.
+- **C6b-perf is BLOCKED, not deferred.** No DMA-BUF handle import cache exists
+  and none may be added while `improcess()` refuses handle-described buffers:
+  librga R1's `generate_blit_req()` leaves a non-handle `v_addr` in handle mode
+  and the island validates every non-zero address field, so all 440/440
+  submissions fail `-EINVAL` on Rock — with an fd control on the same buffers
+  passing. The repair belongs in librga or the island, never in this plugin.
+- **C6b-async is measured on one board only.** Depth-1 `IM_ASYNC` pipelining
+  measured +17.1 % (4K) and +28.7 % (1080p) sustained throughput on Rock against
+  a ≥5 % gate, p95 latency +388 µs; the Orange Pi leg is NOT RUN. One board does
+  not satisfy the both-board adoption rule, so no `async-depth` property ships
+  and submission stays synchronous. Re-measure with
+  `tests/board/d6-c6b-measurement.sh`, which is the sole source of these numbers.
 - **Caps fixation [EXISTS]:** same-memory identity alternatives retain
   explicit colorimetry; raw-format fixation restores omitted colorimetry within
   the same YUV/RGB family. Explicit output requests are never overwritten. The
@@ -465,6 +477,7 @@ The board suite is deliberately outside Meson:
 | `d3-main10-stride-ab.sh` | Report-only Main10 current-vs-`*8/pixel_stride0` frame-checksum experiment. |
 | `d4-allocation-soak.sh` | 136 s DMA allocation soak with live bitrate, resolution, and temporal-SVC changes, run **on a trial-verified librga backend** and scored on the three conversion counters. |
 | `d5-rgaconvert-matrix.sh` | `rgaconvert` conversion matrix — {CSC, scale, crop, rotate} × representative format pairs, each cell measured as PSNR against a software reference of the same operation. |
+| `d6-c6b-measurement.sh` | The C6b-perf / C6b-async go/no-go gate. Standalone im2d harness against the board's own librga: no plugin installed, no element instantiated, no capture device opened. Scores fd-vs-handle buffer description (with a single-plane RGBA control that separates a handle-path refusal from a chroma-plane question) and depth-1 `IM_ASYNC` sustained throughput, bracketed by two independent synchronous runs so clock or thermal drift cannot be read as an async gain. |
 
 The latest executed verdicts and their hardware scope are recorded in
 [`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md). That tracked
