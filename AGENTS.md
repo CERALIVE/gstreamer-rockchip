@@ -384,6 +384,19 @@ The following are compatibility contracts, not cleanup opportunities:
   because no CPU path exists. Its rank and READY failure contract match
   `rgaconvert`.
 
+  **Missing-primary intervals are skipped, not fatal.** `create_output_buffer`
+  returns OK/NULL when no usable primary covers the current interval, before
+  allocating DMA memory. GstVideoAggregator advances time without rendering or
+  pushing, so a later primary can start normally. Do not substitute NEED_DATA
+  from `aggregate_frames`: it retries the same interval and can spin. Do not
+  return OK with an allocated, unwritten surface either. Failed latency queries
+  alone do not force a zero deadline; queue readiness and video-frame selection
+  are distinct. The Rock BRIO-primary/Osmo-secondary startup repair, host RED/GREEN
+  and same-run output controls are recorded in
+  [`docs/notes/compositor-primary-startup.md`](docs/notes/compositor-primary-startup.md).
+  Permanent primary absence still yields no output; secondary-only fallback is
+  not implemented by this rule.
+
   **Output color selection [EXISTS].** `find_best_format` selects `sink_0`'s
   NV12 video info before the parent constructs preferred caps. The generic base
   selector compares plain-memory possible caps with DMA-BUF downstream caps and

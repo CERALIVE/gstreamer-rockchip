@@ -255,6 +255,15 @@ versions. A composed-buffer lifecycle regression covers allocator destruction
 independently of element destruction; the same lifetime note records the
 call-site profile, positive controls and the separate RSS acceptance limit.
 
+The compositor skips output intervals with no usable primary instead of turning
+startup timing into a negotiation failure or emitting unwritten DMA memory.
+The parent video aggregator advances time until the primary becomes eligible;
+no `force-live` or caller property workaround is required. On Rock 5B+, the
+BRIO-primary/Osmo-secondary pairing now produces full, decodable recordings
+comparable to the reverse pairing, with both single-source controls preserved.
+See the [startup repair and bounded hardware receipt](docs/notes/compositor-primary-startup.md)
+for exact bytes, frame counts, regression tests and scope limits.
+
 ## Upstream lineage and credits
 
 This repository descends from the Rockchip plugin code through the JeffyCN,
