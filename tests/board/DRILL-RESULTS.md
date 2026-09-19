@@ -23,12 +23,43 @@ subject.
 | d6 C6b-perf gate | **BLOCKED** | Handle-described `improcess()` fails 440/440 at both 4K and 1080p, on three independent runs. An RGBA 256×256 single-plane control on the *same* buffers passes by fd and fails by handle, so the refusal is the handle mechanism, not format or geometry. Driver reports `This handle[2073600] is illegal` — librga R1 leaves a non-handle `v_addr` in handle mode and the island validates every non-zero address field. Not a plugin defect and not fixable here. |
 | d6 C6b-async gate | **ADOPT-RECOMMENDED (one board)** | Depth-1 `IM_ASYNC`: 4K 207.0→243.8 fps (**+17.8 %**), 1080p 758.7→971.8 fps (**+28.1 %**) against a ≥5 % gate; p95 per-call latency +388 µs at 4K, far inside one 60 fps frame period. Three runs agree: 4K +17.5/+17.1/+17.8 %, 1080p +26.0/+28.7/+28.1 %. Frames alternate between two destination buffers, as a pooled element would, so the gain is not a shared-buffer overlap artefact; the two bracketing synchronous runs agree to within 1 %, so it is not drift either. |
 
-**The Orange Pi 5+ leg of d6 is NOT RUN** — the board was held by another
-session throughout. One board does not satisfy the both-board adoption rule, so
-async ships no property and submission stays synchronous. Nothing was installed,
-no engine session ran, no capture device was opened, and every fence was polled
-to a terminal state before its buffers were released, so the known
-`rga_job_commit` use-after-free path was not exercised.
+**The Orange Pi 5+ leg of d6 was NOT RUN in this session** — the board was held
+by another session throughout. It ran on 2026-09-19 and is recorded below.
+Nothing was installed, no engine session ran, no capture device was opened, and
+every fence was polled to a terminal state before its buffers were released, so
+the known `rga_job_commit` use-after-free path was not exercised.
+
+## 2026-09-19 — d6 C6b second board, Orange Pi 5 Plus: async ADOPTED, perf still BLOCKED
+
+Orange Pi 5 Plus (`Xunlong Orange Pi 5 Plus`, machine-id
+`e661616a6cf24ca48cec5843124efc0f`, `7.2.0-ceralive-rk3588`, `librga2-ceralive
+1.10.5+ceralive.1`, `librockchip-mpp1 1.5.0-1`,
+`gstreamer1.0-rockchip-ceralive 1.14.4+ceralive.6`), reached at the literal
+`192.168.78.150` under the canonical board lock. **Nothing was installed and no
+element was instantiated**: d6 is a standalone im2d harness against the board's
+own librga runtime.
+
+| Drill | Verdict | Recorded finding |
+|---|---|---|
+| d6 C6b-async gate | **ADOPT-RECOMMENDED** | Depth-1 `IM_ASYNC`: 4K 202.2→239.4 fps (**+18.4 %**), 1080p 755.4→967.2 fps (**+28.0 %**) against a ≥5 % gate. A second independent run agrees to within 0.1 pp: **+18.4 %** / **+28.1 %**. `ASYNC_DST_BUFFERS=2` in both runs, i.e. the corrected two-destination shape. The two bracketing synchronous measurements agree to within 0.8 % (4K 4985 µs before every other mode, 4945 µs after), so no clock or thermal drift explains the gain. |
+| d6 C6b-perf gate | **BLOCKED** | Reproduced independently on the second board: 440/440 handle-described submissions fail at both geometries across both runs, with the RGBA single-plane fd control passing (`status=1`) and the handle control failing (`status=0 errno=22`) on the *same* buffers. The kernel printed `This handle[2073600] is illegal` — byte-for-byte the value Rock produced, and `2073600` is `1920 × 1080`. Same librga/island disagreement, not a new finding and not fixable in this plugin. |
+
+With Rock's result this satisfies the **both-board adoption rule for C6b-async**,
+so `rgaconvert` now carries an `async-depth` property — **default `0`**, i.e.
+shipped behaviour is unchanged. The gate's subject is this harness, not the
+element; an in-element board measurement is what a default flip would need.
+C6b-perf remains BLOCKED on both boards.
+
+Board hygiene after both runs: remote scratch removed, zero
+`KASAN|BUG:|use-after-free|Oops` lines in `dmesg`, no failed systemd units, SoC
+44.4 °C, unit states unchanged from before the drill, board left idle.
+
+**Harness build note.** The local `localhost/gstrk-trixie-arm64` image carried
+the legacy Radxa `librga-dev 2.2.0-1` (im2d api 1.10.1), which declares no
+`improcessOpt`, so `c6b-im2d-bench.c` failed to compile against it. The run used
+a derived image with the SHA-pinned R1 `librga-ceralive-dev`/`librga2-ceralive`
+`1.10.5+ceralive.1` pair from `ci/mpp-pin.env` installed on top — the same inputs
+`ci/install-build-deps.sh` selects on Trixie. Nothing on the board changed.
 
 ## 2026-09-16 — PiP pattern repair, Orange Pi B: BLOCKED on librga R0
 

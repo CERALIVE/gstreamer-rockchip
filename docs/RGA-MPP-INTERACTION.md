@@ -343,24 +343,65 @@ third of 4K frame time. That is an inference from an adjacent measurement, not a
 measurement of the cache, and it is exactly why this stays BLOCKED rather than
 NO-MEASURABLE-GAIN: the proposal is not refuted, it is unrunnable.
 
-### C6b-async: measured on one board, gate met there, second board queued
+### C6b-async: ADOPTED on both boards, shipped as a default-off property
 
-**Verdict: ADOPT-RECOMMENDED on Rock 5B+; Orange Pi 5 Plus leg NOT RUN.** The
-default stays synchronous regardless, so nothing in this claim changes shipped
-behaviour.
+**Verdict: ADOPT on Rock 5B+ and on Orange Pi 5 Plus.** Both boards clear the
+≥5 % gate at both geometries, so the both-board adoption rule is satisfied and
+`rgaconvert` carries an `async-depth` property. **Its default is `0`, so shipped
+behaviour is byte-unchanged** — see "Why the default is 0" below.
 
 Depth-1 pipelining — submit frame N with `IM_ASYNC`, retire frame N-1's release
 fence while N is in flight — measured against the synchronous path on the same
 buffers, in the same process, in one run:
 
-| Geometry | sync fps | async depth-1 fps | gain | gate |
-|---|---:|---:|---:|---|
-| 3840×2160 NV16→NV12 | 207.0 | 243.8 | **+17.8 %** | ≥ 5 % |
-| 1920×1080 NV16→NV12 | 758.7 | 971.8 | **+28.1 %** | ≥ 5 % |
+| Board | Geometry | sync fps | async depth-1 fps | gain | gate |
+|---|---|---:|---:|---:|---|
+| Rock 5B+ | 3840×2160 NV16→NV12 | 207.0 | 243.8 | **+17.8 %** | ≥ 5 % |
+| Rock 5B+ | 1920×1080 NV16→NV12 | 758.7 | 971.8 | **+28.1 %** | ≥ 5 % |
+| Orange Pi 5 Plus | 3840×2160 NV16→NV12 | 202.2 | 239.4 | **+18.4 %** | ≥ 5 % |
+| Orange Pi 5 Plus | 1920×1080 NV16→NV12 | 755.4 | 967.2 | **+28.0 %** | ≥ 5 % |
 
-Three independent runs of the same harness on the same board agree closely —
-4K `+17.5 / +17.1 / +17.8 %`, 1080p `+26.0 / +28.7 / +28.1 %` — so the figure is
-not a single lucky sample.
+Three independent Rock runs agree closely — 4K `+17.5 / +17.1 / +17.8 %`, 1080p
+`+26.0 / +28.7 / +28.1 %` — and the two Orange Pi runs agree to within 0.1
+percentage point (4K `+18.4 / +18.4 %`, 1080p `+28.0 / +28.1 %`), so the figure
+is not a single lucky sample on either board. Both Orange Pi runs reported
+`ASYNC_DST_BUFFERS=2`, i.e. the corrected two-destination shape.
+
+The Orange Pi runs also reproduced the **C6b-perf handle-path refusal**
+independently: 440/440 submissions failed at both geometries, with the fd
+control passing on the same buffers, and the kernel printed the same
+`This handle[2073600] is illegal` — byte-for-byte the value Rock produced, which
+is `1920 × 1080`. That refusal is a second-board confirmation of the
+librga/island disagreement recorded above, not a new finding.
+
+#### Why the default is 0
+
+The gate's subject is the standalone `tests/board/d6-c6b-measurement.sh` im2d
+harness: no plugin is installed, no element is instantiated and no capture
+device is opened. It measures exactly what the proposal would change at the
+librga seam, which is what makes it a valid adoption gate — and it is *not* a
+measurement of `rgaconvert`. Depth 1 also costs one frame of latency, which the
+element reports through its `LATENCY` query. Turning it on by default would
+therefore claim an in-element benefit nobody has measured and change the push
+behaviour of a frozen-contract element for every existing consumer. Flipping the
+default is a separate change gated on an in-element board measurement, not on
+another harness run.
+
+#### What the property refuses, silently and by design
+
+`async-depth=1` falls back to the synchronous path — never to a failure — when
+the librga runtime resolves no `improcessOpt` (there is nowhere to return a
+release fence), when debug CPU staging is in use (the staged copy reads the
+destination on the streaming thread the moment the blit returns, which a fence
+cannot guard), or when the submission is refused. The staged case is guarded in
+code but is not reachable by the host test harness, because a staging buffer
+needs a real dma-heap; it is board territory.
+
+Every held frame's fence is waited on before that buffer is released, **discard
+included** — on EOS, on `FLUSH_STOP`, on `stop()`, on `PAUSED→READY` and in
+`finalize`. Returning a buffer to its pool while the hardware is still writing
+into it is the failure this rule exists to prevent, and it is the one line a
+future reader is most likely to "simplify" away.
 
 Two things about the method are load-bearing rather than incidental. The async
 frames **alternate between two destination buffers** (`ASYNC_DST_BUFFERS=2` in

@@ -318,12 +318,24 @@ The following are compatibility contracts, not cleanup opportunities:
   and the island validates every non-zero address field, so all 440/440
   submissions fail `-EINVAL` on Rock — with an fd control on the same buffers
   passing. The repair belongs in librga or the island, never in this plugin.
-- **C6b-async is measured on one board only.** Depth-1 `IM_ASYNC` pipelining
-  measured +17.8 % (4K) and +28.1 % (1080p) sustained throughput on Rock against
-  a ≥5 % gate, p95 latency +388 µs; the Orange Pi leg is NOT RUN. One board does
-  not satisfy the both-board adoption rule, so no `async-depth` property ships
-  and submission stays synchronous. Re-measure with
-  `tests/board/d6-c6b-measurement.sh`, which is the sole source of these numbers.
+- **C6b-async is ADOPTED on both boards, and it ships DEFAULT-OFF.** Depth-1
+  `IM_ASYNC` pipelining cleared the ≥5 % gate on Rock (+17.8 % 4K / +28.1 %
+  1080p) and on Orange Pi (+18.4 % / +28.0 %, reproduced +18.4 % / +28.1 % on a
+  second run), so `rgaconvert` carries an `async-depth` property (uint, `0`-`1`,
+  **default `0`**). The default is 0 because the measurement's subject is the
+  standalone `tests/board/d6-c6b-measurement.sh` im2d harness, not the element:
+  no in-element board measurement exists yet, and depth 1 costs one frame of
+  latency. Flipping the default needs an in-element measurement, not another
+  harness run. `tests/board/d6-c6b-measurement.sh` remains the sole source of
+  these numbers.
+- **`async-depth` is refused, silently and by design, in three cases**: the
+  librga runtime resolves no `improcessOpt` (there is nowhere to return a
+  release fence), debug CPU staging is in use (the staged copy reads the
+  destination on the streaming thread the moment the blit returns), or the
+  submission is refused. Each falls back to the synchronous path, so the
+  property can never make a conversion fail that would otherwise have worked.
+  The staged case is guarded in code but is NOT reachable by the host harness —
+  a staging buffer needs a real dma-heap — so it is board territory.
 - **Caps fixation [EXISTS]:** same-memory identity alternatives retain
   explicit colorimetry; raw-format fixation restores omitted colorimetry within
   the same YUV/RGB family. Explicit output requests are never overwritten. The
@@ -347,6 +359,7 @@ The following are compatibility contracts, not cleanup opportunities:
   | `interpolation` | enum `GstRgaInterpolation` | `default` | `default`, `linear`, `cubic`; older runtimes use default with a warning |
   | `crop-x` / `crop-y` | uint | `0` | `0`–`G_MAXUINT`, input crop origin |
   | `crop-w` / `crop-h` | uint | `0` | `0`–`G_MAXUINT`; **zero means "the remaining extent"**, not "an empty crop" |
+  | `async-depth` | uint | `0` | `0`–`1`; `0` submits synchronously (the shipped behaviour), `1` enables depth-1 `IM_ASYNC` pipelining and adds one frame of latency |
 
   `crop-{x,y,w,h}` are four separate properties by design — an operator sets
   only the edges it wants and leaves the rest at the default. Zero width or

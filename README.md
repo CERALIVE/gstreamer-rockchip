@@ -134,7 +134,19 @@ combinations retain D29's default-matrix path, warn once per element and count
 `csc-fallback-frames`, separately from CPU copies. The
 [C6b contract](docs/RGA-MPP-INTERACTION.md#c6b-colour-host-implementation-board-qualification-pending)
 supersedes historical full-CSC/refusal wording below. Both board matrices remain
-NOT-RUN. C6b-perf and C6b-async are NOT-STARTED, measurement-gated.
+NOT-RUN.
+
+**C6b-async is ADOPTED on both boards and ships default-off.** Depth-1
+`IM_ASYNC` pipelining cleared the ≥5 % gate on Rock 5B+ (+17.8 % at 4K,
++28.1 % at 1080p) and on Orange Pi 5 Plus (+18.4 % / +28.0 %, reproduced on a
+second run), so `rgaconvert` carries `async-depth` (uint, `0`-`1`, **default
+`0`**). The default is 0 because the gate's subject is the standalone
+`tests/board/d6-c6b-measurement.sh` im2d harness rather than the element, and
+depth 1 costs one frame of latency; a default flip needs an in-element board
+measurement. `async-depth=1` falls back to the synchronous path whenever the
+runtime resolves no `improcessOpt`, debug CPU staging is in use, or the
+submission is refused. **C6b-perf remains BLOCKED** — the handle path is refused
+by the driver on both boards, so the import cache cannot be measured at all.
 
 The MPP encoder and decoders treat librga as available only after `/dev/rga`
 answers `RGA_IOC_GET_DRVIER_VERSION` with driver version 1.2.4 or newer.
