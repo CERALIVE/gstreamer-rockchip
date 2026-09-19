@@ -290,7 +290,7 @@ frame with `wrapbuffer_handle()`, so the per-job DMA-BUF attach/map is paid once
 instead of per frame. Measured on a Rock 5B+ (kernel `7.2.0-ceralive-rk3588`,
 `librga2-ceralive 1.10.5+ceralive.1`, RGA api `v1.10.5_[11]`) with
 `tests/board/d6-c6b-measurement.sh`, **every handle-described submission failed**
-— 440 of 440 at 4K NV16→NV12 and 440 of 440 at 1080p, on two independent runs:
+— 440 of 440 at 4K NV16→NV12 and 440 of 440 at 1080p, on three independent runs:
 
 ```text
 PROBE_rgba_handles src=1325 dst=1326          # import succeeds
@@ -355,14 +355,24 @@ buffers, in the same process, in one run:
 
 | Geometry | sync fps | async depth-1 fps | gain | gate |
 |---|---:|---:|---:|---|
-| 3840×2160 NV16→NV12 | 208.2 | 243.9 | **+17.1 %** | ≥ 5 % |
-| 1920×1080 NV16→NV12 | 757.3 | 974.5 | **+28.7 %** | ≥ 5 % |
+| 3840×2160 NV16→NV12 | 207.0 | 243.8 | **+17.8 %** | ≥ 5 % |
+| 1920×1080 NV16→NV12 | 758.7 | 971.8 | **+28.1 %** | ≥ 5 % |
 
-A second independent run of the same harness on the same board gave +17.5 % and
-+26.0 %. The run is bracketed by two synchronous measurements, one taken before
-every other mode and one after every other mode; at 4K they read 4859 µs and
-4804 µs per frame, so no clock or thermal drift large enough to explain the async
-gain occurred across the run.
+Three independent runs of the same harness on the same board agree closely —
+4K `+17.5 / +17.1 / +17.8 %`, 1080p `+26.0 / +28.7 / +28.1 %` — so the figure is
+not a single lucky sample.
+
+Two things about the method are load-bearing rather than incidental. The async
+frames **alternate between two destination buffers** (`ASYNC_DST_BUFFERS=2` in
+the transcript): at depth 1 two jobs are in flight at once and a real
+`rgaconvert` would draw each output from a pool, so a single shared destination
+would both model a shape the element cannot produce and let the hardware overlap
+two writes to one allocation. The first two runs above used a single destination
+and the third used two; the gain is unchanged, so it is not an artefact of that
+overlap. And each run is bracketed by two synchronous measurements, one before
+every other mode and one after every other mode — at 4K they read 4843 µs and
+4831 µs per frame — so no clock or thermal drift large enough to explain the
+async gain occurred across the run.
 
 Latency does not regress by more than the contract allows: per-call p95 rises
 from 4943 µs to 5331 µs at 4K, `+388 µs`, which is well inside one 60 fps frame

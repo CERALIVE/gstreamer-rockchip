@@ -342,7 +342,13 @@ main (int argc, char **argv)
    * on N-1's release fence — exactly the depth-1 contract C6b-async would
    * implement inside rgaconvert. Measures END-TO-END wall time for the whole
    * run so the reported per-frame figure is sustained THROUGHPUT, which is
-   * what the gate is about, not per-call latency. ---- */
+   * what the gate is about, not per-call latency.
+   *
+   * Frames ALTERNATE between two destination buffers. With depth 1 two jobs
+   * are in flight at once, and a real rgaconvert would draw each output from a
+   * pool, so writing both to one buffer would measure a shape the element
+   * cannot produce — and would let the hardware overlap two writes to the same
+   * memory, which is a data race, not a throughput result. ---- */
   {
     unsigned taken = 0;
     unsigned failures = 0;
@@ -350,6 +356,17 @@ main (int argc, char **argv)
     double run_start;
     double run_end;
     unsigned submitted = 0;
+    const char *dst2_heap = NULL;
+    int dst_fds[2];
+
+    dst_fds[0] = dst_fd;
+    dst_fds[1] = alloc_dmabuf (dst_size, &dst2_heap);
+    if (dst_fds[1] < 0) {
+      fprintf (stderr, "second destination allocation failed: %s\n",
+          strerror (errno));
+      dst_fds[1] = dst_fd;
+    }
+    printf ("ASYNC_DST_BUFFERS=%d\n", dst_fds[1] == dst_fd ? 1 : 2);
 
     /* Warm up, synchronously, so the comparison starts from the same state. */
     for (unsigned i = 0; i < warmup; i++) {
@@ -367,7 +384,7 @@ main (int argc, char **argv)
     for (unsigned i = 0; i < iters; i++) {
       rga_buffer_t src = wrapbuffer_fd_t (src_fd, width, height, width,
           height, src_format);
-      rga_buffer_t dst = wrapbuffer_fd_t (dst_fd, width, height, width,
+      rga_buffer_t dst = wrapbuffer_fd_t (dst_fds[i & 1], width, height, width,
           height, dst_format);
       rga_buffer_t pat;
       int fence = -1;
@@ -410,6 +427,8 @@ main (int argc, char **argv)
       pending_fence = -1;
     }
     run_end = now_us ();
+    if (dst_fds[1] != dst_fd)
+      close (dst_fds[1]);
 
     printf ("FAILURES_async=%u SUBMITTED_async=%u\n", failures, submitted);
     report ("async_depth1_percall", summarise (samples, taken));

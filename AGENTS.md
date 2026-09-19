@@ -319,7 +319,7 @@ The following are compatibility contracts, not cleanup opportunities:
   submissions fail `-EINVAL` on Rock — with an fd control on the same buffers
   passing. The repair belongs in librga or the island, never in this plugin.
 - **C6b-async is measured on one board only.** Depth-1 `IM_ASYNC` pipelining
-  measured +17.1 % (4K) and +28.7 % (1080p) sustained throughput on Rock against
+  measured +17.8 % (4K) and +28.1 % (1080p) sustained throughput on Rock against
   a ≥5 % gate, p95 latency +388 µs; the Orange Pi leg is NOT RUN. One board does
   not satisfy the both-board adoption rule, so no `async-depth` property ships
   and submission stays synchronous. Re-measure with
