@@ -1,6 +1,7 @@
 rockchipmpp_sources = [
   'gstmpp.c',
   'gstmppconversionstats.c',
+  'gstmppfaultbridge.c',
   'gstmpprgabackend.c',
   'gstmpprgatuple.c',
   'gstmppallocator.c',
@@ -53,7 +54,18 @@ test('rockchipmpp GstHarness factories and caps', mpp_harness,
   workdir : meson.project_build_root(),
   is_parallel : false)
 
-foreach encoder_test : ['enc-latency', 'enc-restart', 'enc-colorimetry', 'idr-nal', 'enc-teardown']
+fault_bridge_seam = executable('fault-bridge',
+  ['../../tests/check/fault-bridge.c', 'gstmppfaultbridge.c'],
+  c_args : [gst_rockchip_args, '-Wextra'],
+  include_directories : configinc,
+  dependencies : [gst_dep, gstcheck_dep])
+
+test('rockchipmpp kernel fault bridge correlation and ownership',
+  fault_bridge_seam,
+  workdir : meson.project_build_root(),
+  is_parallel : false)
+
+foreach encoder_test : ['enc-latency', 'enc-restart', 'enc-colorimetry', 'idr-nal', 'enc-teardown', 'enc-fault-bridge']
   encoder_exe = executable(encoder_test, '../../tests/check/' + encoder_test + '.c',
     c_args : gst_rockchip_args,
     include_directories : configinc,

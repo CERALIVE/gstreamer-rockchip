@@ -28,6 +28,7 @@
 #include <gst/video/gstvideoencoder.h>
 
 #include "gstmpp.h"
+#include "gstmppfaultbridge.h"
 
 G_BEGIN_DECLS;
 
@@ -144,6 +145,17 @@ struct _GstMppEnc
   gint64 restart_window_started;
   guint64 encoder_restarts;
   gboolean restarting;
+
+  /* Reads the island's own ftrace events so a real RKVENC hardware fault can
+   * reach the restart path above. libmpp's async return set cannot express
+   * one: it is only MPP_OK/MPP_NOK/MPP_ERR_TIMEOUT, and the latter two are
+   * deliberately excluded from restarting. NULL whenever the bridge is not
+   * enabled or could not arm, which is the ordinary case. Owned by the
+   * streaming thread: created in start, polled from the output task, freed in
+   * stop. kernel_faults is published under prop_mutex like every other
+   * read-only counter. */
+  GstMppFaultBridge *fault_bridge;
+  guint64 kernel_faults;
 
   /* Force-key-unit events from either pad converge on the next submitted
    * frame, where MPP can honour the request without racing the input queue. */
