@@ -233,9 +233,33 @@ drives `improcessOpt` with real release fences at 3840×2160 against the same
 runtime, so the Opt path is exercised at 4K as well, though librga-direct rather
 than through the element.
 
+**The older-runtime fallback is PROVEN on Rock, as a paired A/B against the R1
+leg.** The pinned Radxa R0 `librga.so.2.1.0`
+(`0b455344259c37fec821955e2de85bb5f76a34e69682217b514c407d8a35c6c3`, the
+`librga2_2.2.0-1_arm64.deb` already byte-pinned in `ci/mpp-pin.env`) is selected
+**for one process only** through `LD_LIBRARY_PATH` — `LD_DEBUG=libs` confirms the
+loader took that copy — so nothing is installed and the sysext-backed `/usr`
+keeps its R1 package, which is the isolated-evidence form this document's own
+rule allows. `gst-inspect-1.0 rgaconvert` exits 0 and emits `improcessOpt
+unavailable; using seven-argument improcess; interpolation and async disabled`
+**exactly once** (count 1, with `improcessOpt resolved` count 0). Running the
+same `tests/board/dmabuf-rgaconvert` binary on the same NV16 1280×720 bt709
+source through both runtimes:
+
+| Runtime | exit | output bytes | Opt submissions | fallback warning | counters |
+|---|---:|---:|---:|---:|---|
+| R1 `1.10.5+ceralive.1` (installed) | 0 | 1 382 400 | 1 | 0 | `0/0/0` |
+| Radxa R0 `2.2.0-1` (process-local) | 0 | 1 382 400 | 0 | 1 | `0/0/0` |
+
+Both outputs are **byte-identical**
+(`a18fbf014d512678aaf38ff2b720463a0a3669c05b382cd78dc0bc10764a498e`), so the
+seven-argument fallback is not merely loadable — it converts, and it converts to
+the same pixels.
+
 Still outstanding on both boards: BT.709-versus-601-reference PSNR deltas; d2
-300/300 H.265 and H.264 with zero `RGA_BLIT fail`; legacy rollback;
-older-Radxa-runtime load, one warning and seven-argument execution. A
+300/300 H.265 and H.264 with zero `RGA_BLIT fail`; the
+`GST_MPP_RGA_LEGACY_BLIT=1` rollback, which is a different switch from the
+runtime fallback above and is still unexercised on hardware. A
 `videotestsrc`-fed pipeline is NOT a valid instrument for any of these —
 GStreamer 1.22 `videotestsrc` does not honour a downstream DMA-BUF allocation
 proposal, so such a pipeline fails to preroll and emits zero submissions, which
