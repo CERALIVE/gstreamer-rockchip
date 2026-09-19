@@ -53,7 +53,7 @@ test('rockchipmpp GstHarness factories and caps', mpp_harness,
   workdir : meson.project_build_root(),
   is_parallel : false)
 
-foreach encoder_test : ['enc-latency', 'enc-restart', 'enc-colorimetry', 'idr-nal']
+foreach encoder_test : ['enc-latency', 'enc-restart', 'enc-colorimetry', 'idr-nal', 'enc-teardown']
   encoder_exe = executable(encoder_test, '../../tests/check/' + encoder_test + '.c',
     c_args : gst_rockchip_args,
     include_directories : configinc,

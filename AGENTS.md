@@ -425,6 +425,14 @@ through an explicit cross-repository migration, never as incidental refactoring.
 
 ## Test and board-drill contract
 
+**Late teardown input:** every encoder subclass must check atomic `flushing`
+before per-frame property application, delegating rejection to the unchanged
+common handler. H.264/H.265 otherwise renegotiate after final reset dirties
+properties and clears output caps; VP8/JPEG share the ordering defect without
+the caps call. `tests/check/enc-teardown.c` pins the real concurrent queue/state
+transition with no FLUSH_START workaround, zero property applies and zero bus
+errors. See `docs/ENCODER-RUNTIME-CONTRACT.md`; hardware rerun is separate.
+
 Hardware-independent gates run in both bookworm/GStreamer 1.22 and
 trixie/GStreamer 1.26 environments. The mock-MPP suites prove software state,
 ownership, caps construction, and MPP ABI closure; they do not emulate RK3588 DMA

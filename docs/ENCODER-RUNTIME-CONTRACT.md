@@ -1,5 +1,37 @@
 # Encoder runtime contract
 
+## Late input during teardown [EXISTS — host regression; board rerun outstanding]
+
+All four encoder subclasses (H.264, H.265, VP8 and JPEG) check the atomic
+flushing flag **before** applying per-frame properties. A rejected frame goes
+straight to the common handler, which retains ownership of frame disposal and
+returns `GST_FLOW_FLUSHING`. Its mutex, task-start guard, capacity-wait wakeup
+and second flushing check are unchanged. A genuine property/configuration
+failure while running still returns `GST_FLOW_NOT_NEGOTIATED`.
+
+Final `PAUSED→READY` reset stops the output task and marks properties dirty.
+An upstream queue can still deliver before the parent state change deactivates
+the sink. Previously H.264/H.265 reapplied those properties and renegotiated
+output caps before reaching the common flushing guard. Against already-cleared
+src caps this returned `NOT_NEGOTIATED` and raised upstream stream errors.
+VP8/JPEG did not renegotiate there, but unnecessarily configured MPP in the same
+window. The subclass check runs under the video encoder stream lock, which also
+serializes final reset; the common handler still rechecks after releasing that
+lock to acquire its mutex and after waiting for capacity.
+
+`tests/check/enc-teardown.c` uses a real `videotestsrc ! queue ! encoder !
+fakesink` pipeline with mock MPP. A buffer probe holds the second queued input;
+a test-only parent-class rendezvous releases it after the **real** final reset
+and src-pad deactivation. No reset/dirty/admission implementation is copied and
+no `FLUSH_START` workaround is sent. A synchronous bus handler counts errors
+even during shutdown. All waits have deadlines and class callbacks are restored.
+
+Before the fix, both H.26x cases returned `-4` and posted two bus errors each;
+VP8/JPEG returned `-2` but each applied configuration once. After the fix, all
+four return `-2`, with zero property applications and zero bus errors. The full
+Trixie/GStreamer 1.26.2 host suite passes. This is deterministic software-path
+evidence, not twenty instrumented Rock cycles or a release/install receipt.
+
 ## Composition primary color selection [EXISTS]
 
 The 2026-09-16 OPi trace follows BT.709 from HDMI NV16 through `rgaconvert`,

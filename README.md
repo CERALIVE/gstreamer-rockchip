@@ -110,6 +110,12 @@ Encoder latency, bounded context recovery, colorimetry/VUI configuration,
 forced-IDR handling, and the PTS/DTS contract are documented in
 [`docs/ENCODER-RUNTIME-CONTRACT.md`](docs/ENCODER-RUNTIME-CONTRACT.md).
 
+Late queued frames during encoder teardown are rejected as flushing before
+codec properties can trigger renegotiation. All four encoder subclasses share
+this ordering guarantee; a deterministic host regression covers the concurrent
+state transition without sending a pre-shutdown flush event. Instrumented Rock
+validation remains outstanding, not implied by the host test.
+
 Use the [standalone MPI interposer tests](tests/mpi-interposer/README.md) for
 host-only recovery checks. They prove plugin recovery from an injected public
 MPI error, not hardware error propagation or item 30's island-knob requirement.
