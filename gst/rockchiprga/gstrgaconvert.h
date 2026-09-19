@@ -42,6 +42,9 @@ GType gst_rga_core_mask_get_type (void);
 G_DECLARE_FINAL_TYPE (GstRgaConvert, gst_rga_convert, GST, RGA_CONVERT,
     GstBaseTransform);
 
+GstFlowReturn gst_rga_convert_release_pipelined (GstRgaConvert * self,
+    GstBuffer * produced, gint release_fence_fd, GstBuffer ** outbuf);
+
 void gst_rga_convert_set_backend_for_test (GstRgaConvert * self,
     GstMppRgaBackend * backend);
 void gst_rga_convert_set_allocator_for_test (GstRgaConvert * self,

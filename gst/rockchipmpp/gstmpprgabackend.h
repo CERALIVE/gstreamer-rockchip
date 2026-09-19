@@ -111,6 +111,12 @@ typedef struct
   gint (*process) (const GstMppRgaIm2dRequest * request, gpointer user_data);
   gint (*composite) (const GstMppRgaIm2dCompositeRequest * request,
       gpointer user_data);
+  /* Capability is reported SEPARATELY from the entry point's presence: the
+   * real backend always compiles process_async in, but an older runtime
+   * resolves no improcessOpt and has nowhere to return a release fence. */
+  gboolean (*async_supported) (gpointer user_data);
+  gint (*process_async) (const GstMppRgaIm2dRequest * request,
+      gint * release_fence_fd, gpointer user_data);
 } GstMppRgaBackendOps;
 
 typedef struct _GstMppRgaBackend GstMppRgaBackend;
@@ -133,6 +139,12 @@ GstMppRgaResult gst_mpp_rga_backend_blit (GstMppRgaBackend * backend,
 GstMppRgaResult gst_mpp_rga_backend_process (GstMppRgaBackend * backend,
     GstMppRgaOperation operation, GstVideoFormat in_format,
     GstVideoFormat out_format, const GstMppRgaIm2dRequest * request);
+gboolean gst_mpp_rga_backend_supports_async (GstMppRgaBackend * backend);
+GstMppRgaResult gst_mpp_rga_backend_process_async (GstMppRgaBackend * backend,
+    GstMppRgaOperation operation, GstVideoFormat in_format,
+    GstVideoFormat out_format, const GstMppRgaIm2dRequest * request,
+    gint * release_fence_fd);
+gboolean gst_mpp_rga_fence_wait (gint release_fence_fd, gint timeout_ms);
 GstMppRgaResult gst_mpp_rga_backend_composite (GstMppRgaBackend * backend,
     GstVideoFormat in_format, GstVideoFormat out_format,
     const GstMppRgaIm2dCompositeRequest * request);

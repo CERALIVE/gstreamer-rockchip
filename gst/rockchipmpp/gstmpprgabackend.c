@@ -13,6 +13,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -75,20 +76,43 @@ gst_mpp_rga_status_ok (gint status)
 }
 
 static IM_STATUS
-gst_mpp_rga_submit (rga_buffer_t src, rga_buffer_t dst, rga_buffer_t pat,
-    im_rect srect, im_rect drect, im_rect prect, gint interp, gint usage)
+gst_mpp_rga_submit_full (rga_buffer_t src, rga_buffer_t dst, rga_buffer_t pat,
+    im_rect srect, im_rect drect, im_rect prect, gint interp, gint usage,
+    gint * release_fence_fd)
 {
   im_opt_t opt = { 0, };
 
   gst_mpp_rga_ensure_api ();
   opt.version = RGA_CURRENT_API_HEADER_VERSION;
   opt.interp = interp;
+  if (release_fence_fd) {
+    *release_fence_fd = -1;
+    GST_LOG ("submitting asynchronous improcessOpt interp=%d", interp);
+    return rga_process_opt (src, dst, pat, srect, drect, prect,
+        -1, release_fence_fd, &opt, usage | IM_ASYNC);
+  }
   if (rga_process_opt) {
     GST_LOG ("submitting synchronous improcessOpt interp=%d", interp);
     return rga_process_opt (src, dst, pat, srect, drect, prect,
         -1, NULL, &opt, usage | IM_SYNC);
   }
   return improcess (src, dst, pat, srect, drect, prect, usage | IM_SYNC);
+}
+
+static IM_STATUS
+gst_mpp_rga_submit (rga_buffer_t src, rga_buffer_t dst, rga_buffer_t pat,
+    im_rect srect, im_rect drect, im_rect prect, gint interp, gint usage)
+{
+  return gst_mpp_rga_submit_full (src, dst, pat, srect, drect, prect, interp,
+      usage, NULL);
+}
+
+static gboolean
+gst_mpp_rga_real_async_supported (gpointer user_data)
+{
+  (void) user_data;
+  gst_mpp_rga_ensure_api ();
+  return rga_process_opt != NULL;
 }
 #endif
 
@@ -365,8 +389,8 @@ gst_mpp_rga_real_configure_im2d (guint core_mask, gint priority)
 }
 
 static gint
-gst_mpp_rga_real_process (const GstMppRgaIm2dRequest * request,
-    gpointer user_data)
+gst_mpp_rga_real_process_full (const GstMppRgaIm2dRequest * request,
+    gint * release_fence_fd)
 {
   rga_buffer_t src;
   rga_buffer_t dst;
@@ -386,7 +410,6 @@ gst_mpp_rga_real_process (const GstMppRgaIm2dRequest * request,
   im_rect pat_rect = { 0, };
   IM_STATUS status;
 
-  (void) user_data;
   status = gst_mpp_rga_real_configure_im2d (request->core_mask,
       request->priority);
   if (!gst_mpp_rga_status_ok (status))
@@ -401,8 +424,24 @@ gst_mpp_rga_real_process (const GstMppRgaIm2dRequest * request,
   imsetColorSpace (&src, request->src_color_space_mode);
   imsetColorSpace (&dst, request->dst_color_space_mode);
 
-  return gst_mpp_rga_submit (src, dst, pat, src_rect, dst_rect, pat_rect,
-      request->interp, request->usage);
+  return gst_mpp_rga_submit_full (src, dst, pat, src_rect, dst_rect, pat_rect,
+      request->interp, request->usage, release_fence_fd);
+}
+
+static gint
+gst_mpp_rga_real_process (const GstMppRgaIm2dRequest * request,
+    gpointer user_data)
+{
+  (void) user_data;
+  return gst_mpp_rga_real_process_full (request, NULL);
+}
+
+static gint
+gst_mpp_rga_real_process_async (const GstMppRgaIm2dRequest * request,
+    gint * release_fence_fd, gpointer user_data)
+{
+  (void) user_data;
+  return gst_mpp_rga_real_process_full (request, release_fence_fd);
 }
 
 static gint
@@ -488,6 +527,8 @@ static const GstMppRgaBackendOps gst_mpp_rga_real_ops = {
 #ifdef GST_MPP_RGA_ENABLE_IM2D
   .process = gst_mpp_rga_real_process,
   .composite = gst_mpp_rga_real_composite,
+  .async_supported = gst_mpp_rga_real_async_supported,
+  .process_async = gst_mpp_rga_real_process_async,
 #endif
 };
 
@@ -706,6 +747,78 @@ gst_mpp_rga_backend_process (GstMppRgaBackend * backend,
   blit_errno = errno;
   result = gst_mpp_rga_backend_finish (backend, &key, ret, blit_errno,
       ret == IM_STATUS_SUCCESS || ret == IM_STATUS_NOERROR);
+  if (result == GST_MPP_RGA_BLIT_FAILED &&
+      (ret == IM_STATUS_NOT_SUPPORTED || ret == IM_STATUS_INVALID_PARAM ||
+          ret == IM_STATUS_ILLEGAL_PARAM || ret == IM_STATUS_ERROR_VERSION))
+    return GST_MPP_RGA_NOT_SUPPORTED;
+  return result;
+}
+
+gboolean
+gst_mpp_rga_backend_supports_async (GstMppRgaBackend * backend)
+{
+  g_return_val_if_fail (backend != NULL, FALSE);
+  if (!backend->ops.process_async || !backend->ops.async_supported)
+    return FALSE;
+  return backend->ops.async_supported (backend->user_data);
+}
+
+gboolean
+gst_mpp_rga_fence_wait (gint release_fence_fd, gint timeout_ms)
+{
+  struct pollfd pfd = { release_fence_fd, POLLIN, 0 };
+  gint rc;
+
+  if (release_fence_fd < 0)
+    return TRUE;
+
+  do {
+    rc = poll (&pfd, 1, timeout_ms);
+  } while (rc < 0 && errno == EINTR);
+
+  if (rc <= 0)
+    GST_WARNING ("release fence %d did not signal within %d ms (poll=%d, %s)",
+        release_fence_fd, timeout_ms, rc, g_strerror (errno));
+  close (release_fence_fd);
+  return rc > 0;
+}
+
+GstMppRgaResult
+gst_mpp_rga_backend_process_async (GstMppRgaBackend * backend,
+    GstMppRgaOperation operation, GstVideoFormat in_format,
+    GstVideoFormat out_format, const GstMppRgaIm2dRequest * request,
+    gint * release_fence_fd)
+{
+  GstMppRgaTupleKey key;
+  GstMppRgaResult result;
+  gint ret;
+  gint blit_errno;
+
+  g_return_val_if_fail (backend != NULL, GST_MPP_RGA_UNAVAILABLE);
+  g_return_val_if_fail (request != NULL, GST_MPP_RGA_LAYOUT_REJECTED);
+  g_return_val_if_fail (release_fence_fd != NULL, GST_MPP_RGA_LAYOUT_REJECTED);
+
+  *release_fence_fd = -1;
+  if (!gst_mpp_rga_backend_supports_async (backend))
+    return GST_MPP_RGA_UNAVAILABLE;
+
+  result = gst_mpp_rga_backend_begin (backend, operation, in_format,
+      out_format, &key);
+  if (result != GST_MPP_RGA_SUCCESS)
+    return result;
+
+  errno = 0;
+  ret = backend->ops.process_async (request, release_fence_fd,
+      backend->user_data);
+  blit_errno = errno;
+  result = gst_mpp_rga_backend_finish (backend, &key, ret, blit_errno,
+      ret == IM_STATUS_SUCCESS || ret == IM_STATUS_NOERROR);
+  if (result != GST_MPP_RGA_SUCCESS) {
+    /* A refused submission guards no buffer: the callee closes its own fence. */
+    if (*release_fence_fd >= 0)
+      close (*release_fence_fd);
+    *release_fence_fd = -1;
+  }
   if (result == GST_MPP_RGA_BLIT_FAILED &&
       (ret == IM_STATUS_NOT_SUPPORTED || ret == IM_STATUS_INVALID_PARAM ||
           ret == IM_STATUS_ILLEGAL_PARAM || ret == IM_STATUS_ERROR_VERSION))
