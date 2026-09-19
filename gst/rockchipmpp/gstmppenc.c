@@ -144,6 +144,7 @@ enum
   PROP_CONVERSION_DROPPED_FRAMES,
   PROP_LAYOUT_REJECTIONS,
   PROP_ENCODER_RESTARTS,
+  PROP_KERNEL_FAULTS,
   PROP_LAST,
 };
 
@@ -538,6 +539,9 @@ gst_mpp_enc_get_property (GObject * object,
     }
     case PROP_ENCODER_RESTARTS:
       g_value_set_uint64 (value, self->encoder_restarts);
+      break;
+    case PROP_KERNEL_FAULTS:
+      g_value_set_uint64 (value, self->kernel_faults);
       break;
     default:
       invalid = TRUE;
@@ -1316,6 +1320,7 @@ gst_mpp_enc_handle_runtime_error (GstVideoEncoder * encoder,
     const gchar * operation, MPP_RET error)
 {
   GstMppEnc *self = GST_MPP_ENC (encoder);
+  gboolean restarted;
 
   if (error == MPP_ERR_TIMEOUT || error == MPP_NOK)
     return FALSE;
@@ -1323,7 +1328,55 @@ gst_mpp_enc_handle_runtime_error (GstVideoEncoder * encoder,
     self->task_ret = GST_FLOW_ERROR;
     return FALSE;
   }
-  return gst_mpp_enc_restart_context (encoder, operation, error);
+  restarted = gst_mpp_enc_restart_context (encoder, operation, error);
+
+  /* A restart destroys and recreates the MPP context, so the kernel closes
+   * that session and opens a new one with a NEW index. The cached own-set
+   * would otherwise name a session that no longer exists, and every later
+   * fault would read as UNATTRIBUTED. Re-resolving here is safe because the
+   * new session was just opened by this very thread; the bridge unions the
+   * result rather than replacing it, so a summary read that misses an
+   * already-known session cannot un-own it. */
+  if (restarted && self->fault_bridge)
+    gst_mpp_fault_bridge_resolve_sessions (self->fault_bridge,
+        GST_OBJECT (self));
+
+  return restarted;
+}
+
+/* Drains the kernel fault bridge and, when enough faults inside the window
+ * were attributed to one of this element's own MPP sessions, drives the
+ * UNCHANGED restart path above.
+ *
+ * MPP_ERR_VPUHW is not a fabricated status: it is libmpp's own 'VPU hardware
+ * error', which is exactly what the kernel's mpp_task_error reports, and it
+ * is neither of the two values gst_mpp_enc_handle_runtime_error() filters
+ * out. Runs on the output task thread with the stream lock held, i.e. the
+ * same context as the two existing call sites. */
+static void
+gst_mpp_enc_poll_kernel_faults (GstVideoEncoder * encoder)
+{
+  GstMppEnc *self = GST_MPP_ENC (encoder);
+  gboolean crossed;
+  guint64 faults;
+
+  if (G_LIKELY (self->fault_bridge == NULL))
+    return;
+
+  crossed = gst_mpp_fault_bridge_poll (self->fault_bridge, GST_OBJECT (self));
+
+  faults = gst_mpp_fault_bridge_owned_faults (self->fault_bridge);
+  GST_MPP_ENC_PROP_LOCK (encoder);
+  self->kernel_faults = faults;
+  GST_MPP_ENC_PROP_UNLOCK (encoder);
+
+  if (!crossed)
+    return;
+
+  GST_WARNING_OBJECT (self,
+      "kernel reported repeated RKVENC faults on our session; restarting");
+  gst_mpp_enc_handle_runtime_error (encoder, "kernel mpp_task_error",
+      MPP_ERR_VPUHW);
 }
 
 static void
@@ -1470,6 +1523,17 @@ gst_mpp_enc_start (GstVideoEncoder * encoder)
   g_mutex_init (&self->event_mutex);
   g_cond_init (&self->event_cond);
 
+  /* After gst_mpp_enc_configure_context(), so mpp_init() has opened
+   * /dev/mpp_service and the kernel session this element owns is already
+   * listed in the procfs summary. Resolving ownership here, on the thread
+   * that opened it, is what makes the cached session set survive that
+   * thread's later death -- the summary's pid field is a TID, not a pid. */
+  self->kernel_faults = 0;
+  self->fault_bridge = gst_mpp_fault_bridge_new (GST_OBJECT (self));
+  if (self->fault_bridge)
+    gst_mpp_fault_bridge_resolve_sessions (self->fault_bridge,
+        GST_OBJECT (self));
+
   GST_DEBUG_OBJECT (self, "started");
 
   return TRUE;
@@ -1496,6 +1560,11 @@ gst_mpp_enc_stop (GstVideoEncoder * encoder)
   GST_VIDEO_ENCODER_STREAM_LOCK (encoder);
   gst_mpp_enc_reset (encoder, FALSE, TRUE);
   GST_VIDEO_ENCODER_STREAM_UNLOCK (encoder);
+
+  /* After the reset above, so the output task is no longer running and
+   * cannot be inside gst_mpp_fault_bridge_poll() while the fd closes. */
+  gst_mpp_fault_bridge_free (self->fault_bridge);
+  self->fault_bridge = NULL;
 
   g_cond_clear (&self->event_cond);
   g_mutex_clear (&self->event_mutex);
@@ -2354,6 +2423,11 @@ gst_mpp_enc_loop (GstVideoEncoder * encoder)
   while (gst_mpp_enc_poll_packet_locked (encoder))
     packet_progress = TRUE;
 
+  /* A wedged hardware job produces no packet and no MPP error other than a
+   * timeout, so this is the only place the loop can learn the encoder is
+   * faulting rather than merely idle. */
+  gst_mpp_enc_poll_kernel_faults (encoder);
+
   if (GST_MPP_ENC_FLUSHING (encoder) && GST_MPP_ENC_PENDING (encoder) &&
       !packet_progress) {
     gint64 deadline = g_get_monotonic_time () + MPP_ENC_DRAIN_NO_PROGRESS_US;
@@ -2719,6 +2793,11 @@ gst_mpp_enc_class_init (GstMppEncClass * klass)
   g_object_class_install_property (gobject_class, PROP_ENCODER_RESTARTS,
       g_param_spec_uint64 ("encoder-restarts", "Encoder restarts",
           "Successful bounded MPP context restarts", 0, G_MAXUINT64, 0,
+          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_KERNEL_FAULTS,
+      g_param_spec_uint64 ("kernel-faults", "Kernel hardware faults",
+          "RKVENC task errors the kernel attributed to this element's own "
+          "MPP sessions", 0, G_MAXUINT64, 0,
           G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (gobject_class, PROP_HEADER_MODE,
