@@ -256,10 +256,21 @@ Both outputs are **byte-identical**
 seven-argument fallback is not merely loadable — it converts, and it converts to
 the same pixels.
 
-Still outstanding on both boards: BT.709-versus-601-reference PSNR deltas; d2
-300/300 H.265 and H.264 with zero `RGA_BLIT fail`; the
-`GST_MPP_RGA_LEGACY_BLIT=1` rollback, which is a different switch from the
-runtime fallback above and is still unexercised on hardware. A
+Still outstanding on both boards: BT.709-versus-601-reference PSNR deltas, and
+d2 300/300 H.265 and H.264 with zero `RGA_BLIT fail`.
+
+`GST_MPP_RGA_LEGACY_BLIT=1` is a **different switch** from the runtime fallback
+above — it selects `c_RkRgaBlit` inside `gst_mpp_rga_real_blit()`, the encoder
+and decoder seam, which `rgaconvert` never enters — and it remains unexercised
+on hardware. An attempt on Rock did not reach it and is recorded here so the
+next attempt does not repeat it: a
+`videotestsrc ! video/x-raw,format={I420,NV16},1280x720 ! mpph265enc` pipeline
+encodes 60/60 frames in both switch positions, byte-identical output, while the
+`mpprgabackend` debug category emits **zero** lines in either leg — so the
+encoder served those caps without entering the RGA seam at all, and the switch
+had nothing to select. Reaching that seam needs an input the encoder genuinely
+must blit; a run whose only evidence is "both legs produced frames" proves
+nothing about the rollback. A
 `videotestsrc`-fed pipeline is NOT a valid instrument for any of these —
 GStreamer 1.22 `videotestsrc` does not honour a downstream DMA-BUF allocation
 proposal, so such a pipeline fails to preroll and emits zero submissions, which
