@@ -116,7 +116,7 @@ entry for it names both versions. Dropping the Bookworm leg would delete that
 coverage. Not publishing Bookworm is a reason to keep the leg internal, not a
 reason to remove it.
 
-**The Bookworm leg builds against legacy Radxa librga, not our R0/R1.** Published
+**The Bookworm leg links legacy Radxa librga, with R1 headers only.** Published
 R0/R1 require `libc6 (>= 2.38)` and cannot
 install on Bookworm's glibc 2.36, so the Bookworm leg selects the SHA-pinned
 Radxa `librga2`/`librga-dev` `2.2.0-1` pair through `RGA_COMPAT_SUITE=bookworm`
@@ -124,7 +124,10 @@ in `ci/mpp-pin.env`. A Bookworm artifact would therefore not be a supported
 configuration even if it were published. `build-check.yml`'s summary already
 labels the leg "legacy Radxa 2.2.0-1 (plugin portability only; NOT R0/R1
 support)" (line 267). No Bookworm librga is needed under this policy and none
-is planned; the legacy pin is permanent, not a placeholder.
+is planned; the legacy runtime pin is permanent, not a placeholder. C6b extracts
+only checksum-verified R1 headers into `/usr/local/include/rga`, never installs
+R1 packages there. Both suites enforce the ≥1.10.5 header assertion; older
+runtime loading uses dynamic Opt lookup.
 
 **`RGA_COMPAT_SUITE` must be wired into every job that installs or fetches
 librga, per leg.** The `1.14.4+ceralive.6` release run at `800f92a8` failed
@@ -300,11 +303,39 @@ The following are compatibility contracts, not cleanup opportunities:
   legacy pair is the permanent Bookworm input (see **Release publishing
   policy**). Do not force-install R0/R1, lower their dependency floor or drop the
   compatibility leg.
-- **im2d color conversion:** negotiated `GstVideoInfo` matrix/range selects
-  `rga_buffer_t.color_space_mode`; format/stride-only work leaves CSC unset.
-  YUV-output composition explicitly requests both CSC directions. Unknown or
-  unsupported conversions fail rather than assuming BT.601. Mapping, defaults,
-  full-range limitations, and test scope: `docs/RGA-MPP-INTERACTION.md`.
+- **C6b im2d color conversion:** complete colorimetry is retained from video
+  info; directional CSC is applied with `imsetColorSpace`, never OR-ed into
+  transform usage. Unexpressible rows use D29's default-matrix fallback, a
+  one-time warning and `csc-fallback-frames`, distinct from CPU-copy accounting.
+  Only SUCCESS/NOERROR succeed; other statuses reach typed flow failures.
+  MPP blits use synchronous im2d; `GST_MPP_RGA_LEGACY_BLIT=1` retains rollback.
+  Build against ≥1.10.5 headers, retain the explicit GModule handle and resolve
+  Opt dynamically, never link it. See `docs/RGA-MPP-INTERACTION.md`; both-board
+  qualification remains NOT-RUN.
+- **C6b-perf is BLOCKED, not deferred.** No DMA-BUF handle import cache exists
+  and none may be added while `improcess()` refuses handle-described buffers:
+  librga R1's `generate_blit_req()` leaves a non-handle `v_addr` in handle mode
+  and the island validates every non-zero address field, so all 440/440
+  submissions fail `-EINVAL` on Rock — with an fd control on the same buffers
+  passing. The repair belongs in librga or the island, never in this plugin.
+- **C6b-async is ADOPTED on both boards, and it ships DEFAULT-OFF.** Depth-1
+  `IM_ASYNC` pipelining cleared the ≥5 % gate on Rock (+17.8 % 4K / +28.1 %
+  1080p) and on Orange Pi (+18.4 % / +28.0 %, reproduced +18.4 % / +28.1 % on a
+  second run), so `rgaconvert` carries an `async-depth` property (uint, `0`-`1`,
+  **default `0`**). The default is 0 because the measurement's subject is the
+  standalone `tests/board/d6-c6b-measurement.sh` im2d harness, not the element:
+  no in-element board measurement exists yet, and depth 1 costs one frame of
+  latency. Flipping the default needs an in-element measurement, not another
+  harness run. `tests/board/d6-c6b-measurement.sh` remains the sole source of
+  these numbers.
+- **`async-depth` is refused, silently and by design, in three cases**: the
+  librga runtime resolves no `improcessOpt` (there is nowhere to return a
+  release fence), debug CPU staging is in use (the staged copy reads the
+  destination on the streaming thread the moment the blit returns), or the
+  submission is refused. Each falls back to the synchronous path, so the
+  property can never make a conversion fail that would otherwise have worked.
+  The staged case is guarded in code but is NOT reachable by the host harness —
+  a staging buffer needs a real dma-heap — so it is board territory.
 - **Caps fixation [EXISTS]:** same-memory identity alternatives retain
   explicit colorimetry; raw-format fixation restores omitted colorimetry within
   the same YUV/RGB family. Explicit output requests are never overwritten. The
@@ -325,8 +356,10 @@ The following are compatibility contracts, not cleanup opportunities:
   | `vflip` | boolean | `FALSE` | — |
   | `core-mask` | flags `GstRgaCoreMask` | `auto` | nicks `auto`, `rga3-core0`, `rga3-core1`, `rga2` |
   | `priority` | int | `0` | `0`–`6` |
+  | `interpolation` | enum `GstRgaInterpolation` | `default` | `default`, `linear`, `cubic`; older runtimes use default with a warning |
   | `crop-x` / `crop-y` | uint | `0` | `0`–`G_MAXUINT`, input crop origin |
   | `crop-w` / `crop-h` | uint | `0` | `0`–`G_MAXUINT`; **zero means "the remaining extent"**, not "an empty crop" |
+  | `async-depth` | uint | `0` | `0`–`1`; `0` submits synchronously (the shipped behaviour), `1` enables depth-1 `IM_ASYNC` pipelining and adds one frame of latency |
 
   `crop-{x,y,w,h}` are four separate properties by design — an operator sets
   only the edges it wants and leaves the rest at the default. Zero width or
@@ -457,6 +490,7 @@ The board suite is deliberately outside Meson:
 | `d3-main10-stride-ab.sh` | Report-only Main10 current-vs-`*8/pixel_stride0` frame-checksum experiment. |
 | `d4-allocation-soak.sh` | 136 s DMA allocation soak with live bitrate, resolution, and temporal-SVC changes, run **on a trial-verified librga backend** and scored on the three conversion counters. |
 | `d5-rgaconvert-matrix.sh` | `rgaconvert` conversion matrix — {CSC, scale, crop, rotate} × representative format pairs, each cell measured as PSNR against a software reference of the same operation. |
+| `d6-c6b-measurement.sh` | The C6b-perf / C6b-async go/no-go gate. Standalone im2d harness against the board's own librga: no plugin installed, no element instantiated, no capture device opened. Scores fd-vs-handle buffer description (with a single-plane RGBA control that separates a handle-path refusal from a chroma-plane question) and depth-1 `IM_ASYNC` sustained throughput, bracketed by two independent synchronous runs so clock or thermal drift cannot be read as an async gain. |
 
 The latest executed verdicts and their hardware scope are recorded in
 [`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md). That tracked

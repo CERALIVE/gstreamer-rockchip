@@ -202,6 +202,16 @@ jobs:
       - name: meson test
         run: meson test -C build --print-errorlogs
 
+      - name: Reject an improcessOpt load-time dependency
+        run: |
+          set -euo pipefail
+          nm -D --undefined-only build/gst/rockchipmpp/libgstrockchipmpp.so > build/mpp-undefined.txt
+          nm -D --undefined-only build/gst/rockchiprga/libgstrockchiprga.so > build/rga-undefined.txt
+          if grep -w improcessOpt build/mpp-undefined.txt build/rga-undefined.txt; then
+            echo 'ERROR: improcessOpt must be resolved dynamically' >&2
+            exit 1
+          fi
+
       - name: Standalone test-only MPI interposer gate
         run: |
           set -euo pipefail
@@ -248,6 +258,13 @@ jobs:
           bash packaging/build-deb.sh
           bash packaging/package-contract.sh stage-deb-arm64 dist
 
+      - name: Retain exact suite-matched board candidate
+        uses: actions/upload-artifact@v6
+        with:
+          name: plugin-${{ matrix.suite }}
+          path: dist/*.deb
+          if-no-files-found: error
+
       - name: Save ccache
         if: github.event_name != 'pull_request'
         uses: actions/cache/save@v6
@@ -264,7 +281,7 @@ jobs:
             echo "- device target suite: \`${{ needs.resolve-suite.outputs.suite }}\` (GLIBC floor \`${{ needs.resolve-suite.outputs.glibc_floor }}\`)"
             echo "- GLIBC floor gate: enforced against each leg's suite contract"
             echo "- MPP ABI closure: checked against the URL+SHA-pinned \`librockchip-mpp1 1.5.0-1\`"
-            echo "- RGA build inputs: ${{ matrix.suite == 'bookworm' && 'legacy Radxa 2.2.0-1 (plugin portability only; NOT R0/R1 support)' || 'CeraLive R1 1.10.5+ceralive.1 (Trixie pinned RGA configuration)' }}"
+            echo "- RGA build inputs: R1 1.10.5 headers; ${{ matrix.suite == 'bookworm' && 'legacy Radxa 2.2.0-1 runtime (GStreamer 1.22 portability, not R1 runtime support)' || 'CeraLive R1 1.10.5+ceralive.1 runtime' }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The one check a branch-protection rule can require. It runs on every event,

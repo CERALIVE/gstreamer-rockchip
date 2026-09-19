@@ -90,6 +90,8 @@ rga_dep = dependency('librga', required : get_option('rga'))
 
 if rga_dep.found() and not get_option('rga').disabled()
   cdata.set('HAVE_RGA', 1)
+  cdata.set('GST_MPP_RGA_ENABLE_IM2D', 1)
+  rga_dep = declare_dependency(dependencies : [rga_dep, dependency('gmodule-2.0')])
 endif
 
 if not get_option('vpxalphadec').auto()

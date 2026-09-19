@@ -82,11 +82,19 @@ struct _GstRgaConvert
   gboolean vflip;
   guint core_mask;
   gint priority;
+  gint interpolation;
   guint crop_x;
   guint crop_y;
   guint crop_w;
   guint crop_h;
+  guint async_depth;
+  gint inflight_fence;
+  GstBuffer *pending_buffer;
+  gint pending_fence;
 };
+
+#define GST_RGA_CONVERT_ASYNC_DEPTH_MAX 1
+#define GST_RGA_CONVERT_FENCE_TIMEOUT_MS 2000
 
 #define gst_rga_convert_parent_class parent_class
 G_DEFINE_TYPE (GstRgaConvert, gst_rga_convert, GST_TYPE_BASE_TRANSFORM);
@@ -106,7 +114,27 @@ enum
   PROP_CONVERSION_FALLBACK_FRAMES,
   PROP_CONVERSION_DROPPED_FRAMES,
   PROP_LAYOUT_REJECTIONS,
+  PROP_INTERPOLATION,
+  PROP_CSC_FALLBACK_FRAMES,
+  PROP_ASYNC_DEPTH,
 };
+
+static GType
+gst_rga_interpolation_get_type (void)
+{
+  static gsize type;
+  static const GEnumValue values[] = {
+    {IM_INTERP_DEFAULT, "Library default", "default"},
+    {IM_INTERP_LINEAR, "Linear", "linear"},
+    {IM_INTERP_CUBIC, "Cubic", "cubic"},
+    {0, NULL, NULL},
+  };
+  if (g_once_init_enter (&type)) {
+    GType registered = g_enum_register_static ("GstRgaInterpolation", values);
+    g_once_init_leave (&type, registered);
+  }
+  return type;
+}
 
 GType
 gst_rga_rotation_get_type (void)
@@ -923,6 +951,175 @@ gst_rga_convert_usage (GstRgaRotation rotation, gboolean hflip,
   return usage;
 }
 
+/* Retires whatever the depth-1 pipeline is still holding. The fence is always
+ * waited on, discard included: the hardware is still writing into that buffer,
+ * so releasing it to its pool first would hand a live DMA target to the next
+ * frame. */
+static GstFlowReturn
+gst_rga_convert_drain_pending (GstRgaConvert * self, gboolean push)
+{
+  GstBuffer *buffer;
+  gint fence;
+
+  g_mutex_lock (&self->lock);
+  buffer = self->pending_buffer;
+  fence = self->pending_fence;
+  self->pending_buffer = NULL;
+  self->pending_fence = -1;
+  g_mutex_unlock (&self->lock);
+
+  gst_mpp_rga_fence_wait (fence, GST_RGA_CONVERT_FENCE_TIMEOUT_MS);
+  if (!buffer)
+    return GST_FLOW_OK;
+  if (!push) {
+    gst_buffer_unref (buffer);
+    return GST_FLOW_OK;
+  }
+  return gst_pad_push (GST_BASE_TRANSFORM_SRC_PAD (self), buffer);
+}
+
+GstFlowReturn
+gst_rga_convert_release_pipelined (GstRgaConvert * self, GstBuffer * produced,
+    gint release_fence_fd, GstBuffer ** outbuf)
+{
+  GstBuffer *ready;
+  GstFlowReturn ret;
+  gint ready_fence;
+
+  g_return_val_if_fail (GST_IS_RGA_CONVERT (self), GST_FLOW_ERROR);
+  g_return_val_if_fail (outbuf != NULL, GST_FLOW_ERROR);
+
+  *outbuf = NULL;
+  if (!produced) {
+    gst_mpp_rga_fence_wait (release_fence_fd,
+        GST_RGA_CONVERT_FENCE_TIMEOUT_MS);
+    return GST_FLOW_OK;
+  }
+
+  if (release_fence_fd < 0) {
+    /* A synchronous frame must never overtake an older pipelined one. */
+    ret = gst_rga_convert_drain_pending (self, TRUE);
+    if (ret != GST_FLOW_OK) {
+      gst_buffer_unref (produced);
+      return ret;
+    }
+    *outbuf = produced;
+    return GST_FLOW_OK;
+  }
+
+  g_mutex_lock (&self->lock);
+  ready = self->pending_buffer;
+  ready_fence = self->pending_fence;
+  self->pending_buffer = produced;
+  self->pending_fence = release_fence_fd;
+  g_mutex_unlock (&self->lock);
+
+  if (!ready)
+    return GST_FLOW_OK;
+
+  gst_mpp_rga_fence_wait (ready_fence, GST_RGA_CONVERT_FENCE_TIMEOUT_MS);
+  *outbuf = ready;
+  return GST_FLOW_OK;
+}
+
+static GstFlowReturn
+gst_rga_convert_generate_output (GstBaseTransform * transform,
+    GstBuffer ** outbuf)
+{
+  GstRgaConvert *self = GST_RGA_CONVERT (transform);
+  GstBuffer *produced = NULL;
+  GstFlowReturn ret;
+  gint fence;
+
+  *outbuf = NULL;
+  ret = GST_BASE_TRANSFORM_CLASS (parent_class)->generate_output (transform,
+      &produced);
+
+  g_mutex_lock (&self->lock);
+  fence = self->inflight_fence;
+  self->inflight_fence = -1;
+  g_mutex_unlock (&self->lock);
+
+  if (ret != GST_FLOW_OK) {
+    gst_mpp_rga_fence_wait (fence, GST_RGA_CONVERT_FENCE_TIMEOUT_MS);
+    *outbuf = produced;
+    return ret;
+  }
+  return gst_rga_convert_release_pipelined (self, produced, fence, outbuf);
+}
+
+static gboolean
+gst_rga_convert_sink_event (GstBaseTransform * transform, GstEvent * event)
+{
+  GstRgaConvert *self = GST_RGA_CONVERT (transform);
+
+  switch (GST_EVENT_TYPE (event)) {
+    case GST_EVENT_EOS:
+      gst_rga_convert_drain_pending (self, TRUE);
+      break;
+    case GST_EVENT_FLUSH_STOP:
+      gst_rga_convert_drain_pending (self, FALSE);
+      break;
+    default:
+      break;
+  }
+  return GST_BASE_TRANSFORM_CLASS (parent_class)->sink_event (transform, event);
+}
+
+static gboolean
+gst_rga_convert_stop (GstBaseTransform * transform)
+{
+  gst_rga_convert_drain_pending (GST_RGA_CONVERT (transform), FALSE);
+  return TRUE;
+}
+
+static GstClockTime
+gst_rga_convert_pipeline_latency (GstRgaConvert * self)
+{
+  GstClockTime latency = 0;
+
+  g_mutex_lock (&self->lock);
+  if (self->async_depth > 0 && self->have_caps &&
+      GST_VIDEO_INFO_FPS_N (&self->in_info) > 0 &&
+      GST_VIDEO_INFO_FPS_D (&self->in_info) > 0)
+    latency = gst_util_uint64_scale (self->async_depth * GST_SECOND,
+        GST_VIDEO_INFO_FPS_D (&self->in_info),
+        GST_VIDEO_INFO_FPS_N (&self->in_info));
+  g_mutex_unlock (&self->lock);
+  return latency;
+}
+
+static gboolean
+gst_rga_convert_query (GstBaseTransform * transform, GstPadDirection direction,
+    GstQuery * query)
+{
+  GstRgaConvert *self = GST_RGA_CONVERT (transform);
+  GstClockTime extra;
+  GstClockTime min;
+  GstClockTime max;
+  gboolean live;
+
+  if (direction != GST_PAD_SRC || GST_QUERY_TYPE (query) != GST_QUERY_LATENCY)
+    return GST_BASE_TRANSFORM_CLASS (parent_class)->query (transform, direction,
+        query);
+
+  if (!GST_BASE_TRANSFORM_CLASS (parent_class)->query (transform, direction,
+          query))
+    return FALSE;
+
+  extra = gst_rga_convert_pipeline_latency (self);
+  if (extra == 0)
+    return TRUE;
+
+  gst_query_parse_latency (query, &live, &min, &max);
+  if (GST_CLOCK_TIME_IS_VALID (min))
+    min += extra;
+  if (GST_CLOCK_TIME_IS_VALID (max))
+    max += extra;
+  gst_query_set_latency (query, live, min, max);
+  return TRUE;
+}
+
 static GstFlowReturn
 gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
     GstBuffer * output)
@@ -947,6 +1144,7 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
   guint crop_y;
   guint crop_w;
   guint crop_h;
+  guint async_depth;
   guint effective_crop_w;
   guint effective_crop_h;
   gboolean allow_cpu_copy;
@@ -955,6 +1153,7 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
   GstMppRgaResult result;
   gint input_fd;
   gint output_fd;
+  GstFlowReturn failure_flow = GST_FLOW_NOT_NEGOTIATED;
 
   g_mutex_lock (&self->lock);
   if (!self->have_caps) {
@@ -970,16 +1169,15 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
   vflip = self->vflip;
   core_mask = self->core_mask;
   priority = self->priority;
+  request.interp = self->interpolation;
   crop_x = self->crop_x;
   crop_y = self->crop_y;
   crop_w = self->crop_w;
   crop_h = self->crop_h;
+  async_depth = self->async_depth;
   g_mutex_unlock (&self->lock);
 
-  if (!gst_mpp_rga_request_set_colorimetry (&request, &input_info,
-          &output_info))
-    return gst_rga_convert_not_negotiated (self,
-        "negotiated matrix or range is unsupported by librga CSC", FALSE);
+  gst_mpp_rga_request_set_colorimetry (&request, &input_info, &output_info);
 
   if (!gst_rga_convert_layout_from_buffer (input, &input_info, &input_layout,
           &reason) ||
@@ -1059,14 +1257,34 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
   request.core_mask = core_mask;
   request.priority = priority;
 
-  result = gst_mpp_rga_backend_process (backend, GST_MPP_RGA_OP_CONVERT,
-      input_layout.format, output_layout.format, &request);
+  /* CPU staging reads the destination on this thread as soon as the blit
+   * returns, so it can only ever be submitted synchronously. */
+  if (async_depth > 0 && !input_staging && !output_staging &&
+      gst_mpp_rga_backend_supports_async (backend)) {
+    gint fence = -1;
+
+    result = gst_mpp_rga_backend_process_async (backend,
+        GST_MPP_RGA_OP_CONVERT, input_layout.format, output_layout.format,
+        &request, &fence);
+    if (result == GST_MPP_RGA_SUCCESS) {
+      g_mutex_lock (&self->lock);
+      self->inflight_fence = fence;
+      g_mutex_unlock (&self->lock);
+    }
+  } else {
+    result = gst_mpp_rga_backend_process (backend, GST_MPP_RGA_OP_CONVERT,
+        input_layout.format, output_layout.format, &request);
+  }
   if (result != GST_MPP_RGA_SUCCESS) {
+    failure_flow = gst_mpp_rga_result_to_flow (result);
     reason = result == GST_MPP_RGA_TUPLE_DEMOTED ?
         "the conversion tuple is temporarily demoted" :
         "the trial-verified RGA backend rejected the conversion";
     goto refuse;
   }
+
+  gst_mpp_rga_count_csc_fallback (&request,
+      gst_mpp_conversion_stats_get (G_OBJECT (self)));
 
   if (output_staging &&
       !gst_rga_convert_copy_from_staging (output_staging, output,
@@ -1085,7 +1303,8 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
 refuse:
   gst_clear_buffer (&input_staging);
   gst_clear_buffer (&output_staging);
-  return gst_rga_convert_not_negotiated (self, reason, FALSE);
+  gst_rga_convert_not_negotiated (self, reason, FALSE);
+  return failure_flow;
 }
 
 static void
@@ -1094,9 +1313,17 @@ gst_rga_convert_set_property (GObject * object, guint prop_id,
 {
   GstRgaConvert *self = GST_RGA_CONVERT (object);
   gboolean reconfigure = FALSE;
+  gboolean latency_changed = FALSE;
 
   g_mutex_lock (&self->lock);
   switch (prop_id) {
+    case PROP_INTERPOLATION:
+      self->interpolation = g_value_get_enum (value);
+      break;
+    case PROP_ASYNC_DEPTH:
+      latency_changed = self->async_depth != g_value_get_uint (value);
+      self->async_depth = g_value_get_uint (value);
+      break;
     case PROP_ROTATION:
       self->rotation = g_value_get_enum (value);
       reconfigure = TRUE;
@@ -1137,6 +1364,9 @@ gst_rga_convert_set_property (GObject * object, guint prop_id,
   g_mutex_unlock (&self->lock);
   if (reconfigure)
     gst_base_transform_reconfigure_src (GST_BASE_TRANSFORM (self));
+  if (latency_changed)
+    gst_element_post_message (GST_ELEMENT (self),
+        gst_message_new_latency (GST_OBJECT (self)));
 }
 
 static void
@@ -1147,7 +1377,7 @@ gst_rga_convert_get_property (GObject * object, guint prop_id, GValue * value,
 
   if (prop_id == PROP_CONVERSION_FALLBACK_FRAMES ||
       prop_id == PROP_CONVERSION_DROPPED_FRAMES ||
-      prop_id == PROP_LAYOUT_REJECTIONS) {
+      prop_id == PROP_LAYOUT_REJECTIONS || prop_id == PROP_CSC_FALLBACK_FRAMES) {
     GstMppConversionStatsSnapshot stats;
 
     gst_mpp_conversion_stats_snapshot (gst_mpp_conversion_stats_get (object),
@@ -1156,6 +1386,8 @@ gst_rga_convert_get_property (GObject * object, guint prop_id, GValue * value,
       g_value_set_uint64 (value, stats.fallback_frames);
     else if (prop_id == PROP_CONVERSION_DROPPED_FRAMES)
       g_value_set_uint64 (value, stats.dropped_frames);
+    else if (prop_id == PROP_CSC_FALLBACK_FRAMES)
+      g_value_set_uint64 (value, stats.csc_fallback_frames);
     else
       g_value_set_uint64 (value, stats.layout_rejections);
     return;
@@ -1163,6 +1395,12 @@ gst_rga_convert_get_property (GObject * object, guint prop_id, GValue * value,
 
   g_mutex_lock (&self->lock);
   switch (prop_id) {
+    case PROP_ASYNC_DEPTH:
+      g_value_set_uint (value, self->async_depth);
+      break;
+    case PROP_INTERPOLATION:
+      g_value_set_enum (value, self->interpolation);
+      break;
     case PROP_ROTATION:
       g_value_set_enum (value, self->rotation);
       break;
@@ -1215,8 +1453,12 @@ gst_rga_convert_change_state (GstElement * element,
           ("/dev/rga did not pass the driver-version probe"));
       return GST_STATE_CHANGE_FAILURE;
     }
+  } else if (transition == GST_STATE_CHANGE_PAUSED_TO_READY) {
+    gst_rga_convert_drain_pending (self, FALSE);
   } else if (transition == GST_STATE_CHANGE_READY_TO_NULL) {
     GstMppConversionStatsSnapshot stats;
+
+    gst_rga_convert_drain_pending (self, FALSE);
 
     gst_mpp_conversion_stats_snapshot (gst_mpp_conversion_stats_get
         (G_OBJECT (self)), &stats);
@@ -1233,6 +1475,10 @@ gst_rga_convert_finalize (GObject * object)
 {
   GstRgaConvert *self = GST_RGA_CONVERT (object);
 
+  gst_rga_convert_drain_pending (self, FALSE);
+  gst_mpp_rga_fence_wait (self->inflight_fence,
+      GST_RGA_CONVERT_FENCE_TIMEOUT_MS);
+  self->inflight_fence = -1;
   gst_clear_object (&self->allocator);
   g_mutex_clear (&self->lock);
   G_OBJECT_CLASS (parent_class)->finalize (object);
@@ -1270,6 +1516,9 @@ gst_rga_convert_init (GstRgaConvert * self)
   self->backend = gst_mpp_rga_backend_get_default ();
   self->rotation = GST_RGA_ROTATION_0;
   self->core_mask = GST_RGA_CORE_AUTO;
+  self->async_depth = 0;
+  self->inflight_fence = -1;
+  self->pending_fence = -1;
   gst_mpp_conversion_stats_attach (G_OBJECT (self));
   gst_base_transform_set_in_place (GST_BASE_TRANSFORM (self), FALSE);
   gst_base_transform_set_passthrough (GST_BASE_TRANSFORM (self), FALSE);
@@ -1293,6 +1542,24 @@ gst_rga_convert_class_init (GstRgaConvertClass * klass)
   element_class->change_state = GST_DEBUG_FUNCPTR
       (gst_rga_convert_change_state);
 
+  g_object_class_install_property (gobject_class, PROP_INTERPOLATION,
+      g_param_spec_enum ("interpolation", "Interpolation",
+          "RGA scaling interpolation (older runtimes use the library default)",
+          gst_rga_interpolation_get_type (), IM_INTERP_DEFAULT,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_ASYNC_DEPTH,
+      g_param_spec_uint ("async-depth", "Async depth",
+          "Depth-1 IM_ASYNC pipelining: 0 submits synchronously, 1 holds one "
+          "frame so the next is submitted while it completes, adding one "
+          "frame of latency. Ignored when the librga runtime resolves no "
+          "improcessOpt or when debug CPU staging is in use",
+          0, GST_RGA_CONVERT_ASYNC_DEPTH_MAX, 0,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  g_object_class_install_property (gobject_class, PROP_CSC_FALLBACK_FRAMES,
+      g_param_spec_uint64 ("csc-fallback-frames", "CSC fallback frames",
+          "Frames submitted with an unexpressible CSC using the library default",
+          0, G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
   g_object_class_install_property (gobject_class, PROP_ROTATION,
       g_param_spec_enum ("rotation", "Rotation",
           "Clockwise rotation applied by RGA", GST_TYPE_RGA_ROTATION,
@@ -1366,4 +1633,10 @@ gst_rga_convert_class_init (GstRgaConvertClass * klass)
   transform_class->transform_meta = GST_DEBUG_FUNCPTR
       (gst_rga_convert_transform_meta);
   transform_class->transform = GST_DEBUG_FUNCPTR (gst_rga_convert_transform);
+  transform_class->generate_output = GST_DEBUG_FUNCPTR
+      (gst_rga_convert_generate_output);
+  transform_class->sink_event = GST_DEBUG_FUNCPTR
+      (gst_rga_convert_sink_event);
+  transform_class->stop = GST_DEBUG_FUNCPTR (gst_rga_convert_stop);
+  transform_class->query = GST_DEBUG_FUNCPTR (gst_rga_convert_query);
 }

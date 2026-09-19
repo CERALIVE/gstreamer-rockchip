@@ -85,6 +85,7 @@ gst_mpp_conversion_stats_snapshot (GstMppConversionStats * stats,
   snapshot->fallback_frames = stats->fallback_frames;
   snapshot->dropped_frames = stats->dropped_frames;
   snapshot->layout_rejections = stats->layout_rejections;
+  snapshot->csc_fallback_frames = stats->csc_fallback_frames;
   g_mutex_unlock (&stats->lock);
 }
 

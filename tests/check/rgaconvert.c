@@ -1,9 +1,11 @@
+#include <errno.h>
 #include <fcntl.h>
 #include <glib/gstdio.h>
 #include <gst/allocators/gstdmabuf.h>
 #include <gst/check/gstcheck.h>
 #include <gst/video/gstvideometa.h>
 #include <gst/video/gstvideopool.h>
+#include <sys/eventfd.h>
 #include <unistd.h>
 
 #include <rga/im2d.h>
@@ -18,6 +20,24 @@
 static rga_buffer_t submitted_src;
 static rga_buffer_t submitted_dst;
 static guint submitted_calls;
+static gint submitted_interp;
+static gint submitted_usage;
+static im_rect submitted_srect;
+static guint legacy_calls;
+
+static IM_STATUS
+fake_process_opt (rga_buffer_t src, rga_buffer_t dst, rga_buffer_t pat,
+    im_rect srect, im_rect drect, im_rect prect, int acquire, int *release,
+    im_opt_t *opt, int usage)
+{
+  fail_unless_equals_int (acquire, -1);
+  fail_unless (release == NULL);
+  fail_unless (opt != NULL);
+  fail_unless_equals_int (opt->version, RGA_CURRENT_API_HEADER_VERSION);
+  fail_unless (usage & IM_SYNC);
+  submitted_interp = opt->interp;
+  return improcess (src, dst, pat, srect, drect, prect, usage);
+}
 
 int
 c_RkRgaInit (void)
@@ -28,6 +48,7 @@ c_RkRgaInit (void)
 int
 c_RkRgaBlit (rga_info_t * src, rga_info_t * dst, rga_info_t * src1)
 {
+  legacy_calls++;
   (void) src;
   (void) dst;
   (void) src1;
@@ -64,6 +85,8 @@ improcess (rga_buffer_t src, rga_buffer_t dst, rga_buffer_t pat,
   submitted_src = src;
   submitted_dst = dst;
   submitted_calls++;
+  submitted_usage = usage;
+  submitted_srect = src_rect;
   (void) pat;
   (void) src_rect;
   (void) dst_rect;
@@ -72,6 +95,8 @@ improcess (rga_buffer_t src, rga_buffer_t dst, rga_buffer_t pat,
   return IM_STATUS_SUCCESS;
 }
 
+#define FAKE_RGA_MAX_FENCES 16
+
 typedef struct
 {
   gboolean available;
@@ -79,6 +104,11 @@ typedef struct
   guint process_calls;
   gboolean submit_im2d;
   GstMppRgaIm2dRequest last_request;
+  gboolean async_supported;
+  gint async_result;
+  guint process_async_calls;
+  guint fences_handed_out;
+  gint fences[FAKE_RGA_MAX_FENCES];
 } FakeRga;
 
 typedef struct
@@ -132,11 +162,48 @@ fake_process (const GstMppRgaIm2dRequest * request, gpointer user_data)
   return fake->process_result;
 }
 
+static gboolean
+fake_async_supported (gpointer user_data)
+{
+  FakeRga *fake = user_data;
+
+  return fake->async_supported;
+}
+
+/* A signalled eventfd stands in for a release fence: poll() reports POLLIN at
+ * once, so the tests measure ownership and ordering rather than timing. */
+static gint
+fake_process_async (const GstMppRgaIm2dRequest * request,
+    gint * release_fence_fd, gpointer user_data)
+{
+  FakeRga *fake = user_data;
+
+  fake->process_async_calls++;
+  fake->last_request = *request;
+  *release_fence_fd = eventfd (1, EFD_CLOEXEC | EFD_NONBLOCK);
+  fail_unless (*release_fence_fd >= 0);
+  fail_unless (fake->fences_handed_out < FAKE_RGA_MAX_FENCES);
+  fake->fences[fake->fences_handed_out++] = *release_fence_fd;
+  return fake->async_result;
+}
+
+static void
+fail_unless_fences_closed (const FakeRga * fake)
+{
+  guint i;
+
+  for (i = 0; i < fake->fences_handed_out; i++)
+    fail_unless (fcntl (fake->fences[i], F_GETFD) == -1 && errno == EBADF,
+        "release fence %d (index %u) was leaked", fake->fences[i], i);
+}
+
 static const GstMppRgaBackendOps fake_ops = {
   .probe = fake_probe,
   .init = fake_init,
   .blit = fake_blit,
   .process = fake_process,
+  .async_supported = fake_async_supported,
+  .process_async = fake_process_async,
 };
 
 static TestConvert
@@ -146,6 +213,7 @@ test_convert_new (FakeRga * fake)
 
   test.backend = gst_mpp_rga_backend_new (&fake_ops, fake);
   test.convert = g_object_new (GST_TYPE_RGA_CONVERT, NULL);
+  rga_process_opt = fake_process_opt;
   gst_rga_convert_set_backend_for_test (test.convert, test.backend);
   return test;
 }
@@ -771,7 +839,7 @@ GST_START_TEST (test_colorimetry_reaches_improcess)
     {"bt601", IM_YUV_TO_RGB_BT601_LIMIT, IM_RGB_TO_YUV_BT601_LIMIT},
     {"bt709", IM_YUV_TO_RGB_BT709_LIMIT, IM_RGB_TO_YUV_BT709_LIMIT},
     {"1:4:16:4", IM_YUV_TO_RGB_BT601_FULL, IM_RGB_TO_YUV_BT601_FULL},
-    {"1:3:5:1", IM_YUV_BT709_FULL_RANGE, IM_YUV_BT709_FULL_RANGE},
+    {"1:3:5:1", 0, 0},
   };
   FakeRga fake = {.available = TRUE, .submit_im2d = TRUE};
   TestConvert test = test_convert_new (&fake);
@@ -798,16 +866,9 @@ GST_START_TEST (test_colorimetry_reaches_improcess)
       fail_unless_equals_int (klass->transform (GST_BASE_TRANSFORM (test.convert),
               direction ? rgb : yuv, direction ? yuv : rgb), GST_FLOW_OK);
       fail_unless_equals_int (submitted_calls, 1);
-      if (i == 3) {
-        fail_unless_equals_int (submitted_src.color_space_mode,
-            direction ? IM_RGB_FULL : IM_YUV_BT709_FULL_RANGE);
-        fail_unless_equals_int (submitted_dst.color_space_mode,
-            direction ? IM_YUV_BT709_FULL_RANGE : IM_RGB_FULL);
-      } else {
-        fail_unless_equals_int (submitted_src.color_space_mode, 0);
-        fail_unless_equals_int (submitted_dst.color_space_mode,
-            direction ? cases[i].r2y : cases[i].y2r);
-      }
+      fail_unless_equals_int (submitted_src.color_space_mode, 0);
+      fail_unless_equals_int (submitted_dst.color_space_mode,
+          direction ? cases[i].r2y : cases[i].y2r);
       gst_buffer_unref (rgb);
       gst_buffer_unref (yuv);
       g_free (yuv_caps);
@@ -897,9 +958,9 @@ GST_START_TEST (test_color_space_changes_and_unsupported_modes)
     {GST_VIDEO_FORMAT_BGR, GST_VIDEO_FORMAT_RGBA, "sRGB", "sRGB",
         TRUE, 0, 0},
     {GST_VIDEO_FORMAT_NV12, GST_VIDEO_FORMAT_NV12, "bt601", "bt709",
-        TRUE, IM_YUV_BT601_LIMIT_RANGE, IM_YUV_BT709_LIMIT_RANGE},
+        FALSE, 0, 0},
     {GST_VIDEO_FORMAT_NV12, GST_VIDEO_FORMAT_NV12, "bt709", "1:3:5:1",
-        TRUE, IM_YUV_BT709_LIMIT_RANGE, IM_YUV_BT709_FULL_RANGE},
+        FALSE, 0, 0},
     {GST_VIDEO_FORMAT_NV12, GST_VIDEO_FORMAT_BGR, "bt2020", "sRGB",
         FALSE, 0, 0},
     {GST_VIDEO_FORMAT_BGR, GST_VIDEO_FORMAT_NV12, "sRGB", "bt2020",
@@ -917,6 +978,8 @@ GST_START_TEST (test_color_space_changes_and_unsupported_modes)
     GstBuffer *buffers[2];
     guint side;
     gchar *caps[2];
+    guint64 before;
+    guint64 after;
 
     for (side = 0; side < 2; side++) {
       GstVideoFormat format = side ? cases[i].output_format :
@@ -932,15 +995,15 @@ GST_START_TEST (test_color_space_changes_and_unsupported_modes)
           infos[side].stride, infos[side].size);
     }
     set_convert_caps (test.convert, caps[0], caps[1]);
+    g_object_get (test.convert, "csc-fallback-frames", &before, NULL);
     submitted_calls = 0;
     fail_unless_equals_int (klass->transform (GST_BASE_TRANSFORM (test.convert),
-            buffers[0], buffers[1]),
-        cases[i].supported ? GST_FLOW_OK : GST_FLOW_NOT_NEGOTIATED);
-    fail_unless_equals_int (submitted_calls, cases[i].supported ? 1 : 0);
-    if (cases[i].supported) {
-      fail_unless_equals_int (submitted_src.color_space_mode, cases[i].src_mode);
-      fail_unless_equals_int (submitted_dst.color_space_mode, cases[i].dst_mode);
-    }
+            buffers[0], buffers[1]), GST_FLOW_OK);
+    fail_unless_equals_int (submitted_calls, 1);
+    fail_unless_equals_int (submitted_src.color_space_mode, cases[i].src_mode);
+    fail_unless_equals_int (submitted_dst.color_space_mode, cases[i].dst_mode);
+    g_object_get (test.convert, "csc-fallback-frames", &after, NULL);
+    fail_unless_equals_uint64 (after - before, cases[i].supported ? 0 : 1);
     for (side = 0; side < 2; side++) {
       gst_buffer_unref (buffers[side]);
       g_free (caps[side]);
@@ -950,11 +1013,418 @@ GST_START_TEST (test_color_space_changes_and_unsupported_modes)
 }
 GST_END_TEST;
 
+GST_START_TEST (test_interpolation_and_seven_argument_fallback)
+{
+  FakeRga fake = {.available = TRUE, .submit_im2d = TRUE};
+  TestConvert test = test_convert_new (&fake);
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+  const gchar *caps = "video/x-raw(memory:DMABuf),format=NV12,width=640,height=480,colorimetry=bt709";
+  GstBuffer *input = new_nv12_buffer (TRUE, 640, 480, 672, 496);
+  GstBuffer *output = new_nv12_buffer (TRUE, 640, 480, 640, 480);
+  gint mode;
+
+  set_convert_caps (test.convert, caps, caps);
+  g_object_get (test.convert, "interpolation", &mode, NULL);
+  fail_unless_equals_int (mode, IM_INTERP_DEFAULT);
+  for (mode = IM_INTERP_DEFAULT; mode <= IM_INTERP_CUBIC; mode++) {
+    g_object_set (test.convert, "interpolation", mode, NULL);
+    submitted_interp = -1;
+    fail_unless_equals_int (klass->transform (GST_BASE_TRANSFORM (test.convert),
+            input, output), GST_FLOW_OK);
+    fail_unless_equals_int (submitted_interp, mode);
+  }
+  rga_process_opt = NULL;
+  submitted_interp = -1;
+  submitted_calls = 0;
+  fail_unless_equals_int (klass->transform (GST_BASE_TRANSFORM (test.convert),
+          input, output), GST_FLOW_OK);
+  fail_unless_equals_int (submitted_calls, 1);
+  fail_unless_equals_int (submitted_interp, -1);
+  gst_buffer_unref (input);
+  gst_buffer_unref (output);
+  test_convert_clear (&test);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_mpp_blit_uses_im2d_and_explicit_rollback)
+{
+  const gint rotations[] = { 0, HAL_TRANSFORM_ROT_90,
+    HAL_TRANSFORM_ROT_180, HAL_TRANSFORM_ROT_270 };
+  const gint usages[] = { 0, IM_HAL_TRANSFORM_ROT_90,
+    IM_HAL_TRANSFORM_ROT_180, IM_HAL_TRANSFORM_ROT_270 };
+  rga_info_t src = { 0, }, dst = { 0, };
+  guint8 virtual_input;
+  guint i;
+
+  gst_mpp_rga_backend_get_default ();
+  rga_process_opt = fake_process_opt;
+  src.fd = 11;
+  dst.fd = 12;
+  rga_set_rect (&src.rect, 16, 32, 640, 480, 672, 528, RK_FORMAT_YCbCr_420_SP);
+  rga_set_rect (&dst.rect, 0, 0, 320, 240, 320, 240, RK_FORMAT_BGR_888);
+  dst.color_space_mode = IM_YUV_TO_RGB_BT709_LIMIT;
+  g_unsetenv ("GST_MPP_RGA_LEGACY_BLIT");
+  legacy_calls = submitted_calls = 0;
+  for (i = 0; i < G_N_ELEMENTS (rotations); i++) {
+    src.rotation = rotations[i];
+    fail_unless_equals_int (gst_mpp_rga_real_blit (&src, &dst, NULL), 0);
+    fail_unless_equals_int (submitted_usage, usages[i] | IM_SYNC);
+    fail_unless_equals_int (submitted_srect.x, 16);
+    fail_unless_equals_int (submitted_srect.y, 32);
+    fail_unless_equals_int (submitted_src.wstride, 672);
+    fail_unless_equals_int (submitted_src.hstride, 528);
+    fail_unless_equals_int (submitted_src.width, 656);
+    fail_unless_equals_int (submitted_src.height, 512);
+    fail_unless_equals_int (submitted_dst.color_space_mode, IM_YUV_TO_RGB_BT709_LIMIT);
+    src.virAddr = &virtual_input;
+    fail_unless_equals_int (gst_mpp_rga_real_blit (&src, &dst, NULL), 0);
+    fail_unless_equals_int (submitted_usage, usages[i] | IM_SYNC);
+    fail_unless_equals_int (submitted_srect.x, 16);
+    fail_unless_equals_int (submitted_srect.y, 32);
+    fail_unless_equals_int (submitted_src.width, 656);
+    fail_unless_equals_int (submitted_src.height, 512);
+    fail_unless_equals_int (submitted_src.wstride, 672);
+    fail_unless_equals_int (submitted_src.hstride, 528);
+    src.virAddr = NULL;
+  }
+  fail_unless_equals_int (submitted_calls, 8);
+  fail_unless_equals_int (legacy_calls, 0);
+  g_setenv ("GST_MPP_RGA_LEGACY_BLIT", "1", TRUE);
+  fail_unless_equals_int (gst_mpp_rga_real_blit (&src, &dst, NULL), 0);
+  fail_unless_equals_int (legacy_calls, 1);
+  fail_unless_equals_int (submitted_calls, 8);
+  g_unsetenv ("GST_MPP_RGA_LEGACY_BLIT");
+}
+GST_END_TEST;
+
+GST_START_TEST (test_async_depth_property_contract_and_default_is_synchronous)
+{
+  FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
+    .async_supported = TRUE,.async_result = IM_STATUS_SUCCESS
+  };
+  TestConvert test = test_convert_new (&fake);
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+  GParamSpec *pspec = g_object_class_find_property (G_OBJECT_GET_CLASS
+      (test.convert), "async-depth");
+  GstBuffer *input;
+  GstBuffer *output;
+  guint depth = G_MAXUINT;
+
+  fail_unless (pspec != NULL);
+  fail_unless (G_IS_PARAM_SPEC_UINT (pspec));
+  fail_unless_equals_int (((GParamSpecUInt *) pspec)->minimum, 0);
+  fail_unless_equals_int (((GParamSpecUInt *) pspec)->maximum, 1);
+  fail_unless_equals_int (((GParamSpecUInt *) pspec)->default_value, 0);
+
+  g_object_get (test.convert, "async-depth", &depth, NULL);
+  fail_unless_equals_int (depth, 0);
+
+  set_convert_caps (test.convert,
+      "video/x-raw(memory:DMABuf),format=NV16,width=640,height=480,framerate=60/1,interlace-mode=progressive",
+      "video/x-raw(memory:DMABuf),format=NV12,width=320,height=240,framerate=60/1,interlace-mode=progressive");
+  input = new_nv16_buffer (TRUE, 640, 480, 640, 480);
+  output = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+  fail_unless_equals_int (klass->transform (GST_BASE_TRANSFORM (test.convert),
+          input, output), GST_FLOW_OK);
+  fail_unless_equals_int (fake.process_calls, 1);
+  fail_unless_equals_int (fake.process_async_calls, 0);
+
+  gst_buffer_unref (output);
+  gst_buffer_unref (input);
+  test_convert_clear (&test);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_async_depth_one_submits_async_only_when_the_runtime_can)
+{
+  const gboolean capable[] = { TRUE, FALSE };
+  guint i;
+
+  for (i = 0; i < G_N_ELEMENTS (capable); i++) {
+    FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
+      .async_supported = capable[i],.async_result = IM_STATUS_SUCCESS
+    };
+    TestConvert test = test_convert_new (&fake);
+    GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+    GstBuffer *input;
+    GstBuffer *output;
+
+    g_object_set (test.convert, "async-depth", 1, NULL);
+    set_convert_caps (test.convert,
+        "video/x-raw(memory:DMABuf),format=NV16,width=640,height=480,framerate=60/1,interlace-mode=progressive",
+        "video/x-raw(memory:DMABuf),format=NV12,width=320,height=240,framerate=60/1,interlace-mode=progressive");
+    input = new_nv16_buffer (TRUE, 640, 480, 640, 480);
+    output = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+    fail_unless_equals_int (klass->transform (GST_BASE_TRANSFORM (test.convert),
+            input, output), GST_FLOW_OK);
+
+    if (capable[i]) {
+      fail_unless_equals_int (fake.process_async_calls, 1);
+      fail_unless_equals_int (fake.process_calls, 0);
+      fail_unless_equals_int (fake.fences_handed_out, 1);
+    } else {
+      fail_unless_equals_int (fake.process_async_calls, 0);
+      fail_unless_equals_int (fake.process_calls, 1);
+      fail_unless_equals_int (fake.fences_handed_out, 0);
+    }
+
+    gst_buffer_unref (output);
+    gst_buffer_unref (input);
+    test_convert_clear (&test);
+    fail_unless_fences_closed (&fake);
+  }
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_async_submit_is_never_reached_without_a_dmabuf_pair)
+{
+  FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
+    .async_supported = TRUE,.async_result = IM_STATUS_SUCCESS
+  };
+  TestConvert test = test_convert_new (&fake);
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+  GstBuffer *input;
+  GstBuffer *output;
+
+  g_object_set (test.convert, "async-depth", 1, NULL);
+  set_convert_caps (test.convert,
+      "video/x-raw,format=NV16,width=640,height=480,framerate=60/1,interlace-mode=progressive",
+      "video/x-raw(memory:DMABuf),format=NV12,width=320,height=240,framerate=60/1,interlace-mode=progressive");
+  input = new_nv16_buffer (FALSE, 640, 480, 640, 480);
+  output = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+
+  fail_unless_equals_int (klass->transform (GST_BASE_TRANSFORM (test.convert),
+          input, output), GST_FLOW_NOT_NEGOTIATED);
+  fail_unless_equals_int (fake.process_async_calls, 0);
+  fail_unless_equals_int (fake.process_calls, 0);
+  fail_unless_equals_int (fake.fences_handed_out, 0);
+
+  gst_buffer_unref (output);
+  gst_buffer_unref (input);
+  test_convert_clear (&test);
+}
+
+GST_END_TEST;
+
+static GstBuffer *
+release_pipelined (GstRgaConvert * convert, FakeRga * fake, GstBuffer * frame)
+{
+  GstBuffer *out = NULL;
+  gint fence = eventfd (1, EFD_CLOEXEC | EFD_NONBLOCK);
+
+  fail_unless (fence >= 0);
+  fail_unless (fake->fences_handed_out < FAKE_RGA_MAX_FENCES);
+  fake->fences[fake->fences_handed_out++] = fence;
+  fail_unless_equals_int (gst_rga_convert_release_pipelined (convert, frame,
+          fence, &out), GST_FLOW_OK);
+  return out;
+}
+
+GST_START_TEST (test_depth_one_holds_a_frame_and_eos_drains_it_in_order)
+{
+  FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
+    .async_supported = TRUE,.async_result = IM_STATUS_SUCCESS
+  };
+  TestConvert test = test_convert_new (&fake);
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+  GstPad *srcpad = GST_BASE_TRANSFORM_SRC_PAD (test.convert);
+  GstPad *sinkpad = gst_pad_new ("sink", GST_PAD_SINK);
+  GstCaps *caps = caps_from_string
+      ("video/x-raw(memory:DMABuf),format=NV12,width=320,height=240");
+  GstSegment segment;
+  GstBuffer *frames[3];
+  GstBuffer *out;
+  guint i;
+
+  gst_pad_set_chain_function (sinkpad, gst_check_chain_func);
+  gst_pad_set_active (sinkpad, TRUE);
+  gst_pad_set_active (srcpad, TRUE);
+  fail_unless_equals_int (gst_pad_link (srcpad, sinkpad), GST_PAD_LINK_OK);
+  gst_segment_init (&segment, GST_FORMAT_TIME);
+  fail_unless (gst_pad_push_event (srcpad,
+          gst_event_new_stream_start ("rgaconvert-async")));
+  fail_unless (gst_pad_push_event (srcpad, gst_event_new_caps (caps)));
+  fail_unless (gst_pad_push_event (srcpad, gst_event_new_segment (&segment)));
+
+  g_object_set (test.convert, "async-depth", 1, NULL);
+  for (i = 0; i < G_N_ELEMENTS (frames); i++) {
+    frames[i] = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+    GST_BUFFER_PTS (frames[i]) = i * GST_SECOND;
+  }
+
+  out = release_pipelined (test.convert, &fake, gst_buffer_ref (frames[0]));
+  fail_unless (out == NULL, "the first frame must be held, not pushed");
+
+  out = release_pipelined (test.convert, &fake, gst_buffer_ref (frames[1]));
+  fail_unless (out == frames[0], "frame 0 must be released when 1 is submitted");
+  gst_buffer_unref (out);
+
+  out = release_pipelined (test.convert, &fake, gst_buffer_ref (frames[2]));
+  fail_unless (out == frames[1]);
+  gst_buffer_unref (out);
+
+  fail_unless_equals_int (g_list_length (buffers), 0);
+  fail_unless (klass->sink_event (GST_BASE_TRANSFORM (test.convert),
+          gst_event_new_eos ()));
+  fail_unless_equals_int (g_list_length (buffers), 1);
+  fail_unless (buffers->data == frames[2], "EOS must drain the held frame");
+
+  fail_unless_fences_closed (&fake);
+
+  gst_check_drop_buffers ();
+  for (i = 0; i < G_N_ELEMENTS (frames); i++)
+    gst_buffer_unref (frames[i]);
+  gst_pad_set_active (sinkpad, FALSE);
+  gst_pad_set_active (srcpad, FALSE);
+  gst_pad_unlink (srcpad, sinkpad);
+  gst_object_unref (sinkpad);
+  gst_caps_unref (caps);
+  test_convert_clear (&test);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_a_synchronous_frame_never_overtakes_a_pipelined_one)
+{
+  FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
+    .async_supported = TRUE,.async_result = IM_STATUS_SUCCESS
+  };
+  TestConvert test = test_convert_new (&fake);
+  GstPad *srcpad = GST_BASE_TRANSFORM_SRC_PAD (test.convert);
+  GstPad *sinkpad = gst_pad_new ("sink", GST_PAD_SINK);
+  GstCaps *caps = caps_from_string
+      ("video/x-raw(memory:DMABuf),format=NV12,width=320,height=240");
+  GstSegment segment;
+  GstBuffer *pipelined = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+  GstBuffer *immediate = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+  GstBuffer *out = NULL;
+
+  gst_pad_set_chain_function (sinkpad, gst_check_chain_func);
+  gst_pad_set_active (sinkpad, TRUE);
+  gst_pad_set_active (srcpad, TRUE);
+  fail_unless_equals_int (gst_pad_link (srcpad, sinkpad), GST_PAD_LINK_OK);
+  gst_segment_init (&segment, GST_FORMAT_TIME);
+  fail_unless (gst_pad_push_event (srcpad,
+          gst_event_new_stream_start ("rgaconvert-order")));
+  fail_unless (gst_pad_push_event (srcpad, gst_event_new_caps (caps)));
+  fail_unless (gst_pad_push_event (srcpad, gst_event_new_segment (&segment)));
+
+  g_object_set (test.convert, "async-depth", 1, NULL);
+  fail_unless (release_pipelined (test.convert, &fake,
+          gst_buffer_ref (pipelined)) == NULL);
+
+  fail_unless_equals_int (gst_rga_convert_release_pipelined (test.convert,
+          gst_buffer_ref (immediate), -1, &out), GST_FLOW_OK);
+  fail_unless (out == immediate);
+  fail_unless_equals_int (g_list_length (buffers), 1);
+  fail_unless (buffers->data == pipelined,
+      "the held frame must be pushed before the synchronous one is returned");
+  gst_buffer_unref (out);
+
+  fail_unless_fences_closed (&fake);
+
+  gst_check_drop_buffers ();
+  gst_buffer_unref (immediate);
+  gst_buffer_unref (pipelined);
+  gst_pad_set_active (sinkpad, FALSE);
+  gst_pad_set_active (srcpad, FALSE);
+  gst_pad_unlink (srcpad, sinkpad);
+  gst_object_unref (sinkpad);
+  gst_caps_unref (caps);
+  test_convert_clear (&test);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_flush_stop_discards_the_held_frame_and_never_pushes_it)
+{
+  FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
+    .async_supported = TRUE,.async_result = IM_STATUS_SUCCESS
+  };
+  TestConvert test = test_convert_new (&fake);
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+  GstPad *srcpad = GST_BASE_TRANSFORM_SRC_PAD (test.convert);
+  GstPad *sinkpad = gst_pad_new ("sink", GST_PAD_SINK);
+  GstBuffer *frame = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+  GstBuffer *out;
+
+  gst_pad_set_chain_function (sinkpad, gst_check_chain_func);
+  gst_pad_set_active (sinkpad, TRUE);
+  gst_pad_set_active (srcpad, TRUE);
+  fail_unless_equals_int (gst_pad_link (srcpad, sinkpad), GST_PAD_LINK_OK);
+
+  g_object_set (test.convert, "async-depth", 1, NULL);
+  out = release_pipelined (test.convert, &fake, gst_buffer_ref (frame));
+  fail_unless (out == NULL);
+
+  fail_unless (klass->sink_event (GST_BASE_TRANSFORM (test.convert),
+          gst_event_new_flush_stop (TRUE)));
+  fail_unless_equals_int (g_list_length (buffers), 0);
+  fail_unless (GST_MINI_OBJECT_REFCOUNT (frame) == 1,
+      "the discarded frame must be unreffed exactly once");
+  fail_unless_fences_closed (&fake);
+
+  gst_buffer_unref (frame);
+  gst_pad_set_active (sinkpad, FALSE);
+  gst_pad_set_active (srcpad, FALSE);
+  gst_pad_unlink (srcpad, sinkpad);
+  gst_object_unref (sinkpad);
+  test_convert_clear (&test);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_backend_async_capability_and_fence_ownership)
+{
+  FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
+    .async_supported = TRUE,.async_result = IM_STATUS_NOT_SUPPORTED
+  };
+  GstMppRgaIm2dRequest request = { 0, };
+  GstMppRgaBackendOps sync_only = fake_ops;
+  GstMppRgaBackend *backend;
+  gint fence = 0;
+
+  sync_only.async_supported = NULL;
+  sync_only.process_async = NULL;
+  backend = gst_mpp_rga_backend_new (&sync_only, &fake);
+  fail_if (gst_mpp_rga_backend_supports_async (backend));
+  fail_unless_equals_int (gst_mpp_rga_backend_process_async (backend,
+          GST_MPP_RGA_OP_CONVERT, GST_VIDEO_FORMAT_NV16, GST_VIDEO_FORMAT_NV12,
+          &request, &fence), GST_MPP_RGA_UNAVAILABLE);
+  fail_unless_equals_int (fence, -1);
+  gst_mpp_rga_backend_free (backend);
+
+  backend = gst_mpp_rga_backend_new (&fake_ops, &fake);
+  fail_unless (gst_mpp_rga_backend_supports_async (backend));
+  fail_unless_equals_int (gst_mpp_rga_backend_process_async (backend,
+          GST_MPP_RGA_OP_CONVERT, GST_VIDEO_FORMAT_NV16, GST_VIDEO_FORMAT_NV12,
+          &request, &fence), GST_MPP_RGA_NOT_SUPPORTED);
+  fail_unless_equals_int (fence, -1);
+  fail_unless_equals_int (fake.process_async_calls, 1);
+  fail_unless_fences_closed (&fake);
+
+  fake.async_result = IM_STATUS_SUCCESS;
+  fail_unless_equals_int (gst_mpp_rga_backend_process_async (backend,
+          GST_MPP_RGA_OP_CONVERT, GST_VIDEO_FORMAT_NV16, GST_VIDEO_FORMAT_NV12,
+          &request, &fence), GST_MPP_RGA_SUCCESS);
+  fail_unless (fence >= 0);
+  fail_unless (gst_mpp_rga_fence_wait (fence, 1000));
+  fail_unless (gst_mpp_rga_fence_wait (-1, 0));
+  fail_unless_fences_closed (&fake);
+  gst_mpp_rga_backend_free (backend);
+}
+
+GST_END_TEST;
+
 static Suite *
 rgaconvert_suite (void)
 {
   Suite *suite = suite_create ("rgaconvert");
   TCase *test_case = tcase_create ("element");
+  tcase_add_test (test_case, test_interpolation_and_seven_argument_fallback);
+  tcase_add_test (test_case, test_mpp_blit_uses_im2d_and_explicit_rollback);
 
   tcase_set_timeout (test_case, 15);
   tcase_add_checked_fixture (test_case, clear_cpu_copy_env,
@@ -983,6 +1453,19 @@ rgaconvert_suite (void)
       test_allocation_offers_and_accepts_dmabuf_pool);
   tcase_add_test (test_case,
       test_allocation_query_pool_references_are_released);
+  tcase_add_test (test_case,
+      test_async_depth_property_contract_and_default_is_synchronous);
+  tcase_add_test (test_case,
+      test_async_depth_one_submits_async_only_when_the_runtime_can);
+  tcase_add_test (test_case,
+      test_async_submit_is_never_reached_without_a_dmabuf_pair);
+  tcase_add_test (test_case,
+      test_depth_one_holds_a_frame_and_eos_drains_it_in_order);
+  tcase_add_test (test_case,
+      test_a_synchronous_frame_never_overtakes_a_pipelined_one);
+  tcase_add_test (test_case,
+      test_flush_stop_discards_the_held_frame_and_never_pushes_it);
+  tcase_add_test (test_case, test_backend_async_capability_and_fence_ownership);
   suite_add_tcase (suite, test_case);
   return suite;
 }

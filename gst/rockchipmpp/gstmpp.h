@@ -95,11 +95,12 @@ MppFrameFormat gst_mpp_gst_format_to_mpp_format (GstVideoFormat format);
 #ifdef HAVE_RGA
 GstMppRgaResult gst_mpp_rga_convert (GstBuffer * inbuf,
     GstVideoInfo * src_vinfo, GstMemory * out_mem, GstVideoInfo * dst_vinfo,
-    gint rotation, GstMppRgaOperation operation);
+    gint rotation, GstMppRgaOperation operation, GstMppConversionStats * stats);
 
 GstMppRgaResult gst_mpp_rga_convert_from_mpp_frame (MppFrame * mframe,
     GstMemory * out_mem, GstVideoInfo * dst_vinfo, gint rotation,
-    GstVideoCropMeta * crop, GstMppRgaOperation operation);
+    GstVideoCropMeta * crop, GstMppRgaOperation operation,
+    GstMppConversionStats * stats);
 #endif
 
 /* Apply new format and size without reinit the video info */
