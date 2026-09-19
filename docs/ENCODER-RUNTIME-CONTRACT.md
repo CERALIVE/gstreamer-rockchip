@@ -201,6 +201,119 @@ without confusing legitimate rate-control drops or breaking frame ownership.
 Another kernel errno knob cannot extend the public async return set. MNH-27's
 libmpp freeze remains intact; no hardware result follows from these host tests.
 
+### Cross-layer kernel fault bridge [PARTIAL — mechanism only, opt-in, no board result]
+
+This is the separately scoped bridge the gap above names. It supplies the
+missing signal **around** libmpp rather than through it: the fault travels
+kernel → tracefs/procfs → plugin, so the pinned `librockchip-mpp1` is neither
+rebuilt nor re-pinned and MNH-27 is untouched.
+
+**Why a side channel at all.** The island already records a complete
+session→task→fault correlation, and it records it only in its own ftrace
+events. `mpp_task_queued` carries `session->index` — the same index
+`/proc/mpp_service/sessions-summary` prints — and `mpp_task_error` carries the
+core and task that failed. Both are plain integers in their `TP_printk`, with
+no pointer hashing. Nothing in that chain is new work: the events, the procfs
+summary, `CONFIG_DEBUG_FS`/`FTRACE`/`TRACEPOINTS` and both `sys-kernel-debug`
+and `sys-kernel-tracing` mounts are already in the shipped image.
+
+**Opt-in, and deliberately off by default.** `GST_MPP_FAULT_BRIDGE=1` arms it.
+Unset, the element behaves exactly as it did before this existed: no tracefs
+instance is created, no event is enabled, `kernel-faults` stays 0, and no
+restart can originate here. It is off because the correlation rules are proven
+by host tests while the *stimulus* is not — see the boundary at the end of this
+section.
+
+| Variable | Meaning |
+|---|---|
+| `GST_MPP_FAULT_BRIDGE` | `1` arms the bridge. Anything else leaves it off. |
+| `GST_MPP_FAULT_BRIDGE_THRESHOLD` | Owned faults required inside 2 s before a restart is requested. Default 3. |
+| `GST_MPP_FAULT_TRACEFS` | Tracefs root. Defaults to `/sys/kernel/tracing`, then `/sys/kernel/debug/tracing`. |
+| `GST_MPP_FAULT_INSTANCE` | Use this trace instance directly instead of creating one. Test seam. |
+| `GST_MPP_FAULT_SESSIONS` | Session summary path. Defaults to `/proc/mpp_service/sessions-summary`. |
+
+**The three-way join, and why two hops are not enough.** `task_id` is
+`atomic_fetch_inc()` per **taskqueue**, not global, so two queues both start at
+zero and their ids collide. `mpp_task_error` carries `core_id` but not the
+queue, so the join key is `(task_id, core_id)` — and `mpp_task_queued` does not
+carry a core. `mpp_core_selected` is the third hop that supplies it:
+
+```
+mpp_task_queued   session=11 task=41 client=16     -> (task 41) belongs to session 11
+mpp_core_selected task=41 core=0 idle=0x3          -> (task 41, core 0)
+mpp_task_error    core=0 task=41 irq_status=0x100  -> session 11
+```
+
+`mpp_task_done` is consumed too, purely to retire completed entries so the
+bounded map stays useful. `mpp_task_started` and `mpp_reset` are ignored:
+`mpp_reset` carries no session at all and is attributable only by adjacency, so
+a bare reset is never charged to a session.
+
+**Ownership, and the TID trap.** The `pid` field in `sessions-summary` is the
+**creating thread's TID**, not the process pid, and that thread can die while
+the session lives. Ownership is therefore resolved once at `start()` — on the
+thread that just called `mpp_init()` — by intersecting `/proc/self/task/*` with
+the summary's rkvenc-core sessions, and the resulting index set is cached.
+A successful context restart re-resolves, because destroying and recreating the
+context closes that kernel session and opens a new one with a new index; the
+result is **unioned** into the cached set rather than replacing it, so a later
+read that no longer sees an already-known session cannot un-own it.
+
+**Every ambiguity resolves away from acting.** A fault is acted on only when it
+joins to a session this element owns. All four of these are refused instead:
+
+- a fault whose `mpp_task_queued` was never observed (tracing started late, or
+  the ring overran);
+- a fault arriving before ownership has been resolved even once;
+- a fault on a session belonging to another process — the shape of cerastream's
+  capture-probe child, whose encoder runs in a separate process entirely;
+- a `mpp_core_selected` for a `task_id` held by two taskqueues at once. Binding
+  either candidate is a coin flip whose wrong side restarts a healthy encoder
+  on somebody else's fault, so both candidates are abandoned. Losing detection
+  is the safe failure; a false restart is not.
+
+**Fail-open everywhere.** No tracefs mount, no `events/rockchip_mpp` directory,
+an unwritable `enable`, an unopenable `trace_pipe`, an unreadable summary or an
+unparseable line each disable the bridge with one log line and leave encoding
+untouched. An instance the bridge created is removed again on any of those
+paths and on element stop. The bridge is an observer and is never load-bearing.
+
+**What it drives.** Nothing in `gst_mpp_enc_restart_context()` changed. On
+crossing the threshold the bridge calls the unchanged
+`gst_mpp_enc_handle_runtime_error()` with `MPP_ERR_VPUHW` — libmpp's own "VPU
+hardware error", which is what `mpp_task_error` reports and is neither of the
+two values that handler filters out. So the restart is the same bounded
+three-per-ten-seconds recovery, and `encoder-restarts` counts it the same way.
+Polling happens on the output task thread under the stream lock, the same
+context as the two pre-existing call sites, so no new concurrency is
+introduced. It is rate limited to 100 Hz and bounded to 64 KiB per poll.
+
+`kernel-faults` is a new read-only `guint64` reporting RKVENC task errors the
+kernel attributed to this element's own sessions. It is additive, like the
+three conversion counters and `encoder-restarts`, and exists so a board
+follow-up can tell "detected but below threshold" from "not detected at all".
+
+**IOMMU faults are detected only INDIRECTLY, and must not be described
+otherwise.** The MPP IOMMU handlers record nothing and emit no tracepoint. The
+faulting task then fails to complete and the ~500 ms timeout worker produces
+the `mpp_task_error`. The signal arrives, late, as a timeout — good enough for
+recovery, wrong to call IOMMU fault detection.
+
+**Proof boundary.** `tests/check/fault-bridge.c` (21 cases) drives the
+correlator and the real reader with synthetic trace lines in the exact
+`TP_printk` shapes and with a real fd on a real file;
+`tests/check/enc-fault-bridge.c` (4 cases) drives the shipped `mpph264enc`
+through a synthetic tracefs and asserts `encoder-restarts` moves for an owned
+fault and does **not** move for a foreign or unjoinable one, with a positive
+control in the same element and run. Both suites are mutation-verified.
+
+None of that is a hardware result. **No board has produced a real RKVENC fault
+through this path.** Confirming that a deliberately injected hardware fault
+reaches the restart end to end needs an `edge-test` image carrying
+`CONFIG_ROCKCHIP_MPP_CERALIVE_TEST`, which is in the production kernel's
+`forbidden-symbols.list` and cannot ship. That validation, and any decision to
+arm the bridge by default, are a separate follow-up.
+
 Negotiated BT.601, BT.709, and BT.2020 colorimetry is written to MPP's
 `prep:colorspace`, `prep:colorprim`, `prep:colortrc`, and `prep:range` keys.
 Full range maps to MPP's JPEG range and limited range maps to MPEG range. Caps

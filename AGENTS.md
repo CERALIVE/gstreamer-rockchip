@@ -151,6 +151,7 @@ explicitly, or the Bookworm leg will try to install the incompatible release pai
 | MPP encoder/decoder plugin | `gst/rockchipmpp/` |
 | RGA 2D converter/compositor plugin | `gst/rockchiprga/` |
 | RGA backend, tuple health, conversion counters | `gst/rockchipmpp/gstmpprga*.c`, `gstmppconversionstats.c` |
+| Cross-layer kernel fault bridge (tracefs/procfs → restart) | `gst/rockchipmpp/gstmppfaultbridge.{c,h}` |
 | RGA ↔ MPP interaction reference | `docs/RGA-MPP-INTERACTION.md` |
 | KMS source | `gst/kmssrc/` |
 | Rockchip X11/KMS sink | `gst/rkximage/` |
@@ -267,7 +268,8 @@ The following are compatibility contracts, not cleanup opportunities:
   non-timeout MPP failures get at most three context restarts per ten seconds;
   explicit sink colorimetry reaches MPP VUI config without guessing absent
   values; both force-key-unit directions request IDR; and the no-B-frame output
-  contract is `DTS = PTS`. The read-only `encoder-restarts` counter is additive.
+  contract is `DTS = PTS`. The read-only `encoder-restarts` counter is additive,
+  and so is the read-only `kernel-faults` counter the fault bridge publishes.
   The sRGB transfer mapping [EXISTS] preserves `2:4:7:1` as limited-range
   BT.601 matrix / IEC 61966-2-1 transfer / BT.709 primaries. GStreamer transfer
   enum 7 maps to MPP/H.26x code 13, not 7. Host config tests cover cold starts
@@ -433,6 +435,24 @@ the caps call. `tests/check/enc-teardown.c` pins the real concurrent queue/state
 transition with no FLUSH_START workaround, zero property applies and zero bus
 errors. See `docs/ENCODER-RUNTIME-CONTRACT.md`; hardware rerun is separate.
 
+**Cross-layer kernel fault bridge:** `gstmppfaultbridge.{c,h}` reads the
+island's own `rockchip_mpp` ftrace events out of a private tracefs instance and
+joins them, through `(task_id, core_id)`, back to the rkvenc sessions this
+element owns — resolved once at `start()` by intersecting `/proc/self/task/*`
+with `/proc/mpp_service/sessions-summary`, whose `pid` field is a **TID**. On
+crossing its threshold it calls the **unchanged**
+`gst_mpp_enc_handle_runtime_error()`, so the existing bounded restart and
+`encoder-restarts` are the recovery. It is shared by all four encoder
+subclasses through `gstmppenc.c`, exactly as the teardown fix above is. It is
+**opt-in** (`GST_MPP_FAULT_BRIDGE=1`), fail-open on every error path, and
+refuses to act on any fault it cannot attribute — including a `task_id` two
+taskqueues hold at once, where it abandons both candidates rather than guess.
+`tests/check/fault-bridge.c` and `tests/check/enc-fault-bridge.c` are
+mutation-verified host suites; **no board has produced a real fault through this
+path**, and doing so needs an `edge-test` kernel carrying the forbidden
+`CONFIG_ROCKCHIP_MPP_CERALIVE_TEST` seam. See
+`docs/ENCODER-RUNTIME-CONTRACT.md`.
+
 Hardware-independent gates run in both bookworm/GStreamer 1.22 and
 trixie/GStreamer 1.26 environments. The mock-MPP suites prove software state,
 ownership, caps construction, and MPP ABI closure; they do not emulate RK3588 DMA
@@ -570,6 +590,20 @@ line-ending-only change.
 - Do not change Main10 stride semantics on static-analysis confidence alone.
 - Do not treat plugin registration success as proof all factories registered;
   `plugin_init` historically swallows individual registration failures.
+- Do not arm the kernel fault bridge by default, and do not describe it as
+  detecting IOMMU faults. It is off until a board has driven a real injected
+  hardware fault through it end to end, and the IOMMU path emits no tracepoint
+  at all — what arrives is the ~500 ms timeout consequence, as a timeout.
+- Do not resolve an ambiguous `task_id` in the fault bridge by picking the
+  newest, the oldest, or the nearest-in-time candidate. `task_id` is per
+  taskqueue, so a wrong pick restarts a healthy encoder on another process's
+  fault. Losing detection is the safe failure; abandoning both candidates is
+  deliberate.
+- Do not re-resolve fault-bridge session ownership by matching TIDs on a timer,
+  and do not make the re-resolve after a restart replace the cached set. The
+  `pid` in `sessions-summary` is the creating thread's TID and that thread can
+  die while the session lives, which is why ownership is resolved at `start()`,
+  cached, and only ever unioned.
 - Do not claim sanitizer coverage that the qemu-user environment cannot run.
 - Do not let a board drill install a package without recording package, kernel,
   and final verdict, and do not infer PASS from a command merely completing.

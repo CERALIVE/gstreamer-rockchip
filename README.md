@@ -121,6 +121,53 @@ host-only recovery checks. They prove plugin recovery from an injected public
 MPI error, not hardware error propagation or item 30's island-knob requirement.
 The interposer is excluded from production builds and is never installed.
 
+## Kernel fault bridge (opt-in)
+
+A real RK3588 encode fault — an RKVENC job timeout, a reset, or the ~500 ms
+timeout consequence of an IOMMU page fault — cannot reach the encoder's bounded
+restart through libmpp. The pinned library's async return set is only
+`MPP_OK` / `MPP_NOK` / `MPP_ERR_TIMEOUT`, and the plugin deliberately treats the
+latter two as non-restartable, so `encoder-restarts` could never move for a
+hardware fault however badly the silicon behaved.
+
+The bridge supplies that signal **around** libmpp instead of through it. The
+RK3588 media island already publishes a complete session→task→fault correlation
+in its own `rockchip_mpp` ftrace events, and the shipped image already carries
+every config symbol and mount it needs. The plugin reads those events out of its
+own private tracefs instance, joins them back to its own MPP sessions, and on a
+repeated fault calls the **unchanged** restart path — so the recovery, its
+three-per-ten-seconds budget, and `encoder-restarts` are exactly what they were.
+Nothing about `librockchip-mpp1` is rebuilt, re-pinned or required.
+
+```bash
+GST_MPP_FAULT_BRIDGE=1 gst-launch-1.0 ... ! mpph264enc ! ...
+```
+
+It is **off unless you ask for it.** Unset, no trace instance is created, no
+event is enabled, and no restart can originate here. `kernel-faults` is a new
+read-only counter reporting the RKVENC task errors the kernel attributed to that
+element's own sessions, so detection can be observed separately from recovery.
+
+Every ambiguity resolves away from acting: a fault on another process's session,
+a fault whose queue event was never seen, a fault arriving before ownership was
+resolved, and a `task_id` two kernel taskqueues hold at once are all refused
+rather than guessed at. `task_id` is per-taskqueue, not global, so the join key
+is `(task_id, core_id)` and a wrong guess would restart a healthy encoder on
+somebody else's fault. Missing a fault is the safe failure; a false restart is
+not. Every I/O failure — no tracefs, no `rockchip_mpp` events, an unreadable
+`/proc/mpp_service/sessions-summary` — disables the bridge and leaves encoding
+untouched.
+
+**Not yet validated on hardware.** The correlation, ownership and isolation
+rules are covered by mutation-verified host suites, and the element-level suite
+proves `encoder-restarts` really moves for an owned fault and really does not
+move for a foreign one. No board has produced a real RKVENC fault through this
+path: confirming that needs an `edge-test` image carrying the
+`CONFIG_ROCKCHIP_MPP_CERALIVE_TEST` injection seam, which production kernels
+forbid. That drill, and any decision to arm the bridge by default, are a
+separate follow-up. Full contract, environment variables and proof boundary:
+[`docs/ENCODER-RUNTIME-CONTRACT.md`](docs/ENCODER-RUNTIME-CONTRACT.md).
+
 The encoder also maps sRGB transfer for explicitly tagged YUV input, including
 `2:4:7:1` (limited range, BT.601 matrix, sRGB transfer, BT.709 primaries).
 This writes IEC 61966-2-1 transfer code 13 to MPP rather than omitting all VUI
