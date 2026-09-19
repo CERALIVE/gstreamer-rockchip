@@ -23,13 +23,21 @@ share a single availability decision and a single health table:
 
 | Caller | librga entry point | Operation tag |
 |---|---|---|
-| `mpph264enc` / `mpph265enc` / `mppjpegenc` input conversion | legacy `c_RkRgaBlit` | `encode-convert` |
-| `mppvideodec` output conversion | legacy `c_RkRgaBlit` | `decode-convert` |
-| `mppjpegdec` output conversion | legacy `c_RkRgaBlit` | `jpeg-convert` |
+| `mpph264enc` / `mpph265enc` / `mppjpegenc` input conversion | im2d `improcess`; legacy `c_RkRgaBlit` only under `GST_MPP_RGA_LEGACY_BLIT=1` | `encode-convert` |
+| `mppvideodec` output conversion | im2d `improcess`; legacy `c_RkRgaBlit` only under `GST_MPP_RGA_LEGACY_BLIT=1` | `decode-convert` |
+| `mppjpegdec` output conversion | im2d `improcess`; legacy `c_RkRgaBlit` only under `GST_MPP_RGA_LEGACY_BLIT=1` | `jpeg-convert` |
 | `rgaconvert` | im2d `improcess` | `rgaconvert` |
 | `rgacompositor` primary copy/scale | im2d `improcess` | `rgacompositor-copy` |
 | `rgacompositor` secondary BGRA pre-scale, when needed | im2d `improcess` | `rgacompositor-copy` (separate BGRA/BGRA health tuple) |
 | `rgacompositor` secondary blend | geometry-aware im2d `improcess` composite | `rgacompositor` |
+
+Both DSOs carry the im2d path: `GST_MPP_RGA_ENABLE_IM2D` is set in `config.h`
+([`meson.build:93`](../meson.build)), not only in `rockchiprga`'s own `c_args`,
+so `libgstrockchipmpp.so` reaches `improcess` too. That is checkable on a
+shipped artifact rather than inferred from the build files —
+`nm -D --undefined-only libgstrockchipmpp.so` lists `improcess` and
+`imsetColorSpace` alongside the retained `c_RkRgaBlit` rollback, and does NOT
+list `improcessOpt`, which is resolved through the explicit module handle.
 
 `gstmpprgabackend.c` owns both. `gst_mpp_rga_backend_blit()` and
 `gst_mpp_rga_backend_process()` / `gst_mpp_rga_backend_composite()` differ only
@@ -211,13 +219,28 @@ candidate `.deb` (`bd6f0cbe8080400216f870ec355f0d5f622aff486d95e5f168fd3ba3dbd23
 plugin resolved out of `/tmp/.../plugin/libgstrockchiprga.so`, never the
 installed package) — on Rock 5B+ (`7.2.0-ceralive-rk3588`), worst chroma
 33.72 dB against the unchanged 30 dB floor, `fallback=0 dropped=0
-layout_rejections=0` on every cell. Still outstanding on both boards:
-BT.709-versus-601-reference PSNR deltas; d2 300/300 H.265 and H.264 with zero
-`RGA_BLIT fail`; legacy rollback; older-Radxa-runtime load, one warning and
-seven-argument execution; R1 lookup and actual 4K Opt execution — noting that
-the D6 harness below has now exercised the R1 `improcessOpt` entry point with
-release fences at 4K on Rock, which is adjacent evidence for that last row
-rather than the in-element proof it asks for. Stubs prove no
+layout_rejections=0` on every cell.
+
+**The R1 lookup and the Opt entry point are now PROVEN IN-ELEMENT on Rock**, out
+of that same d5 run rather than from a separate drill: d5 already runs every
+cell under `GST_DEBUG=rgaconvert:5,mpprgabackend:6`, so its retained per-cell
+logs carry `gst_mpp_rga_resolve_api: improcessOpt resolved` in all 12 of 12
+cells and `submitting synchronous improcessOpt` once per cell — one submission
+per pushed buffer, 12 of 12 — with zero `improcess` failures. `gst-inspect-1.0
+rgaconvert` on the same staged candidate reports `interpolation … Enum
+"GstRgaInterpolation" Default: 0, "default"`. Separately, the D6 harness below
+drives `improcessOpt` with real release fences at 3840×2160 against the same
+runtime, so the Opt path is exercised at 4K as well, though librga-direct rather
+than through the element.
+
+Still outstanding on both boards: BT.709-versus-601-reference PSNR deltas; d2
+300/300 H.265 and H.264 with zero `RGA_BLIT fail`; legacy rollback;
+older-Radxa-runtime load, one warning and seven-argument execution. A
+`videotestsrc`-fed pipeline is NOT a valid instrument for any of these —
+GStreamer 1.22 `videotestsrc` does not honour a downstream DMA-BUF allocation
+proposal, so such a pipeline fails to preroll and emits zero submissions, which
+reads identically to a broken code path. Use `tests/board/dmabuf-rgaconvert.c`,
+as d5 does. Stubs prove no
 pixels or silicon. Do not APT-swap libraries on sysext-backed `/usr`: use the
 separately approved restoration procedure, or label process-local selection as
 isolated evidence, not an installed-runtime restoration.
