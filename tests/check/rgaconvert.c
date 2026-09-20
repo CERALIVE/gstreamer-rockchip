@@ -1493,6 +1493,42 @@ GST_START_TEST (test_stop_retains_never_signalled_frame_past_error_deadline)
 
 GST_END_TEST;
 
+static gboolean (*observed_set_caps_parent) (GstBaseTransform *, GstCaps *, GstCaps *);
+static guint observed_set_caps_calls;
+
+static gboolean
+observed_set_caps (GstBaseTransform * base, GstCaps * input, GstCaps * output)
+{
+  observed_set_caps_calls++;
+  return observed_set_caps_parent (base, input, output);
+}
+
+static GstPadProbeReturn
+record_output_order (GstPad * pad, GstPadProbeInfo * info, gpointer data)
+{
+  GString *order = data;
+  (void) pad;
+
+  if (GST_PAD_PROBE_INFO_TYPE (info) & GST_PAD_PROBE_TYPE_BUFFER) {
+    g_string_append_c (order, 'B');
+  } else {
+    switch (GST_EVENT_TYPE (GST_PAD_PROBE_INFO_EVENT (info))) {
+      case GST_EVENT_TAG:
+        g_string_append_c (order, 'T');
+        break;
+      case GST_EVENT_CUSTOM_DOWNSTREAM:
+        g_string_append_c (order, 'U');
+        break;
+      case GST_EVENT_CAPS:
+        g_string_append_c (order, 'C');
+        break;
+      default:
+        break;
+    }
+  }
+  return GST_PAD_PROBE_OK;
+}
+
 GST_START_TEST (test_real_transform_chain_orders_buffers_events_and_caps)
 {
   FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
@@ -1502,13 +1538,22 @@ GST_START_TEST (test_real_transform_chain_orders_buffers_events_and_caps)
   GstAllocator *allocator = g_object_new (test_dma_allocator_get_type (), NULL);
   GstHarness *h;
   GstBuffer *input, *out;
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+  GString *order = g_string_new (NULL);
+  gsize before_event;
+  guint before_caps;
   guint i;
 
+  observed_set_caps_parent = klass->set_caps;
+  observed_set_caps_calls = 0;
+  klass->set_caps = observed_set_caps;
   gst_object_ref_sink (test.convert);
   gst_object_ref_sink (allocator);
   gst_rga_convert_set_allocator_for_test (test.convert, allocator);
   g_object_set (test.convert, "async-depth", 1, NULL);
   h = gst_harness_new_with_element (GST_ELEMENT (test.convert), "sink", "src");
+  gst_pad_add_probe (h->sinkpad, GST_PAD_PROBE_TYPE_BUFFER |
+      GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM, record_output_order, order, NULL);
   gst_harness_set_propose_allocator (h, allocator, NULL);
   gst_harness_set_caps_str (h,
       "video/x-raw(memory:DMABuf),format=NV16,width=320,height=240,framerate=30/1",
@@ -1524,8 +1569,10 @@ GST_START_TEST (test_real_transform_chain_orders_buffers_events_and_caps)
   fail_unless_equals_uint64 (GST_BUFFER_PTS (out), 0);
   fail_unless_equals_uint64 (GST_BUFFER_DURATION (out), GST_SECOND / 30);
   gst_buffer_unref (out);
+  before_event = order->len;
   fail_unless (gst_harness_push_event (h,
           gst_event_new_tag (gst_tag_list_new_empty ())));
+  fail_unless_equals_string (order->str + before_event, "BT");
   fail_unless_equals_int (gst_harness_buffers_in_queue (h), 1);
   out = gst_harness_pull (h);
   fail_unless_equals_uint64 (GST_BUFFER_PTS (out), GST_SECOND);
@@ -1533,17 +1580,23 @@ GST_START_TEST (test_real_transform_chain_orders_buffers_events_and_caps)
 
   input = new_nv16_buffer (TRUE, 320, 240, 320, 240);
   fail_unless_equals_int (gst_harness_push (h, input), GST_FLOW_OK);
+  before_event = order->len;
   fail_unless (gst_harness_push_event (h, gst_event_new_custom (
               GST_EVENT_CUSTOM_DOWNSTREAM, gst_structure_new_empty ("ordered"))));
+  fail_unless_equals_string (order->str + before_event, "BU");
   fail_unless_equals_int (gst_harness_buffers_in_queue (h), 1);
   gst_buffer_unref (gst_harness_pull (h));
 
   input = new_nv16_buffer (TRUE, 320, 240, 320, 240);
   fail_unless_equals_int (gst_harness_push (h, input), GST_FLOW_OK);
+  before_event = order->len;
+  before_caps = observed_set_caps_calls;
   gst_harness_set_sink_caps_str (h,
       "video/x-raw(memory:DMABuf),format=NV12,width=640,height=480,framerate=30/1");
   gst_harness_set_src_caps_str (h,
       "video/x-raw(memory:DMABuf),format=NV16,width=640,height=480,framerate=30/1");
+  fail_unless_equals_string (order->str + before_event, "BC");
+  fail_unless_equals_int (observed_set_caps_calls, before_caps + 1);
   fail_unless_equals_int (gst_harness_buffers_in_queue (h), 1);
   out = gst_harness_pull (h);
   fail_unless_equals_int (gst_buffer_get_video_meta (out)->width, 320);
@@ -1555,6 +1608,8 @@ GST_START_TEST (test_real_transform_chain_orders_buffers_events_and_caps)
   fail_unless_equals_int (gst_buffer_get_video_meta (out)->width, 640);
   gst_buffer_unref (out);
   gst_harness_teardown (h);
+  klass->set_caps = observed_set_caps_parent;
+  g_string_free (order, TRUE);
   fail_unless_fences_closed (&fake);
   test_convert_clear (&test);
 }
