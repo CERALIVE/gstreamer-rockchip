@@ -42,6 +42,32 @@ The converter uses `gst_mpp_rga_fence_status` as a non-owning poll. The legacy
 wait helper closes only terminal descriptors; it leaves a timed-out descriptor
 with its caller. A polling error or invalid fd is not proof of DMA completion.
 
+### Signalled does not mean successful
+
+Linux `sync_file` reports `POLLIN` for both successful and error-signalled
+fences. After readiness, the backend reads `SYNC_IOC_FILE_INFO` with a zeroed
+`sync_file_info` (`num_fences=0`, aggregate status only): positive status is
+COMPLETE, negative status is ERROR, and zero stays PENDING with a warning.
+Interrupted queries retry; a failed query warns and stays PENDING. `POLLERR`,
+`POLLHUP` and `POLLNVAL` likewise retain ownership rather than masquerading as
+a terminal fence error. The synchronous `-1` sentinel and missing-fence sentinel
+keep their existing meanings.
+
+The converter already handles the enum correctly: `take_ready` returns output
+only on COMPLETE; ERROR increments drops, disables async and returns
+`GST_FLOW_ERROR` without delivering the pixels. Both local quarantine reaping
+and the independent worker release a terminal ERROR just as they release
+COMPLETE, after outstanding host references permit destruction. Neither path
+uses raw poll flags, and no caller or stop deadline changes are required.
+
+**Driver contract limit:** this relies on a terminal sync-file signal following
+hardware retirement. The separate kernel-source investigation found that
+explicit request cancellation can error-signal even when reset failure leaves
+the job DMA-owned. This status-classification fix neither invokes cancellation
+nor repairs that driver defect, and is not an unconditional quiescence proof.
+It preserves the existing terminal-release policy; unverified/pending work is
+never force-freed. Kernel cancellation/failed-reset safety remains separate.
+
 ## Bounded stop and escaped ownership
 
 The five-second ceiling bounds the **wait inside the converter stop callback**,
@@ -121,6 +147,17 @@ only reaper reclamation makes the new test fail with zero destroyed buffers
 instead of two. Both are distinct negative controls: a bounded return alone
 must not disguise a permanently detached leak. These tests are host/container
 ownership evidence only; no new hardware run accompanies this fix.
+
+The error-status regression extends the same eventfd/pipe fixture with a
+test-only ioctl seam; real `poll()` reports exactly `POLLIN` while the query
+returns `-EIO`. On unchanged PR #47 head `c8962c2a`, the assertion returns
+COMPLETE (1) instead of ERROR (2). With the query it passes. Additional cases
+cover active status, query failure, EINTR retry, hung-up/invalid descriptors,
+failed-output rejection with drop accounting, and terminal-error reclamation
+through both local quarantine and the independent worker after element/backend
+destruction. Existing successful-completion assertions are unchanged. These
+are mocked sync-file status semantics, not a real kernel fence or hardware
+reset qualification.
 
 ## Rock fault injection — 2026-09-20
 
