@@ -201,8 +201,19 @@ warning; debug CPU staging stays synchronous. A fence timeout switches future
 frames to sync but quarantines both buffers until completion; it never pushes
 or frees unfinished output. A submission refusal remains a typed failure.
 The [fence-lifetime contract](docs/ASYNC-FENCE-LIFETIME.md) records flush/event
-ordering and the bounded Rock fault test. **C6b-perf remains BLOCKED** — the handle path is refused
-by the driver on both boards, so the import cache cannot be measured at all.
+ordering and the bounded Rock fault test.
+
+**C6b-perf is implemented but awaits hardware validation.** Set
+`GST_MPP_RGA_HANDLE_CACHE=1` before constructing `rgaconvert` to opt into its
+bounded, fd-identity-checked import cache; unset/default retains FD mode.
+Imports survive pool reuse but not fd identity/geometry changes, and in-flight
+handles remain leased through the existing fence quarantine. This requires a
+librga build containing [#25](https://github.com/CERALIVE/librga/pull/25), not
+the currently pinned released R1 bytes. Rock's fixed-provider standalone gain
+(+48.9% at 4K, +66.7% at 1080p) is the GO for implementation, not a measurement
+of this element cache. No default, dependency pin, compositor or MPP path changes.
+The [C6b-perf contract](docs/RGA-MPP-INTERACTION.md#c6b-perf-default-off-import-cache-hardware-validation-pending)
+lists the ownership rules and exact remaining board gates.
 
 The MPP encoder and decoders treat librga as available only after `/dev/rga`
 answers `RGA_IOC_GET_DRVIER_VERSION` with driver version 1.2.4 or newer.

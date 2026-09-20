@@ -314,12 +314,20 @@ The following are compatibility contracts, not cleanup opportunities:
   Build against ≥1.10.5 headers, retain the explicit GModule handle and resolve
   Opt dynamically, never link it. See `docs/RGA-MPP-INTERACTION.md`; both-board
   qualification remains NOT-RUN.
-- **C6b-perf is BLOCKED, not deferred.** No DMA-BUF handle import cache exists
-  and none may be added while `improcess()` refuses handle-described buffers:
-  librga R1's `generate_blit_req()` leaves a non-handle `v_addr` in handle mode
-  and the island validates every non-zero address field, so all 440/440
-  submissions fail `-EINVAL` on Rock — with an fd control on the same buffers
-  passing. The repair belongs in librga or the island, never in this plugin.
+- **C6b-perf is implemented, default-off and hardware-unqualified.**
+  `GST_MPP_RGA_HANDLE_CACHE=1` at element construction enables rgaconvert's
+  fd-keyed, identity-checked LRU (32 total imports, including in-flight leases).
+  A retained duplicate fd pins the inode; each lookup checks device/inode/size
+  and import geometry, so recycled fd numbers never identify old storage.
+  Entries retain GstMemory, not GstBuffer/pool references. Pending/ready/
+  quarantine records own leases until terminal completion; never evict a lease
+  to satisfy the bound. Import failure or saturation uses FD mode for BOTH
+  channels. Stop/dispose drains frames before releasing every import once.
+  Cache logic stays in `gstrgaconvert.c`; backend fields only transport borrowed
+  handles. librga #25 fixed the handle-plane defect on main, NOT in the pinned
+  released R1 archive. Opt-in validation requires those fixed library bytes.
+  Rock's direct-API +48.9%/+66.7% measurements justify implementation, not
+  in-element or both-board adoption. See the C6b-perf contract below.
 - **C6b-async is ADOPTED on both boards, and it ships DEFAULT-OFF.** Depth-1
   `IM_ASYNC` pipelining cleared the ≥5 % gate on Rock (+17.8 % 4K / +28.1 %
   1080p) and on Orange Pi (+18.4 % / +28.0 %, reproduced +18.4 % / +28.1 % on a
