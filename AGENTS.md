@@ -343,8 +343,13 @@ The following are compatibility contracts, not cleanup opportunities:
   increments `conversion-dropped-frames`, and disables async until the next
   start. The record remains quarantined until its fence is terminal. FLUSH_START
   forwards immediately without waiting, while other serialized events drain
-  older output before the parent's event handler. Stop waits past two seconds
-  if necessary, posting one error rather than freeing hardware-owned memory.
+  older output before the parent's event handler. The two-second error stays;
+  after a separate five-second stop deadline, unresolved frame references move
+  to an element-independent reaper with a counted error. Only sole-owned,
+  terminal frames are released, even after element finalization. Truly stuck
+  fences remain retained forever; this bounds waiting, not aggregate memory
+  across faulting sessions. `GST_DEBUG=rgaconvert:2` exposes the cumulative
+  `quarantine-escapes`/outstanding counts and 30-second retention reminders.
   The property stays zero with a warning when Opt is unavailable. Debug staging
   remains synchronous; a rejected submission remains a typed failure, not an
   unreported synchronous retry. See `docs/ASYNC-FENCE-LIFETIME.md` for the

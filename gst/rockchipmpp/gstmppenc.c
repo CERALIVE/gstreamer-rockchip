@@ -1423,14 +1423,15 @@ gst_mpp_enc_reset (GstVideoEncoder * encoder, gboolean drain, gboolean final)
 
   GST_DEBUG_OBJECT (self, "resetting");
 
+  /* MPP cannot reset without draining. Publish that policy under the stream
+   * lock before GST_MPP_ENC_LOCK drops it: otherwise the output task can see
+   * flushing without draining and discard an EOS packet in that window. */
+  self->draining = TRUE;
+
   /* Publish before taking mutex: handle_frame may be waiting for capacity. */
   g_atomic_int_set (&self->flushing, TRUE);
   GST_MPP_ENC_BROADCAST (encoder);
   GST_MPP_ENC_LOCK (encoder);
-  self->draining = drain;
-
-  /* HACK: The MPP is not capable of handling resets properly. */
-  self->draining = TRUE;
 
   gst_mpp_enc_stop_task (encoder, self->draining);
 
