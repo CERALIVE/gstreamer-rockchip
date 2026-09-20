@@ -109,6 +109,7 @@ enum
   PROP_CONVERSION_FALLBACK_FRAMES,
   PROP_CONVERSION_DROPPED_FRAMES,
   PROP_LAYOUT_REJECTIONS,
+  PROP_CSC_FALLBACK_FRAMES,
 };
 
 static void gst_rga_compositor_child_proxy_init (gpointer g_iface,
@@ -775,15 +776,11 @@ gst_rga_compositor_aggregate_frames (GstVideoAggregator * videoaggregator,
 
   gst_rga_compositor_fill_request (&copy_request, &input_frame[0],
       &output_frame, &rectangles[0]);
-  if (!gst_mpp_rga_request_set_colorimetry (&copy_request, &inputs[0].info,
-          &videoaggregator->info) ||
-      (inputs[1].buffer &&
-          !gst_mpp_rga_composite_set_colorimetry (&composite_request,
-              &videoaggregator->info, &inputs[1].info))) {
-    flow = gst_rga_compositor_refuse_frame (self,
-        "negotiated matrix or range is unsupported by librga CSC", FALSE);
-    goto out;
-  }
+  gst_mpp_rga_request_set_colorimetry (&copy_request, &inputs[0].info,
+      &videoaggregator->info);
+  if (inputs[1].buffer)
+    gst_mpp_rga_composite_set_colorimetry (&composite_request,
+        &videoaggregator->info, &inputs[1].info);
   result = gst_mpp_rga_backend_process (backend,
       GST_MPP_RGA_OP_COMPOSITOR_COPY, GST_VIDEO_FORMAT_NV12,
       GST_VIDEO_FORMAT_NV12, &copy_request);
@@ -792,8 +789,12 @@ gst_rga_compositor_aggregate_frames (GstVideoAggregator * videoaggregator,
         "the background-copy tuple is temporarily demoted" :
         "the driver-probed RGA backend rejected the background copy";
     flow = gst_rga_compositor_refuse_frame (self, reason, FALSE);
+    flow = gst_mpp_rga_result_to_flow (result);
     goto out;
   }
+
+  gst_mpp_rga_count_csc_fallback (&copy_request,
+      gst_mpp_conversion_stats_get (G_OBJECT (self)));
 
   if (inputs[1].buffer) {
     pat_frame = input_frame[1];
@@ -820,6 +821,7 @@ gst_rga_compositor_aggregate_frames (GstVideoAggregator * videoaggregator,
             "the overlay-scale tuple is temporarily demoted" :
             "the driver-probed RGA backend rejected the overlay scale";
         flow = gst_rga_compositor_refuse_frame (self, reason, FALSE);
+        flow = gst_mpp_rga_result_to_flow (result);
         goto out;
       }
     }
@@ -853,6 +855,10 @@ gst_rga_compositor_aggregate_frames (GstVideoAggregator * videoaggregator,
           "the composite tuple is temporarily demoted" :
           "the driver-probed RGA backend rejected the composite pass";
       flow = gst_rga_compositor_refuse_frame (self, reason, FALSE);
+      flow = gst_mpp_rga_result_to_flow (result);
+    } else if (!copy_request.csc_fallback) {
+      gst_mpp_rga_count_csc_fallback (&composite_request.transform,
+          gst_mpp_conversion_stats_get (G_OBJECT (self)));
     }
   }
 
@@ -1229,7 +1235,7 @@ gst_rga_compositor_get_property (GObject * object, guint prop_id,
 
   if (prop_id == PROP_CONVERSION_FALLBACK_FRAMES ||
       prop_id == PROP_CONVERSION_DROPPED_FRAMES ||
-      prop_id == PROP_LAYOUT_REJECTIONS) {
+      prop_id == PROP_LAYOUT_REJECTIONS || prop_id == PROP_CSC_FALLBACK_FRAMES) {
     GstMppConversionStatsSnapshot stats;
 
     gst_mpp_conversion_stats_snapshot (gst_mpp_conversion_stats_get (object),
@@ -1238,6 +1244,8 @@ gst_rga_compositor_get_property (GObject * object, guint prop_id,
       g_value_set_uint64 (value, stats.fallback_frames);
     else if (prop_id == PROP_CONVERSION_DROPPED_FRAMES)
       g_value_set_uint64 (value, stats.dropped_frames);
+    else if (prop_id == PROP_CSC_FALLBACK_FRAMES)
+      g_value_set_uint64 (value, stats.csc_fallback_frames);
     else
       g_value_set_uint64 (value, stats.layout_rejections);
     return;
@@ -1384,6 +1392,10 @@ gst_rga_compositor_class_init (GstRgaCompositorClass * klass)
       g_param_spec_uint64 ("layout-rejections", "Layout rejections",
           "Frames rejected for an unsupported compositor layout", 0,
           G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_CSC_FALLBACK_FRAMES,
+      g_param_spec_uint64 ("csc-fallback-frames", "CSC fallback frames",
+          "Frames submitted with an unexpressible CSC using the library default",
+          0, G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 
   gst_element_class_set_static_metadata (element_class,
       "Rockchip RGA video compositor", "Filter/Editor/Video/Hardware",

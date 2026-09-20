@@ -13,6 +13,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -22,7 +23,11 @@
 
 #ifdef HAVE_RGA
 #ifdef GST_MPP_RGA_ENABLE_IM2D
+#include <gmodule.h>
 #include <rga/im2d.h>
+#if RGA_CURRENT_API_HEADER_VERSION < ((1 << 24) | (10 << 16) | (5 << 8))
+#error "C6b requires librga im2d headers >= 1.10.5 (R1); older runtimes remain supported"
+#endif
 #endif
 
 #define GST_MPP_RGA_DEVICE "/dev/rga"
@@ -32,6 +37,84 @@
 
 GST_DEBUG_CATEGORY_STATIC (mpp_rga_backend_debug);
 #define GST_CAT_DEFAULT mpp_rga_backend_debug
+
+#ifdef GST_MPP_RGA_ENABLE_IM2D
+typedef IM_STATUS (*GstMppRgaProcessOpt) (rga_buffer_t, rga_buffer_t,
+    rga_buffer_t, im_rect, im_rect, im_rect, int, int *, im_opt_t *, int);
+
+/* The explicit module reference must outlive every streaming thread. Never
+ * close it: a plugin dependency need not be visible in the global namespace. */
+static GModule *rga_module;
+static GstMppRgaProcessOpt rga_process_opt;
+
+static gpointer
+gst_mpp_rga_resolve_api (gpointer unused)
+{
+  (void) unused;
+  rga_module = g_module_open ("librga.so.2",
+      G_MODULE_BIND_LAZY | G_MODULE_BIND_LOCAL);
+  if (rga_module && g_module_symbol (rga_module, "improcessOpt",
+          (gpointer *) & rga_process_opt))
+    GST_INFO ("improcessOpt resolved");
+  else
+    GST_WARNING ("improcessOpt unavailable; using seven-argument improcess; "
+        "interpolation and async disabled");
+  return rga_module;
+}
+
+static void
+gst_mpp_rga_ensure_api (void)
+{
+  static GOnce once = G_ONCE_INIT;
+  g_once (&once, gst_mpp_rga_resolve_api, NULL);
+}
+
+static gboolean
+gst_mpp_rga_status_ok (gint status)
+{
+  return status == IM_STATUS_SUCCESS || status == IM_STATUS_NOERROR;
+}
+
+static IM_STATUS
+gst_mpp_rga_submit_full (rga_buffer_t src, rga_buffer_t dst, rga_buffer_t pat,
+    im_rect srect, im_rect drect, im_rect prect, gint interp, gint usage,
+    gint * release_fence_fd)
+{
+  im_opt_t opt = { 0, };
+
+  gst_mpp_rga_ensure_api ();
+  opt.version = RGA_CURRENT_API_HEADER_VERSION;
+  opt.interp = interp;
+  if (release_fence_fd) {
+    *release_fence_fd = -1;
+    GST_LOG ("submitting asynchronous improcessOpt interp=%d", interp);
+    return rga_process_opt (src, dst, pat, srect, drect, prect,
+        -1, release_fence_fd, &opt, usage | IM_ASYNC);
+  }
+  if (rga_process_opt) {
+    GST_LOG ("submitting synchronous improcessOpt interp=%d", interp);
+    return rga_process_opt (src, dst, pat, srect, drect, prect,
+        -1, NULL, &opt, usage | IM_SYNC);
+  }
+  return improcess (src, dst, pat, srect, drect, prect, usage | IM_SYNC);
+}
+
+static IM_STATUS
+gst_mpp_rga_submit (rga_buffer_t src, rga_buffer_t dst, rga_buffer_t pat,
+    im_rect srect, im_rect drect, im_rect prect, gint interp, gint usage)
+{
+  return gst_mpp_rga_submit_full (src, dst, pat, srect, drect, prect, interp,
+      usage, NULL);
+}
+
+static gboolean
+gst_mpp_rga_real_async_supported (gpointer user_data)
+{
+  (void) user_data;
+  gst_mpp_rga_ensure_api ();
+  return rga_process_opt != NULL;
+}
+#endif
 
 struct _GstMppRgaBackend
 {
@@ -76,6 +159,63 @@ static gint
 gst_mpp_rga_real_blit (rga_info_t * src, rga_info_t * dst, gpointer user_data)
 {
   (void) user_data;
+#ifdef GST_MPP_RGA_ENABLE_IM2D
+  if (g_strcmp0 (g_getenv ("GST_MPP_RGA_LEGACY_BLIT"), "1") != 0) {
+    rga_buffer_t source;
+    rga_buffer_t output;
+    rga_buffer_t pat = { 0, };
+    im_rect srect = { src->rect.xoffset, src->rect.yoffset,
+      src->rect.width, src->rect.height
+    };
+    im_rect drect = { dst->rect.xoffset, dst->rect.yoffset,
+      dst->rect.width, dst->rect.height
+    };
+    im_rect prect = { 0, };
+    gint usage = 0;
+    IM_STATUS status;
+
+    switch (src->rotation) {
+      case 0:
+        break;
+      case HAL_TRANSFORM_ROT_90:
+        usage = IM_HAL_TRANSFORM_ROT_90;
+        break;
+      case HAL_TRANSFORM_ROT_180:
+        usage = IM_HAL_TRANSFORM_ROT_180;
+        break;
+      case HAL_TRANSFORM_ROT_270:
+        usage = IM_HAL_TRANSFORM_ROT_270;
+        break;
+      default:
+        return -EINVAL;
+    }
+    source = src->virAddr ?
+        wrapbuffer_virtualaddr (src->virAddr,
+        src->rect.width + src->rect.xoffset,
+        src->rect.height + src->rect.yoffset, src->rect.format,
+        src->rect.wstride, src->rect.hstride) : wrapbuffer_fd (src->fd,
+        src->rect.width + src->rect.xoffset,
+        src->rect.height + src->rect.yoffset, src->rect.format,
+        src->rect.wstride, src->rect.hstride);
+    output =
+        wrapbuffer_fd (dst->fd, dst->rect.width, dst->rect.height,
+        dst->rect.format, dst->rect.wstride, dst->rect.hstride);
+    imsetColorSpace (&source, IM_COLOR_SPACE_DEFAULT);
+    imsetColorSpace (&output, dst->color_space_mode);
+    status = gst_mpp_rga_submit (source, output, pat, srect, drect, prect,
+        IM_INTERP_DEFAULT, usage);
+    /* The legacy ops.blit contract is errno-style, not IM_STATUS. */
+    return gst_mpp_rga_status_ok (status) ? 0 : -EIO;
+  }
+  {
+    static gsize warned;
+    if (g_once_init_enter (&warned)) {
+      GST_WARNING
+          ("GST_MPP_RGA_LEGACY_BLIT=1: using legacy c_RkRgaBlit rollback");
+      g_once_init_leave (&warned, 1);
+    }
+  }
+#endif
   return c_RkRgaBlit (src, dst, NULL);
 }
 
@@ -111,15 +251,22 @@ gst_mpp_rga_request_set_colorimetry (GstMppRgaIm2dRequest * request,
 
   request->src_color_space_mode = IM_COLOR_SPACE_DEFAULT;
   request->dst_color_space_mode = IM_COLOR_SPACE_DEFAULT;
-  if (GST_VIDEO_INFO_IS_RGB (input) == GST_VIDEO_INFO_IS_RGB (output) &&
-      input->colorimetry.matrix == output->colorimetry.matrix &&
-      input->colorimetry.range == output->colorimetry.range)
+  request->colorspace_in = input->colorimetry;
+  request->colorspace_out = output->colorimetry;
+  request->csc_fallback = FALSE;
+  if (GST_VIDEO_INFO_IS_RGB (input) && GST_VIDEO_INFO_IS_RGB (output))
     return TRUE;
+  if (GST_VIDEO_INFO_IS_YUV (input) && GST_VIDEO_INFO_IS_YUV (output)) {
+    if (gst_video_colorimetry_is_equal (&input->colorimetry,
+            &output->colorimetry))
+      return TRUE;
+    goto fallback;
+  }
 
   src_mode = gst_mpp_rga_color_space (input);
   dst_mode = gst_mpp_rga_color_space (output);
   if (src_mode < 0 || dst_mode < 0)
-    return FALSE;
+    goto fallback;
 
   /* Directional modes belong on dst, even for YUV input. Avoid requiring
    * full-CSC hardware for the matrices the ordinary CSC units implement. */
@@ -153,9 +300,35 @@ gst_mpp_rga_request_set_colorimetry (GstMppRgaIm2dRequest * request,
     }
   }
 
-  request->src_color_space_mode = src_mode;
-  request->dst_color_space_mode = dst_mode;
-  return TRUE;
+fallback:
+  /* D29: preserve the default-matrix route for unexpressible requests, but
+   * never describe it as an explicit CSC. The submitter counts each frame. */
+  request->csc_fallback = TRUE;
+  return FALSE;
+}
+
+void
+gst_mpp_rga_count_csc_fallback (const GstMppRgaIm2dRequest * request,
+    GstMppConversionStats * stats)
+{
+  gboolean warn;
+
+  if (!request->csc_fallback)
+    return;
+  g_mutex_lock (&stats->lock);
+  stats->csc_fallback_frames++;
+  warn = !stats->csc_warned;
+  stats->csc_warned = TRUE;
+  g_mutex_unlock (&stats->lock);
+  if (warn) {
+    gchar *input = gst_video_colorimetry_to_string (&request->colorspace_in);
+    gchar *output = gst_video_colorimetry_to_string (&request->colorspace_out);
+    GST_WARNING ("CSC fallback: caps colorimetry %s -> %s cannot be expressed; "
+        "using librga default matrix (csc-fallback-frames)",
+        input ? input : "unknown", output ? output : "unknown");
+    g_free (input);
+    g_free (output);
+  }
 }
 
 gboolean
@@ -167,11 +340,18 @@ gst_mpp_rga_composite_set_colorimetry (GstMppRgaIm2dCompositeRequest * request,
 
   /* The YUV accumulator crosses RGB for blending, then returns to YUV.
    * Full-CSC endpoint modes cannot express this two-direction blend. */
-  if (!gst_mpp_rga_request_set_colorimetry (&y2r, accumulator, overlay) ||
-      !gst_mpp_rga_request_set_colorimetry (&r2y, overlay, accumulator) ||
+  gst_mpp_rga_request_set_colorimetry (&y2r, accumulator, overlay);
+  gst_mpp_rga_request_set_colorimetry (&r2y, overlay, accumulator);
+  request->transform.colorspace_in = accumulator->colorimetry;
+  request->transform.colorspace_out = overlay->colorimetry;
+  request->transform.csc_fallback = y2r.csc_fallback || r2y.csc_fallback;
+  if (request->transform.csc_fallback ||
       !(y2r.dst_color_space_mode & IM_YUV_TO_RGB_MASK) ||
-      !(r2y.dst_color_space_mode & IM_RGB_TO_YUV_MASK))
+      !(r2y.dst_color_space_mode & IM_RGB_TO_YUV_MASK)) {
+    request->transform.src_color_space_mode = IM_COLOR_SPACE_DEFAULT;
+    request->transform.dst_color_space_mode = IM_COLOR_SPACE_DEFAULT;
     return FALSE;
+  }
 
   request->transform.src_color_space_mode = IM_COLOR_SPACE_DEFAULT;
   request->transform.dst_color_space_mode = y2r.dst_color_space_mode |
@@ -189,7 +369,7 @@ gst_mpp_rga_real_configure_im2d (guint core_mask, gint priority)
     errno = 0;
     status = imconfig (IM_CONFIG_SCHEDULER_CORE, core_mask);
     saved_errno = errno;
-    if (status <= IM_STATUS_FAILED) {
+    if (!gst_mpp_rga_status_ok (status)) {
       GST_WARNING
           ("imconfig scheduler-core=%u returned status=%d errno=%d (%s)",
           core_mask, status, saved_errno, g_strerror (saved_errno));
@@ -201,7 +381,7 @@ gst_mpp_rga_real_configure_im2d (guint core_mask, gint priority)
   errno = 0;
   status = imconfig (IM_CONFIG_PRIORITY, priority);
   saved_errno = errno;
-  if (status <= IM_STATUS_FAILED)
+  if (!gst_mpp_rga_status_ok (status))
     GST_WARNING ("imconfig priority=%d returned status=%d errno=%d (%s)",
         priority, status, saved_errno, g_strerror (saved_errno));
   errno = saved_errno;
@@ -209,8 +389,8 @@ gst_mpp_rga_real_configure_im2d (guint core_mask, gint priority)
 }
 
 static gint
-gst_mpp_rga_real_process (const GstMppRgaIm2dRequest * request,
-    gpointer user_data)
+gst_mpp_rga_real_process_full (const GstMppRgaIm2dRequest * request,
+    gint * release_fence_fd)
 {
   rga_buffer_t src;
   rga_buffer_t dst;
@@ -230,10 +410,9 @@ gst_mpp_rga_real_process (const GstMppRgaIm2dRequest * request,
   im_rect pat_rect = { 0, };
   IM_STATUS status;
 
-  (void) user_data;
   status = gst_mpp_rga_real_configure_im2d (request->core_mask,
       request->priority);
-  if (status <= IM_STATUS_FAILED)
+  if (!gst_mpp_rga_status_ok (status))
     return status;
 
   src = wrapbuffer_fd (request->src_fd, request->src_width,
@@ -242,11 +421,27 @@ gst_mpp_rga_real_process (const GstMppRgaIm2dRequest * request,
   dst = wrapbuffer_fd (request->dst_fd, request->dst_width,
       request->dst_height, request->dst_format, request->dst_wstride,
       request->dst_hstride);
-  src.color_space_mode = request->src_color_space_mode;
-  dst.color_space_mode = request->dst_color_space_mode;
+  imsetColorSpace (&src, request->src_color_space_mode);
+  imsetColorSpace (&dst, request->dst_color_space_mode);
 
-  return improcess (src, dst, pat, src_rect, dst_rect, pat_rect,
-      request->usage | IM_SYNC);
+  return gst_mpp_rga_submit_full (src, dst, pat, src_rect, dst_rect, pat_rect,
+      request->interp, request->usage, release_fence_fd);
+}
+
+static gint
+gst_mpp_rga_real_process (const GstMppRgaIm2dRequest * request,
+    gpointer user_data)
+{
+  (void) user_data;
+  return gst_mpp_rga_real_process_full (request, NULL);
+}
+
+static gint
+gst_mpp_rga_real_process_async (const GstMppRgaIm2dRequest * request,
+    gint * release_fence_fd, gpointer user_data)
+{
+  (void) user_data;
+  return gst_mpp_rga_real_process_full (request, release_fence_fd);
 }
 
 static gint
@@ -281,7 +476,7 @@ gst_mpp_rga_real_composite (const GstMppRgaIm2dCompositeRequest * request,
   (void) user_data;
   status = gst_mpp_rga_real_configure_im2d (transform->core_mask,
       transform->priority);
-  if (status <= IM_STATUS_FAILED)
+  if (!gst_mpp_rga_status_ok (status))
     return status;
 
   source = wrapbuffer_fd (transform->src_fd, transform->src_width,
@@ -295,14 +490,14 @@ gst_mpp_rga_real_composite (const GstMppRgaIm2dCompositeRequest * request,
       request->pat_height, request->pat_format, request->pat_wstride,
       request->pat_hstride);
   pat.global_alpha = request->pat_alpha;
-  source.color_space_mode = transform->src_color_space_mode;
-  output.color_space_mode = transform->dst_color_space_mode;
+  imsetColorSpace (&source, transform->src_color_space_mode);
+  imsetColorSpace (&output, transform->dst_color_space_mode);
 
   errno = 0;
-  status = improcess (source, output, pat, source_rect, output_rect, pat_rect,
-      transform->usage | IM_SYNC);
+  status = gst_mpp_rga_submit (source, output, pat, source_rect, output_rect,
+      pat_rect, transform->interp, transform->usage);
   saved_errno = errno;
-  if (status <= IM_STATUS_FAILED)
+  if (!gst_mpp_rga_status_ok (status))
     GST_WARNING ("improcess composite returned status=%d errno=%d (%s): %s; "
         "src={fd=%d fmt=%#x size=%dx%d stride=%dx%d rect=%d,%d,%d,%d} "
         "dst={fd=%d fmt=%#x size=%dx%d stride=%dx%d rect=%d,%d,%d,%d} "
@@ -332,6 +527,8 @@ static const GstMppRgaBackendOps gst_mpp_rga_real_ops = {
 #ifdef GST_MPP_RGA_ENABLE_IM2D
   .process = gst_mpp_rga_real_process,
   .composite = gst_mpp_rga_real_composite,
+  .async_supported = gst_mpp_rga_real_async_supported,
+  .process_async = gst_mpp_rga_real_process_async,
 #endif
 };
 
@@ -427,6 +624,9 @@ gst_mpp_rga_create_default (gpointer user_data)
   (void) user_data;
   GST_DEBUG_CATEGORY_INIT (mpp_rga_backend_debug, "mpprgabackend", 0,
       "MPP RGA backend");
+#ifdef GST_MPP_RGA_ENABLE_IM2D
+  gst_mpp_rga_ensure_api ();
+#endif
   backend = gst_mpp_rga_backend_new (&gst_mpp_rga_real_ops, NULL);
   gst_mpp_rga_backend_init (backend);
   return backend;
@@ -545,7 +745,99 @@ gst_mpp_rga_backend_process (GstMppRgaBackend * backend,
   errno = 0;
   ret = backend->ops.process (request, backend->user_data);
   blit_errno = errno;
-  return gst_mpp_rga_backend_finish (backend, &key, ret, blit_errno, ret > 0);
+  result = gst_mpp_rga_backend_finish (backend, &key, ret, blit_errno,
+      ret == IM_STATUS_SUCCESS || ret == IM_STATUS_NOERROR);
+  if (result == GST_MPP_RGA_BLIT_FAILED &&
+      (ret == IM_STATUS_NOT_SUPPORTED || ret == IM_STATUS_INVALID_PARAM ||
+          ret == IM_STATUS_ILLEGAL_PARAM || ret == IM_STATUS_ERROR_VERSION))
+    return GST_MPP_RGA_NOT_SUPPORTED;
+  return result;
+}
+
+gboolean
+gst_mpp_rga_backend_supports_async (GstMppRgaBackend * backend)
+{
+  g_return_val_if_fail (backend != NULL, FALSE);
+  if (!backend->ops.process_async || !backend->ops.async_supported)
+    return FALSE;
+  return backend->ops.async_supported (backend->user_data);
+}
+
+GstMppRgaFenceStatus
+gst_mpp_rga_fence_status (gint release_fence_fd, gint timeout_ms)
+{
+  struct pollfd pfd = { release_fence_fd, POLLIN, 0 };
+  gint rc;
+
+  if (release_fence_fd == GST_MPP_RGA_FENCE_MISSING)
+    return GST_MPP_RGA_FENCE_PENDING;
+  if (release_fence_fd == -1)
+    return GST_MPP_RGA_FENCE_COMPLETE;
+
+  do {
+    rc = poll (&pfd, 1, timeout_ms);
+  } while (rc < 0 && errno == EINTR);
+
+  if (rc <= 0 || (pfd.revents & POLLNVAL))
+    return GST_MPP_RGA_FENCE_PENDING;
+  if (pfd.revents & (POLLERR | POLLHUP))
+    return GST_MPP_RGA_FENCE_ERROR;
+  return (pfd.revents & POLLIN) ? GST_MPP_RGA_FENCE_COMPLETE :
+      GST_MPP_RGA_FENCE_PENDING;
+}
+
+gboolean
+gst_mpp_rga_fence_wait (gint release_fence_fd, gint timeout_ms)
+{
+  GstMppRgaFenceStatus status =
+      gst_mpp_rga_fence_status (release_fence_fd, timeout_ms);
+
+  if (status != GST_MPP_RGA_FENCE_PENDING && release_fence_fd >= 0)
+    close (release_fence_fd);
+  return status == GST_MPP_RGA_FENCE_COMPLETE;
+}
+
+GstMppRgaResult
+gst_mpp_rga_backend_process_async (GstMppRgaBackend * backend,
+    GstMppRgaOperation operation, GstVideoFormat in_format,
+    GstVideoFormat out_format, const GstMppRgaIm2dRequest * request,
+    gint * release_fence_fd)
+{
+  GstMppRgaTupleKey key;
+  GstMppRgaResult result;
+  gint ret;
+  gint blit_errno;
+
+  g_return_val_if_fail (backend != NULL, GST_MPP_RGA_UNAVAILABLE);
+  g_return_val_if_fail (request != NULL, GST_MPP_RGA_LAYOUT_REJECTED);
+  g_return_val_if_fail (release_fence_fd != NULL, GST_MPP_RGA_LAYOUT_REJECTED);
+
+  *release_fence_fd = -1;
+  if (!gst_mpp_rga_backend_supports_async (backend))
+    return GST_MPP_RGA_UNAVAILABLE;
+
+  result = gst_mpp_rga_backend_begin (backend, operation, in_format,
+      out_format, &key);
+  if (result != GST_MPP_RGA_SUCCESS)
+    return result;
+
+  errno = 0;
+  ret = backend->ops.process_async (request, release_fence_fd,
+      backend->user_data);
+  blit_errno = errno;
+  if ((ret == IM_STATUS_SUCCESS || ret == IM_STATUS_NOERROR) &&
+      *release_fence_fd < 0) {
+    *release_fence_fd = GST_MPP_RGA_FENCE_MISSING;
+    ret = IM_STATUS_FAILED;
+    GST_ERROR ("Async submission succeeded without a completion fence");
+  }
+  result = gst_mpp_rga_backend_finish (backend, &key, ret, blit_errno,
+      ret == IM_STATUS_SUCCESS || ret == IM_STATUS_NOERROR);
+  if (result == GST_MPP_RGA_BLIT_FAILED &&
+      (ret == IM_STATUS_NOT_SUPPORTED || ret == IM_STATUS_INVALID_PARAM ||
+          ret == IM_STATUS_ILLEGAL_PARAM || ret == IM_STATUS_ERROR_VERSION))
+    return GST_MPP_RGA_NOT_SUPPORTED;
+  return result;
 }
 
 GstMppRgaResult
@@ -571,7 +863,13 @@ gst_mpp_rga_backend_composite (GstMppRgaBackend * backend,
   errno = 0;
   ret = backend->ops.composite (request, backend->user_data);
   blit_errno = errno;
-  return gst_mpp_rga_backend_finish (backend, &key, ret, blit_errno, ret > 0);
+  result = gst_mpp_rga_backend_finish (backend, &key, ret, blit_errno,
+      ret == IM_STATUS_SUCCESS || ret == IM_STATUS_NOERROR);
+  if (result == GST_MPP_RGA_BLIT_FAILED &&
+      (ret == IM_STATUS_NOT_SUPPORTED || ret == IM_STATUS_INVALID_PARAM ||
+          ret == IM_STATUS_ILLEGAL_PARAM || ret == IM_STATUS_ERROR_VERSION))
+    return GST_MPP_RGA_NOT_SUPPORTED;
+  return result;
 }
 
 guint
@@ -594,6 +892,24 @@ gst_mpp_rga_backend_tuple_failures (GstMppRgaBackend * backend,
 }
 
 #endif
+
+GstFlowReturn
+gst_mpp_rga_result_to_flow (GstMppRgaResult result)
+{
+  switch (result) {
+    case GST_MPP_RGA_SUCCESS:
+      return GST_FLOW_OK;
+    case GST_MPP_RGA_UNAVAILABLE:
+    case GST_MPP_RGA_TUPLE_DEMOTED:
+    case GST_MPP_RGA_LAYOUT_REJECTED:
+    case GST_MPP_RGA_NOT_SUPPORTED:
+      return GST_FLOW_NOT_NEGOTIATED;
+    case GST_MPP_RGA_BLIT_FAILED:
+    case GST_MPP_RGA_DEVICE_LOST:
+    default:
+      return GST_FLOW_ERROR;
+  }
+}
 
 const gchar *
 gst_mpp_rga_operation_name (GstMppRgaOperation operation)

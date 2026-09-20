@@ -90,6 +90,7 @@ enum
   PROP_CONVERSION_FALLBACK_FRAMES,
   PROP_CONVERSION_DROPPED_FRAMES,
   PROP_LAYOUT_REJECTIONS,
+  PROP_CSC_FALLBACK_FRAMES,
   PROP_LAST,
 };
 
@@ -201,6 +202,7 @@ gst_mpp_dec_get_property (GObject * object,
       break;
     case PROP_CONVERSION_FALLBACK_FRAMES:
     case PROP_CONVERSION_DROPPED_FRAMES:
+    case PROP_CSC_FALLBACK_FRAMES:
     case PROP_LAYOUT_REJECTIONS:{
       GstMppConversionStatsSnapshot stats;
       gst_mpp_conversion_stats_snapshot (gst_mpp_conversion_stats_get (object),
@@ -209,6 +211,8 @@ gst_mpp_dec_get_property (GObject * object,
         g_value_set_uint64 (value, stats.fallback_frames);
       else if (prop_id == PROP_CONVERSION_DROPPED_FRAMES)
         g_value_set_uint64 (value, stats.dropped_frames);
+      else if (prop_id == PROP_CSC_FALLBACK_FRAMES)
+        g_value_set_uint64 (value, stats.csc_fallback_frames);
       else
         g_value_set_uint64 (value, stats.layout_rejections);
       break;
@@ -1179,7 +1183,7 @@ gst_mpp_dec_rga_convert (GstVideoDecoder * decoder, MppFrame mframe,
   GstVideoCropMeta *crop = gst_buffer_get_video_crop_meta (buffer);
 
   ret = gst_mpp_rga_convert_from_mpp_frame (mframe, mem, info, self->rotation,
-      crop, operation);
+      crop, operation, gst_mpp_conversion_stats_get (G_OBJECT (self)));
   if (ret != GST_MPP_RGA_SUCCESS) {
     GST_WARNING_OBJECT (self, "failed to convert");
     gst_memory_unref (mem);
@@ -1759,6 +1763,10 @@ gst_mpp_dec_class_init (GstMppDecClass * klass)
       g_param_spec_uint64 ("layout-rejections", "Layout rejections",
           "Frames rejected for an unsupported conversion layout", 0,
           G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_CSC_FALLBACK_FRAMES,
+      g_param_spec_uint64 ("csc-fallback-frames", "CSC fallback frames",
+          "Frames submitted with an unexpressible CSC using the library default",
+          0, G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 
 #ifdef HAVE_RGA
   if (!gst_mpp_use_rga ())

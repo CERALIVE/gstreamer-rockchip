@@ -253,7 +253,11 @@ fake_process (const GstMppRgaIm2dRequest * request, gpointer user_data)
   if (fake->fail_overlay_scale && request->src_format == RK_FORMAT_BGRA_8888)
     return IM_STATUS_FAILED;
   if (fake->submit_im2d)
+  {
+    gst_mpp_rga_ensure_api ();
+    rga_process_opt = NULL;
     return gst_mpp_rga_real_process (request, NULL);
+  }
   return fake->process_result;
 }
 
@@ -266,7 +270,11 @@ fake_composite (const GstMppRgaIm2dCompositeRequest * request,
   fake->composite_calls++;
   fake->last_composite = *request;
   if (fake->submit_im2d)
+  {
+    gst_mpp_rga_ensure_api ();
+    rga_process_opt = NULL;
     return gst_mpp_rga_real_composite (request, NULL);
+  }
   return fake->composite_result;
 }
 
@@ -1101,6 +1109,8 @@ GST_START_TEST (test_im2d_diagnostics_preserve_status_errno_and_failure_stage)
     injected_errno = i == 0 ? 0 : ENODEV;
     request.transform.core_mask = i == 2 ? 1 : 0;
     errno = EBUSY;
+    gst_mpp_rga_ensure_api ();
+    rga_process_opt = NULL;
     status = gst_mpp_rga_real_composite (&request, NULL);
     saved_errno = errno;
     fail_unless_equals_int (status,

@@ -66,6 +66,9 @@ video_caps (const char *format, guint width, guint height)
       "height", G_TYPE_INT, height,
       "framerate", GST_TYPE_FRACTION, 1, 1, NULL);
 
+  gst_caps_set_simple (caps, "colorimetry", G_TYPE_STRING,
+      strcmp (format, "BGR") == 0 ? "sRGB" : "bt709", NULL);
+
   gst_caps_set_features (caps, 0,
       gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_DMABUF, NULL));
   return caps;
@@ -155,6 +158,7 @@ main (int argc, char **argv)
   guint64 fallback = G_MAXUINT64;
   guint64 dropped = G_MAXUINT64;
   guint64 rejected = G_MAXUINT64;
+  guint64 csc_fallback = G_MAXUINT64;
   void *mapping;
   int dmabuf_fd;
   gboolean passed;
@@ -241,7 +245,8 @@ main (int argc, char **argv)
       GST_FLOW_OK && report_bus_result (pipeline);
   g_object_get (dut, "conversion-fallback-frames", &fallback,
       "conversion-dropped-frames", &dropped,
-      "layout-rejections", &rejected, NULL);
+      "layout-rejections", &rejected, "csc-fallback-frames", &csc_fallback, NULL);
+  g_print ("DUT_CSC_FALLBACK=%" G_GUINT64_FORMAT "\n", csc_fallback);
   g_print ("OUTPUT_SEEN=%u OUTPUT_DMABUF=%u\n", output_check.seen,
       output_check.dmabuf);
   g_print ("DUT_FALLBACK=%" G_GUINT64_FORMAT
@@ -252,5 +257,5 @@ main (int argc, char **argv)
   gst_object_unref (pipeline);
 
   return passed && output_check.seen && output_check.dmabuf && fallback == 0 &&
-      dropped == 0 && rejected == 0 ? 0 : 1;
+      dropped == 0 && rejected == 0 && csc_fallback == 0 ? 0 : 1;
 }

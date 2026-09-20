@@ -23,13 +23,21 @@ share a single availability decision and a single health table:
 
 | Caller | librga entry point | Operation tag |
 |---|---|---|
-| `mpph264enc` / `mpph265enc` / `mppjpegenc` input conversion | legacy `c_RkRgaBlit` | `encode-convert` |
-| `mppvideodec` output conversion | legacy `c_RkRgaBlit` | `decode-convert` |
-| `mppjpegdec` output conversion | legacy `c_RkRgaBlit` | `jpeg-convert` |
+| `mpph264enc` / `mpph265enc` / `mppjpegenc` input conversion | im2d `improcess`; legacy `c_RkRgaBlit` only under `GST_MPP_RGA_LEGACY_BLIT=1` | `encode-convert` |
+| `mppvideodec` output conversion | im2d `improcess`; legacy `c_RkRgaBlit` only under `GST_MPP_RGA_LEGACY_BLIT=1` | `decode-convert` |
+| `mppjpegdec` output conversion | im2d `improcess`; legacy `c_RkRgaBlit` only under `GST_MPP_RGA_LEGACY_BLIT=1` | `jpeg-convert` |
 | `rgaconvert` | im2d `improcess` | `rgaconvert` |
 | `rgacompositor` primary copy/scale | im2d `improcess` | `rgacompositor-copy` |
 | `rgacompositor` secondary BGRA pre-scale, when needed | im2d `improcess` | `rgacompositor-copy` (separate BGRA/BGRA health tuple) |
 | `rgacompositor` secondary blend | geometry-aware im2d `improcess` composite | `rgacompositor` |
+
+Both DSOs carry the im2d path: `GST_MPP_RGA_ENABLE_IM2D` is set in `config.h`
+([`meson.build:93`](../meson.build)), not only in `rockchiprga`'s own `c_args`,
+so `libgstrockchipmpp.so` reaches `improcess` too. That is checkable on a
+shipped artifact rather than inferred from the build files —
+`nm -D --undefined-only libgstrockchipmpp.so` lists `improcess` and
+`imsetColorSpace` alongside the retained `c_RkRgaBlit` rollback, and does NOT
+list `improcessOpt`, which is resolved through the explicit module handle.
 
 `gstmpprgabackend.c` owns both. `gst_mpp_rga_backend_blit()` and
 `gst_mpp_rga_backend_process()` / `gst_mpp_rga_backend_composite()` differ only
@@ -146,6 +154,278 @@ deliberately clobbers errno during logging and verifies the original status,
 errno and failure stage survive.
 
 ## im2d colorimetry
+
+### C6b-colour (host implementation; board qualification pending)
+
+This contract supersedes the historical full-CSC/refusal policy below. Build
+against **R1 headers, im2d API ≥1.10.5**; the shared backend asserts the version.
+That is not a minimum runtime version. It retains an explicit module from
+`g_module_open("librga.so.2", G_MODULE_BIND_LAZY | G_MODULE_BIND_LOCAL)` for the
+plugin lifetime and resolves `improcessOpt` with `g_module_symbol`, never as an
+undefined ELF dependency. Older runtimes use seven-argument `improcess`, with
+interpolation/async disabled and one warning per backend initialization.
+`GST_DEBUG=mpprgabackend:4` reports `improcessOpt resolved`; level 6 reports
+actual synchronous Opt submissions. MPP encoder/decoder blits use this same
+dispatcher, preserving pixel strides, crops, rotations and virtual-address input.
+`GST_MPP_RGA_LEGACY_BLIT=1` selects the original blit rollback for one release,
+with a warning. Neither route enables CPU copying.
+
+The pure mapper retains complete input/output `GstVideoColorimetry` (range,
+matrix, transfer and primaries). `imsetColorSpace` applies the directional enums
+on the descriptors, **not** the transform usage bitfield: the namespaces overlap.
+
+| Request | Selection |
+|---|---|
+| YUV→RGB, source 601 limited/full | `IM_YUV_TO_RGB_BT601_LIMIT/FULL` |
+| YUV→RGB, source 709 limited | `IM_YUV_TO_RGB_BT709_LIMIT` |
+| RGB→YUV, destination 601 limited/full | `IM_RGB_TO_YUV_BT601_LIMIT/FULL` |
+| RGB→YUV, destination 709 limited | `IM_RGB_TO_YUV_BT709_LIMIT` |
+| Equal complete YUV colorimetry; RGB→RGB | No CSC |
+| 709 full, other/unknown matrix or range, limited RGB, differing YUV colorimetry (including primaries/transfer) | D29 default-matrix fallback; no full-CSC endpoint request |
+
+Unsupported rows remain negotiable. They warn once per element, naming both
+colorimetries, and increment read-only `csc-fallback-frames` after successful RGA
+conversion (at most once per compositor frame). This does not claim requested
+primaries/transfer were converted: RGA is not a gamut/transfer converter.
+`conversion-fallback-frames` still counts CPU copies only. Failed/unavailable
+submissions do not increment the CSC counter. Encoder input uses negotiated
+video info; decoder input uses the MPP frame's ISO colour metadata, retaining
+missing metadata as unknown instead of guessing.
+
+`rgaconvert.interpolation` is additive: enum `default`, `linear`, `cubic`,
+default `default`. The zeroed `im_opt_t` carries
+`version=RGA_CURRENT_API_HEADER_VERSION`; Opt gets `-1`, `NULL`, `&opt` and
+synchronous usage. No fences, cache or batching are added. Only
+`IM_STATUS_SUCCESS` and `IM_STATUS_NOERROR` succeed. Unsupported/invalid requests
+map to `GST_FLOW_NOT_NEGOTIATED`; execution/resource/unknown statuses map to
+`GST_FLOW_ERROR`, retaining dropped-frame accounting.
+
+Both suite builds use R1 headers. Bookworm keeps the Radxa runtime and dev link,
+extracting **only headers** from the checksum-verified R1 archive into
+`/usr/local/include/rga`. No R1 package is installed there and no glibc floor is
+changed. Only Trixie is publishable. Build Check retains `plugin-<suite>`
+candidate archives for exact-binary board testing.
+
+d5 now uses an extracted candidate, isolated plugin path and fresh registry,
+explicit BT.709 YUV caps/reference for every geometry, and the five D24 quality
+limits in `tests/board/d5-quality-contract.sh`. Every cell executes. Unexpected
+PASS, new FAIL and submission errors fail the drill; rotations are not waived.
+The host test proves that removing a known-limit row fails.
+
+**BOARD ROWS: the d5 matrix is now GREEN on both boards; the rest are NOT-RUN.**
+All twelve d5 cells PASS against the BT.709 reference with an empty
+expected-FAIL list, on Orange Pi 5+ and — as of 2026-09-19, against the same CI
+candidate `.deb` (`bd6f0cbe8080400216f870ec355f0d5f622aff486d95e5f168fd3ba3dbd2304d`,
+plugin resolved out of `/tmp/.../plugin/libgstrockchiprga.so`, never the
+installed package) — on Rock 5B+ (`7.2.0-ceralive-rk3588`), worst chroma
+33.72 dB against the unchanged 30 dB floor, `fallback=0 dropped=0
+layout_rejections=0` on every cell.
+
+**The R1 lookup and the Opt entry point are now PROVEN IN-ELEMENT on Rock**, out
+of that same d5 run rather than from a separate drill: d5 already runs every
+cell under `GST_DEBUG=rgaconvert:5,mpprgabackend:6`, so its retained per-cell
+logs carry `gst_mpp_rga_resolve_api: improcessOpt resolved` in all 12 of 12
+cells and `submitting synchronous improcessOpt` once per cell — one submission
+per pushed buffer, 12 of 12 — with zero `improcess` failures. `gst-inspect-1.0
+rgaconvert` on the same staged candidate reports `interpolation … Enum
+"GstRgaInterpolation" Default: 0, "default"`. Separately, the D6 harness below
+drives `improcessOpt` with real release fences at 3840×2160 against the same
+runtime, so the Opt path is exercised at 4K as well, though librga-direct rather
+than through the element.
+
+**The older-runtime fallback is PROVEN on Rock, as a paired A/B against the R1
+leg.** The pinned Radxa R0 `librga.so.2.1.0`
+(`0b455344259c37fec821955e2de85bb5f76a34e69682217b514c407d8a35c6c3`, the
+`librga2_2.2.0-1_arm64.deb` already byte-pinned in `ci/mpp-pin.env`) is selected
+**for one process only** through `LD_LIBRARY_PATH` — `LD_DEBUG=libs` confirms the
+loader took that copy — so nothing is installed and the sysext-backed `/usr`
+keeps its R1 package, which is the isolated-evidence form this document's own
+rule allows. `gst-inspect-1.0 rgaconvert` exits 0 and emits `improcessOpt
+unavailable; using seven-argument improcess; interpolation and async disabled`
+**exactly once** (count 1, with `improcessOpt resolved` count 0). Running the
+same `tests/board/dmabuf-rgaconvert` binary on the same NV16 1280×720 bt709
+source through both runtimes:
+
+| Runtime | exit | output bytes | Opt submissions | fallback warning | counters |
+|---|---:|---:|---:|---:|---|
+| R1 `1.10.5+ceralive.1` (installed) | 0 | 1 382 400 | 1 | 0 | `0/0/0` |
+| Radxa R0 `2.2.0-1` (process-local) | 0 | 1 382 400 | 0 | 1 | `0/0/0` |
+
+Both outputs are **byte-identical**
+(`a18fbf014d512678aaf38ff2b720463a0a3669c05b382cd78dc0bc10764a498e`), so the
+seven-argument fallback is not merely loadable — it converts, and it converts to
+the same pixels.
+
+Still outstanding on both boards: BT.709-versus-601-reference PSNR deltas, and
+d2 300/300 H.265 and H.264 with zero `RGA_BLIT fail`.
+
+`GST_MPP_RGA_LEGACY_BLIT=1` is a **different switch** from the runtime fallback
+above — it selects `c_RkRgaBlit` inside `gst_mpp_rga_real_blit()`, the encoder
+and decoder seam, which `rgaconvert` never enters — and it remains unexercised
+on hardware. An attempt on Rock did not reach it and is recorded here so the
+next attempt does not repeat it: a
+`videotestsrc ! video/x-raw,format={I420,NV16},1280x720 ! mpph265enc` pipeline
+encodes 60/60 frames in both switch positions, byte-identical output, while the
+`mpprgabackend` debug category emits **zero** lines in either leg — so the
+encoder served those caps without entering the RGA seam at all, and the switch
+had nothing to select. Reaching that seam needs an input the encoder genuinely
+must blit; a run whose only evidence is "both legs produced frames" proves
+nothing about the rollback. A
+`videotestsrc`-fed pipeline is NOT a valid instrument for any of these —
+GStreamer 1.22 `videotestsrc` does not honour a downstream DMA-BUF allocation
+proposal, so such a pipeline fails to preroll and emits zero submissions, which
+reads identically to a broken code path. Use `tests/board/dmabuf-rgaconvert.c`,
+as d5 does. Stubs prove no
+pixels or silicon. Do not APT-swap libraries on sysext-backed `/usr`: use the
+separately approved restoration procedure, or label process-local selection as
+isolated evidence, not an installed-runtime restoration.
+
+### C6b-perf: NOT-ADOPTABLE at this pin — the handle path is refused by the driver
+
+**Verdict: BLOCKED. No DMA-BUF handle import cache is implemented, and none can
+be while librga R1 and the current island driver disagree about `v_addr`.**
+
+The proposal was to `importbuffer_fd()` once per pool buffer and describe each
+frame with `wrapbuffer_handle()`, so the per-job DMA-BUF attach/map is paid once
+instead of per frame. Measured on a Rock 5B+ (kernel `7.2.0-ceralive-rk3588`,
+`librga2-ceralive 1.10.5+ceralive.1`, RGA api `v1.10.5_[11]`) with
+`tests/board/d6-c6b-measurement.sh`, **every handle-described submission failed**
+— 440 of 440 at 4K NV16→NV12 and 440 of 440 at 1080p, on three independent runs:
+
+```text
+PROBE_rgba_handles src=1325 dst=1326          # import succeeds
+PROBE_rgba_handle_copy status=0 errno=22 …    # the SAME buffers, by handle: EINVAL
+PROBE_rgba_fd_copy    status=1 errno=0        # the SAME buffers, by fd: success
+```
+
+The RGBA 256×256 single-plane control is what makes the cause unambiguous: the
+same two DMA-BUFs, the same geometry and the same `improcess()` call succeed when
+described by fd and fail when described by handle, so the refusal is the handle
+mechanism itself and not a chroma-plane, stride or format question.
+
+Root cause, in two places that are each individually defensible:
+
+- librga R1 `generate_blit_req()`
+  ([`im2d_api/src/im2d_impl.cpp:3498-3502` at `1.10.5+ceralive.1`](https://github.com/CERALIVE/librga/blob/d57bc86e65b331948953442449618cadd3b0c7bc/im2d_api/src/im2d_impl.cpp#L3498-L3502))
+  passes the handle as `yrgb_addr` and then derives the other two plane
+  addresses from the *virtual* base pointer, which on the handle path is `NULL`:
+  `uv_addr = (uintptr_t) srcBuf` is `0`, but
+  `v_addr = (uintptr_t) srcBuf + srcVirW * srcVirH` is a non-zero integer that is
+  not a handle. For 1920×1080 it is exactly `2073600`, which is what the driver
+  then reports.
+- The island's `rga_job_judgment_support_core()` validates the RGA2 capability
+  of **all nine** `{src,dst,pat}.{yrgb,uv,v}_addr` fields whenever
+  `handle_flag & 1`, skipping only fields that are zero. The stray `v_addr`
+  therefore reaches `rga_mm_lookup_rga2_support()`, misses the handle table and
+  returns `-EINVAL` before the job is ever scheduled:
+
+```text
+rga: This handle[2073600] is illegal.
+rga: ID[2594]: task[0] job_commit failed.
+rga: ID[2594]: request commit failed!
+rga: ID[2594]: submit failed!
+```
+
+Neither side is obviously the defect: leaving a garbage `v_addr` in a
+handle-mode request is a librga bug, and validating every non-zero address field
+is the island being strict about a buffer it is about to program into hardware.
+Fixing it is a change to one of those two repositories, not to this plugin, so it
+is recorded here and not worked around. **Do not "fix" this in the plugin by
+zeroing plane addresses behind librga's back** — the plugin does not own the
+`rga_req` that `generate_blit_req()` builds.
+
+What the cache would have been worth, if the path worked, is not left unstated.
+The explicit import/release ioctl pair — the same dma_buf attach + map + page
+array construction the fd path performs inside every job — costs **833 µs per
+buffer at 4K** and **226 µs at 1080p**, against a whole-frame `fd_sync` time of
+4859 µs and 1321 µs. Two buffers per frame therefore plausibly account for a
+third of 4K frame time. That is an inference from an adjacent measurement, not a
+measurement of the cache, and it is exactly why this stays BLOCKED rather than
+NO-MEASURABLE-GAIN: the proposal is not refuted, it is unrunnable.
+
+### C6b-async: ADOPTED on both boards, shipped as a default-off property
+
+**Verdict: ADOPT on Rock 5B+ and on Orange Pi 5 Plus.** Both boards clear the
+≥5 % gate at both geometries, so the both-board adoption rule is satisfied and
+`rgaconvert` carries an `async-depth` property. **Its default is `0`, so shipped
+behaviour is byte-unchanged** — see "Why the default is 0" below.
+
+Depth-1 pipelining — submit frame N with `IM_ASYNC`, retire frame N-1's release
+fence while N is in flight — measured against the synchronous path on the same
+buffers, in the same process, in one run:
+
+| Board | Geometry | sync fps | async depth-1 fps | gain | gate |
+|---|---|---:|---:|---:|---|
+| Rock 5B+ | 3840×2160 NV16→NV12 | 207.0 | 243.8 | **+17.8 %** | ≥ 5 % |
+| Rock 5B+ | 1920×1080 NV16→NV12 | 758.7 | 971.8 | **+28.1 %** | ≥ 5 % |
+| Orange Pi 5 Plus | 3840×2160 NV16→NV12 | 202.2 | 239.4 | **+18.4 %** | ≥ 5 % |
+| Orange Pi 5 Plus | 1920×1080 NV16→NV12 | 755.4 | 967.2 | **+28.0 %** | ≥ 5 % |
+
+Three independent Rock runs agree closely — 4K `+17.5 / +17.1 / +17.8 %`, 1080p
+`+26.0 / +28.7 / +28.1 %` — and the two Orange Pi runs agree to within 0.1
+percentage point (4K `+18.4 / +18.4 %`, 1080p `+28.0 / +28.1 %`), so the figure
+is not a single lucky sample on either board. Both Orange Pi runs reported
+`ASYNC_DST_BUFFERS=2`, i.e. the corrected two-destination shape.
+
+The Orange Pi runs also reproduced the **C6b-perf handle-path refusal**
+independently: 440/440 submissions failed at both geometries, with the fd
+control passing on the same buffers, and the kernel printed the same
+`This handle[2073600] is illegal` — byte-for-byte the value Rock produced, which
+is `1920 × 1080`. That refusal is a second-board confirmation of the
+librga/island disagreement recorded above, not a new finding.
+
+#### Why the default is 0
+
+The gate's subject is the standalone `tests/board/d6-c6b-measurement.sh` im2d
+harness: no plugin is installed, no element is instantiated and no capture
+device is opened. It measures exactly what the proposal would change at the
+librga seam, which is what makes it a valid adoption gate — and it is *not* a
+measurement of `rgaconvert`. Depth 1 also costs one frame of latency, which the
+element reports through its `LATENCY` query. Turning it on by default would
+therefore claim an in-element benefit nobody has measured and change the push
+behaviour of a frozen-contract element for every existing consumer. Flipping the
+default is a separate change gated on an in-element board measurement, not on
+another harness run.
+
+#### What the property refuses, silently and by design
+
+`async-depth=1` falls back to the synchronous path — never to a failure — when
+the librga runtime resolves no `improcessOpt` (there is nowhere to return a
+release fence), when debug CPU staging is in use (the staged copy reads the
+destination on the streaming thread the moment the blit returns, which a fence
+cannot guard), or when the submission is refused. The staged case is guarded in
+code but is not reachable by the host test harness, because a staging buffer
+needs a real dma-heap; it is board territory.
+
+Every held frame's fence is waited on before that buffer is released, **discard
+included** — on EOS, on `FLUSH_STOP`, on `stop()`, on `PAUSED→READY` and in
+`finalize`. Returning a buffer to its pool while the hardware is still writing
+into it is the failure this rule exists to prevent, and it is the one line a
+future reader is most likely to "simplify" away.
+
+Two things about the method are load-bearing rather than incidental. The async
+frames **alternate between two destination buffers** (`ASYNC_DST_BUFFERS=2` in
+the transcript): at depth 1 two jobs are in flight at once and a real
+`rgaconvert` would draw each output from a pool, so a single shared destination
+would both model a shape the element cannot produce and let the hardware overlap
+two writes to one allocation. The first two runs above used a single destination
+and the third used two; the gain is unchanged, so it is not an artefact of that
+overlap. And each run is bracketed by two synchronous measurements, one before
+every other mode and one after every other mode — at 4K they read 4843 µs and
+4831 µs per frame — so no clock or thermal drift large enough to explain the
+async gain occurred across the run.
+
+Latency does not regress by more than the contract allows: per-call p95 rises
+from 4943 µs to 5331 µs at 4K, `+388 µs`, which is well inside one 60 fps frame
+period (16 667 µs) — the frame is retired one submission later by construction,
+not held longer.
+
+The Orange Pi 5 Plus leg is **not run**: the board was held by another session
+for the whole of this work. A one-board result does not satisfy the both-board
+adoption rule, so this is recorded as a measurement, not as an adoption, and the
+element ships no async property until the second board agrees.
+
+### Historical pre-C6b implementation and evidence
 
 [EXISTS] Both `improcess()` submission paths set `rga_buffer_t.color_space_mode`
 after `wrapbuffer_fd()`. The API was checked against the SHA-pinned

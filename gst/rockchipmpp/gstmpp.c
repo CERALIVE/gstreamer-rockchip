@@ -266,7 +266,7 @@ gst_mpp_rga_get_rotation (gint rotation)
 GstMppRgaResult
 gst_mpp_rga_convert (GstBuffer * inbuf, GstVideoInfo * src_vinfo,
     GstMemory * out_mem, GstVideoInfo * dst_vinfo, gint rotation,
-    GstMppRgaOperation operation)
+    GstMppRgaOperation operation, GstMppConversionStats * stats)
 {
   GstMapInfo mapinfo = { 0, };
   GstMppRgaResult ret;
@@ -276,6 +276,10 @@ gst_mpp_rga_convert (GstBuffer * inbuf, GstVideoInfo * src_vinfo,
 
   rga_info_t src_info = { 0, };
   rga_info_t dst_info = { 0, };
+  GstMppRgaIm2dRequest color = { 0, };
+
+  gst_mpp_rga_request_set_colorimetry (&color, src_vinfo, dst_vinfo);
+  dst_info.color_space_mode = color.dst_color_space_mode;
 
   if (!gst_mpp_rga_info_from_video_info (&src_info, src_vinfo))
     return GST_MPP_RGA_LAYOUT_REJECTED;
@@ -310,9 +314,12 @@ gst_mpp_rga_convert (GstBuffer * inbuf, GstVideoInfo * src_vinfo,
 
   if (!gst_mpp_use_rga ())
     ret = GST_MPP_RGA_UNAVAILABLE;
-  else
+  else {
     ret = gst_mpp_rga_backend_blit (gst_mpp_rga_backend_get_default (),
         operation, src_format, dst_format, &src_info, &dst_info);
+    if (ret == GST_MPP_RGA_SUCCESS)
+      gst_mpp_rga_count_csc_fallback (&color, stats);
+  }
 
   if (mapped)
     gst_buffer_unmap (inbuf, &mapinfo);
@@ -322,13 +329,39 @@ gst_mpp_rga_convert (GstBuffer * inbuf, GstVideoInfo * src_vinfo,
 GstMppRgaResult
 gst_mpp_rga_convert_from_mpp_frame (MppFrame * mframe,
     GstMemory * out_mem, GstVideoInfo * dst_vinfo, gint rotation,
-    GstVideoCropMeta * crop, GstMppRgaOperation operation)
+    GstVideoCropMeta * crop, GstMppRgaOperation operation,
+    GstMppConversionStats * stats)
 {
   rga_info_t src_info = { 0, };
   rga_info_t dst_info = { 0, };
   GstVideoFormat src_format =
       gst_mpp_mpp_format_to_gst_format (mpp_frame_get_fmt (mframe));
   GstVideoFormat dst_format = GST_VIDEO_INFO_FORMAT (dst_vinfo);
+  GstVideoInfo input;
+  GstMppRgaIm2dRequest color = { 0, };
+
+  gst_video_info_set_format (&input, src_format,
+      mpp_frame_get_width (mframe), mpp_frame_get_height (mframe));
+  input.colorimetry.matrix =
+      gst_video_color_matrix_from_iso (mpp_frame_get_colorspace (mframe));
+  input.colorimetry.primaries =
+      gst_video_color_primaries_from_iso (mpp_frame_get_color_primaries
+      (mframe));
+  input.colorimetry.transfer =
+      gst_video_transfer_function_from_iso (mpp_frame_get_color_trc (mframe));
+  switch (mpp_frame_get_color_range (mframe)) {
+    case MPP_FRAME_RANGE_MPEG:
+      input.colorimetry.range = GST_VIDEO_COLOR_RANGE_16_235;
+      break;
+    case MPP_FRAME_RANGE_JPEG:
+      input.colorimetry.range = GST_VIDEO_COLOR_RANGE_0_255;
+      break;
+    default:
+      input.colorimetry.range = GST_VIDEO_COLOR_RANGE_UNKNOWN;
+      break;
+  }
+  gst_mpp_rga_request_set_colorimetry (&color, &input, dst_vinfo);
+  dst_info.color_space_mode = color.dst_color_space_mode;
 
   if (!gst_mpp_rga_info_from_mpp_frame (&src_info, mframe))
     return GST_MPP_RGA_LAYOUT_REJECTED;
@@ -352,8 +385,14 @@ gst_mpp_rga_convert_from_mpp_frame (MppFrame * mframe,
   if (!gst_mpp_use_rga ())
     return GST_MPP_RGA_UNAVAILABLE;
 
-  return gst_mpp_rga_backend_blit (gst_mpp_rga_backend_get_default (),
-      operation, src_format, dst_format, &src_info, &dst_info);
+  {
+    GstMppRgaResult result =
+        gst_mpp_rga_backend_blit (gst_mpp_rga_backend_get_default (),
+        operation, src_format, dst_format, &src_info, &dst_info);
+    if (result == GST_MPP_RGA_SUCCESS)
+      gst_mpp_rga_count_csc_fallback (&color, stats);
+    return result;
+  }
 }
 #endif
 

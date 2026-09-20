@@ -98,7 +98,7 @@ mkdir -p "${stage_dir}/DEBIAN"
 #
 #   libgstreamer1.0-0               libgstreamer-1.0.so.0, libgstbase-1.0.so.0
 #   libgstreamer-plugins-base1.0-0  libgstvideo/allocators/pbutils-1.0.so.0
-#   libglib2.0-0                    libglib-2.0.so.0, libgobject-2.0.so.0
+#   libglib2.0-0                    libglib/gobject/gmodule-2.0.so.0
 #   libdrm2                         libdrm.so.2          (kmssrc, rkximage)
 #   libx11-6                        libX11.so.6          (rkximage)
 #   librockchip-mpp1                librockchip_mpp.so.1 (rockchipmpp)

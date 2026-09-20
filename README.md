@@ -46,13 +46,14 @@ The two required Build Check lanes deliberately use different RGA inputs:
 
 | Build environment | RGA runtime / headers | What a green result proves |
 |---|---|---|
-| Bookworm / GStreamer 1.22 / arm64 | Prior Radxa `librga2` / `librga-dev` `2.2.0-1` | Plugin source, tests and packaging work with the older toolchain and RGA pair; **not R0/R1 binary compatibility**. |
+| Bookworm / GStreamer 1.22 / arm64 | R1 header-only overlay; Radxa `librga2` / dev link `2.2.0-1` | GStreamer 1.22 portability and older-runtime fallback; **not R1 runtime support on Bookworm**. |
 | Trixie / GStreamer 1.26 / arm64 | CeraLive R1 `1.10.5+ceralive.1` | Plugin build and tests with the pinned RGA configuration; not board qualification. |
 
 Only Bookworm's dependency-install step sets `RGA_COMPAT_SUITE=bookworm`.
 The installer verifies the actual distro before using the compatibility pair;
 unknown selectors fail. With no selector, `ci/mpp-pin.env` selects R1. Neither
-lane is optional, and their failures still fail `Build Check summary`.
+lane is optional, and their failures still fail `Build Check summary`. The
+installer extracts only R1 headers on Bookworm, never installing R1 packages.
 
 The published **librga R0/R1 dependency** (`librga2-ceralive`, not this plugin
 package) requires `libc6 (>= 2.38)`. Bookworm has
@@ -176,6 +177,33 @@ board; they do not qualify hardware output or live-switch continuity.
 
 ## RGA conversion safety
 
+**C6b-colour (host implementation; hardware qualification pending):** the shared
+backend requires im2d ≥1.10.5 **headers**, resolves `improcessOpt` dynamically,
+and loads with an older runtime through seven-argument `improcess` (one warning;
+interpolation/async disabled). Encoder/decoder blits use im2d;
+`GST_MPP_RGA_LEGACY_BLIT=1` retains their one-release rollback. `rgaconvert`
+adds `interpolation=default|linear|cubic`, default `default`. Unsupported CSC
+combinations retain D29's default-matrix path, warn once per element and count
+`csc-fallback-frames`, separately from CPU copies. The
+[C6b contract](docs/RGA-MPP-INTERACTION.md#c6b-colour-host-implementation-board-qualification-pending)
+supersedes historical full-CSC/refusal wording below. Both board matrices remain
+NOT-RUN.
+
+**C6b-async is ADOPTED on both boards and ships default-off.** Depth-1
+`IM_ASYNC` pipelining cleared the ≥5 % gate on Rock 5B+ (+17.8 % at 4K,
++28.1 % at 1080p) and on Orange Pi 5 Plus (+18.4 % / +28.0 %, reproduced on a
+second run), so `rgaconvert` carries `async-depth` (uint, `0`-`1`, **default
+`0`**). The default is 0 because the gate's subject is the standalone
+`tests/board/d6-c6b-measurement.sh` im2d harness rather than the element, and
+depth 1 costs one frame of latency; a default flip needs an in-element board
+measurement. An unavailable Opt entry point refuses `async-depth=1` with a
+warning; debug CPU staging stays synchronous. A fence timeout switches future
+frames to sync but quarantines both buffers until completion; it never pushes
+or frees unfinished output. A submission refusal remains a typed failure.
+The [fence-lifetime contract](docs/ASYNC-FENCE-LIFETIME.md) records flush/event
+ordering and the bounded Rock fault test. **C6b-perf remains BLOCKED** — the handle path is refused
+by the driver on both boards, so the import cache cannot be measured at all.
+
 The MPP encoder and decoders treat librga as available only after `/dev/rga`
 answers `RGA_IOC_GET_DRVIER_VERSION` with driver version 1.2.4 or newer.
 `c_RkRgaInit()` is retained for compatibility but is not an availability test.
@@ -290,11 +318,19 @@ explicit BT.709 output still fails with librga's `Not support full csc mode
 [300]`. This is a genuine CSC capability gap, not a regression; its fix is
 deferred to convergence todo 49 after librga R1 `1.10.5+ceralive.1`.
 
-The strict d5 matrix records four PASS cells, five expected U3 chroma failures,
-and three rotation submission failures. Same-kernel A/B reproduces all three
-rotations identically on baseline: they are pre-existing, tracked separately,
-and not waived as U3. The owner authorizes `1.14.4+ceralive.3` with these explicit
-limitations; this is not a claim of complete board qualification. See the
+The corrected D24/d5 harness measures all 12 cells PASS on Orange Pi 5+, each
+at or above the unchanged 30 dB PSNR threshold. BGR software references now set
+`colorimetry=sRGB` on `rawvideoparse` itself, and DMA-BUF evidence markers are
+matched even when interleaved with `GST_DEBUG` text. The five stale expected
+chroma failures are removed; any below-threshold cell still fails the gate.
+Rock's D24 half has now been run against the same CI candidate bytes and also
+measures **all 12 cells PASS** (worst chroma 33.72 dB, `csc-BGR-to-NV12`
+38.54 dB, zero fallbacks, zero drops, zero layout rejections), so the matrix is
+green on both supported boards with the BT.709 reference and an empty
+expected-FAIL list. That is a conversion-quality result only: it opens no HDMI
+input, starts no engine session and qualifies no release.
+The earlier four-PASS/five-chroma-failure/three-rotation-failure result and the
+owner's `1.14.4+ceralive.3` disposition remain historical evidence. See the
 [board results](tests/board/DRILL-RESULTS.md#2026-09-08--u1-fixation-candidate-orange-pi-5-partial)
 for the tested packages, PSNR cells, and proof limits.
 

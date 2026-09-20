@@ -8,6 +8,8 @@ check_pair() (
   export RGA_COMPAT_SUITE="$1"
   # shellcheck source=ci/mpp-pin.env
   source "${here}/mpp-pin.env"
+  [[ "${RGA_HEADER_DEB}" == librga-ceralive-dev_1.10.5+ceralive.1_arm64.deb ]] || fail 'C6b header identity'
+  [[ "${RGA_HEADER_SHA256}" == 8dd35334ed1022ff8e64a86b3ac426abb847bf36f3ccff2746a658ccc0d8577a ]] || fail 'C6b header checksum'
   [[ "${RGA_RUNTIME_DEB}" == "$2" ]] || fail "$1 runtime"
   [[ "${RGA_DEV_DEB}" == "$3" ]] || fail "$1 headers"
   [[ "${RGA_RUNTIME_SHA256}" == "$4" ]] || fail "$1 runtime checksum"
