@@ -416,10 +416,16 @@ gst_mpp_rga_real_process_full (const GstMppRgaIm2dRequest * request,
   if (!gst_mpp_rga_status_ok (status))
     return status;
 
-  src = wrapbuffer_fd (request->src_fd, request->src_width,
+  src = request->src_handle ? wrapbuffer_handle (request->src_handle,
+      request->src_width, request->src_height, request->src_format,
+      request->src_wstride, request->src_hstride) :
+      wrapbuffer_fd (request->src_fd, request->src_width,
       request->src_height, request->src_format, request->src_wstride,
       request->src_hstride);
-  dst = wrapbuffer_fd (request->dst_fd, request->dst_width,
+  dst = request->dst_handle ? wrapbuffer_handle (request->dst_handle,
+      request->dst_width, request->dst_height, request->dst_format,
+      request->dst_wstride, request->dst_hstride) :
+      wrapbuffer_fd (request->dst_fd, request->dst_width,
       request->dst_height, request->dst_format, request->dst_wstride,
       request->dst_hstride);
   imsetColorSpace (&src, request->src_color_space_mode);

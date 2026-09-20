@@ -10,6 +10,8 @@
 #include <gst/allocators/gstdmabuf.h>
 #include <gst/video/gstvideometa.h>
 #include <gst/video/gstvideopool.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #if GST_CHECK_VERSION(1, 24, 0)
 #include <gst/video/video-info-dma.h>
@@ -67,6 +69,21 @@ typedef struct
   gsize required_size;
 } GstRgaVideoLayout;
 
+/* Count includes leased/quarantined imports, not just idle LRU entries. */
+#define GST_RGA_HANDLE_CACHE_MAX 32
+
+typedef struct
+{
+  GstMemory *memory;
+  gint fd;
+  gint owned_fd;
+  struct stat identity;
+  im_handle_param_t param;
+  rga_buffer_handle_t handle;
+  gint users;
+  gboolean retired;
+} GstRgaImport;
+
 typedef struct
 {
   gatomicrefcount refs;
@@ -75,6 +92,8 @@ typedef struct
   gint fence;
   gint64 submitted_at;
   gboolean submitted;
+  GstRgaImport *src_import;
+  GstRgaImport *dst_import;
 } GstRgaPendingFrame;
 
 struct _GstRgaConvert
@@ -109,6 +128,8 @@ struct _GstRgaConvert
   guint flush_generation;
   guint active_waiters;
   guint active_submits;
+  gboolean handle_cache_enabled;
+  GQueue imports;
 };
 
 #define GST_RGA_CONVERT_ASYNC_DEPTH_MAX 1
@@ -433,6 +454,116 @@ gst_rga_convert_get_dmabuf_fd (GstBuffer * buffer, gint * fd,
     return FALSE;
   }
   return TRUE;
+}
+
+static void
+gst_rga_import_free (GstRgaImport * entry)
+{
+  IM_STATUS status;
+
+  g_assert (g_atomic_int_get (&entry->users) == 0);
+  status = releasebuffer_handle (entry->handle);
+  if (status != IM_STATUS_SUCCESS && status != IM_STATUS_NOERROR)
+    GST_WARNING ("releasebuffer_handle(%u) failed: %d", entry->handle, status);
+  close (entry->owned_fd);
+  gst_memory_unref (entry->memory);
+  g_free (entry);
+}
+
+/* Called with self->lock. Busy entries stay bounded and cannot be reused after
+ * caps/backend invalidation, but only terminal frame destruction drops leases. */
+static void
+gst_rga_convert_clear_imports_locked (GstRgaConvert * self)
+{
+  GList *item = self->imports.head;
+
+  while (item) {
+    GList *next = item->next;
+    GstRgaImport *entry = item->data;
+
+    entry->retired = TRUE;
+    if (g_atomic_int_get (&entry->users) == 0) {
+      g_queue_delete_link (&self->imports, item);
+      gst_rga_import_free (entry);
+    }
+    item = next;
+  }
+}
+
+static void
+gst_rga_import_put (GstRgaImport * entry)
+{
+  if (entry)
+    g_atomic_int_add (&entry->users, -1);
+}
+
+/* fd is a lookup key, never an identity. A duplicate pins the inode until
+ * release, preventing inode recycling too (including DONT_CLOSE wrappers).
+ * The frame's GstBuffer reference keeps fd stable during fstat/import. */
+static GstRgaImport *
+gst_rga_convert_import_locked (GstRgaConvert * self, GstBuffer * buffer,
+    gint fd, const GstRgaVideoLayout * layout)
+{
+  struct stat identity;
+  GstRgaImport *entry;
+  GList *item, *victim = NULL;
+  im_handle_param_t param = { 0, };
+  gint owned_fd;
+  rga_buffer_handle_t handle;
+
+  if (!self->handle_cache_enabled || fstat (fd, &identity) != 0)
+    return NULL;
+  param.width = layout->wstride;
+  param.height = layout->hstride;
+  param.format = layout->rga_format;
+  for (item = self->imports.head; item; item = item->next) {
+    entry = item->data;
+    if (entry->fd == fd && !entry->retired) {
+      if (entry->identity.st_dev == identity.st_dev &&
+          entry->identity.st_ino == identity.st_ino &&
+          entry->identity.st_size == identity.st_size &&
+          entry->param.width == param.width &&
+          entry->param.height == param.height &&
+          entry->param.format == param.format) {
+        g_queue_unlink (&self->imports, item);
+        g_queue_push_tail_link (&self->imports, item);
+        g_atomic_int_inc (&entry->users);
+        return entry;
+      }
+      entry->retired = TRUE;
+    }
+    if (g_atomic_int_get (&entry->users) == 0 &&
+        (!victim || entry->retired))
+      victim = item;
+  }
+  if (self->imports.length == GST_RGA_HANDLE_CACHE_MAX ||
+      (victim && ((GstRgaImport *) victim->data)->retired)) {
+    if (!victim)
+      return NULL;
+    entry = victim->data;
+    g_queue_delete_link (&self->imports, victim);
+    gst_rga_import_free (entry);
+  }
+
+  owned_fd = fcntl (fd, F_DUPFD_CLOEXEC, 0);
+  if (owned_fd < 0)
+    return NULL;
+  handle = importbuffer_fd (owned_fd, &param);
+  if (!handle) {
+    close (owned_fd);
+    GST_DEBUG_OBJECT (self, "DMA-BUF import failed; retaining FD submission");
+    return NULL;
+  }
+  entry = g_new0 (GstRgaImport, 1);
+  entry->memory = gst_memory_ref (gst_buffer_peek_memory (buffer, 0));
+  entry->fd = fd;
+  entry->owned_fd = owned_fd;
+  entry->identity = identity;
+  entry->param = param;
+  entry->handle = handle;
+  entry->users = 1;
+  g_queue_push_tail (&self->imports, entry);
+  return entry;
 }
 
 static gboolean
@@ -777,6 +908,7 @@ gst_rga_convert_set_caps (GstBaseTransform * transform, GstCaps * input_caps,
 
   g_mutex_lock (&self->lock);
   self->in_info = input_info;
+  gst_rga_convert_clear_imports_locked (self);
   self->out_info = output_info;
   self->in_memory = input_memory;
   self->out_memory = output_memory;
@@ -996,6 +1128,8 @@ gst_rga_frame_free (gpointer data)
 
   if (frame->fence >= 0)
     close (frame->fence);
+  gst_rga_import_put (frame->src_import);
+  gst_rga_import_put (frame->dst_import);
   gst_clear_buffer (&frame->input);
   gst_clear_buffer (&frame->output);
   g_free (frame);
@@ -1489,11 +1623,14 @@ gst_rga_convert_stop (GstBaseTransform * transform)
     g_mutex_lock (&self->lock);
     empty = self->quarantine == NULL && self->active_waiters == 0 &&
         self->active_submits == 0;
+    if (empty)
+      gst_rga_convert_clear_imports_locked (self);
     if (!empty && g_get_monotonic_time () >= deadline) {
       GList *escaped = self->quarantine;
       guint waiters = self->active_waiters, submits = self->active_submits;
 
       self->quarantine = NULL;
+      gst_rga_convert_clear_imports_locked (self);
       g_mutex_unlock (&self->lock);
       gst_rga_frame_reaper_retire (self, escaped, waiters, submits);
       return TRUE;
@@ -1590,6 +1727,7 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
   gint input_fd;
   gint output_fd;
   GstFlowReturn failure_flow = GST_FLOW_NOT_NEGOTIATED;
+  GstRgaImport *src_import = NULL, *dst_import = NULL;
 
   g_mutex_lock (&self->lock);
   if (!self->have_caps) {
@@ -1693,6 +1831,25 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
   request.core_mask = core_mask;
   request.priority = priority;
 
+  g_mutex_lock (&self->lock);
+  if (self->flushing) {
+    g_mutex_unlock (&self->lock);
+    gst_clear_buffer (&input_staging);
+    gst_clear_buffer (&output_staging);
+    return GST_FLOW_FLUSHING;
+  }
+  self->active_submits++;
+  src_import = gst_rga_convert_import_locked (self, rga_input, input_fd,
+      &input_layout);
+  dst_import = gst_rga_convert_import_locked (self, rga_output, output_fd,
+      &output_layout);
+  /* librga requires both channels to use the same addressing mode. */
+  if (src_import && dst_import) {
+    request.src_handle = src_import->handle;
+    request.dst_handle = dst_import->handle;
+  }
+  g_mutex_unlock (&self->lock);
+
   /* CPU staging reads the destination on this thread as soon as the blit
    * returns, so it can only ever be submitted synchronously. */
   if (async_depth > 0 && !input_staging && !output_staging &&
@@ -1704,16 +1861,21 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
     gboolean flushed;
 
     g_mutex_lock (&self->lock);
+    frame->src_import = src_import;
+    frame->dst_import = dst_import;
+    src_import = dst_import = NULL;
     if (self->flushing) {
       g_mutex_unlock (&self->lock);
       gst_rga_frame_unref (frame);
+      g_mutex_lock (&self->lock);
+      self->active_submits--;
+      g_mutex_unlock (&self->lock);
       return GST_FLOW_FLUSHING;
     }
     generation = self->flush_generation;
     g_assert (self->pending == NULL);
     frame->submitted = FALSE;
     self->pending = gst_rga_frame_ref (frame);
-    self->active_submits++;
     g_mutex_unlock (&self->lock);
     result = gst_mpp_rga_backend_process_async (backend,
         GST_MPP_RGA_OP_CONVERT, input_layout.format, output_layout.format,
@@ -1732,6 +1894,8 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
     g_mutex_unlock (&self->lock);
     gst_rga_frame_unref (frame);
     g_mutex_lock (&self->lock);
+    if (result == GST_MPP_RGA_DEVICE_LOST)
+      gst_rga_convert_clear_imports_locked (self);
     self->active_submits--;
     g_mutex_unlock (&self->lock);
     if (fence == GST_MPP_RGA_FENCE_MISSING)
@@ -1743,6 +1907,13 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
   } else {
     result = gst_mpp_rga_backend_process (backend, GST_MPP_RGA_OP_CONVERT,
         input_layout.format, output_layout.format, &request);
+    gst_rga_import_put (src_import);
+    gst_rga_import_put (dst_import);
+    g_mutex_lock (&self->lock);
+    if (result == GST_MPP_RGA_DEVICE_LOST)
+      gst_rga_convert_clear_imports_locked (self);
+    self->active_submits--;
+    g_mutex_unlock (&self->lock);
   }
   if (result != GST_MPP_RGA_SUCCESS) {
     failure_flow = gst_mpp_rga_result_to_flow (result);
@@ -1945,6 +2116,13 @@ gst_rga_convert_change_state (GstElement * element,
 }
 
 static void
+gst_rga_convert_dispose (GObject * object)
+{
+  gst_rga_convert_stop (GST_BASE_TRANSFORM (object));
+  G_OBJECT_CLASS (parent_class)->dispose (object);
+}
+
+static void
 gst_rga_convert_finalize (GObject * object)
 {
   GstRgaConvert *self = GST_RGA_CONVERT (object);
@@ -1961,8 +2139,10 @@ gst_rga_convert_set_backend_for_test (GstRgaConvert * self,
 {
   g_return_if_fail (GST_IS_RGA_CONVERT (self));
   g_return_if_fail (backend != NULL);
+  gst_rga_convert_stop (GST_BASE_TRANSFORM (self));
   g_mutex_lock (&self->lock);
   self->backend = backend;
+  self->flushing = FALSE;
   g_mutex_unlock (&self->lock);
 }
 
@@ -1988,6 +2168,9 @@ gst_rga_convert_init (GstRgaConvert * self)
   self->rotation = GST_RGA_ROTATION_0;
   self->core_mask = GST_RGA_CORE_AUTO;
   self->async_depth = 0;
+  self->handle_cache_enabled =
+      g_strcmp0 (g_getenv ("GST_MPP_RGA_HANDLE_CACHE"), "1") == 0;
+  g_queue_init (&self->imports);
   gst_mpp_conversion_stats_attach (G_OBJECT (self));
   gst_base_transform_set_in_place (GST_BASE_TRANSFORM (self), FALSE);
   gst_base_transform_set_passthrough (GST_BASE_TRANSFORM (self), FALSE);
@@ -2008,6 +2191,7 @@ gst_rga_convert_class_init (GstRgaConvertClass * klass)
   gobject_class->get_property = GST_DEBUG_FUNCPTR
       (gst_rga_convert_get_property);
   gobject_class->finalize = GST_DEBUG_FUNCPTR (gst_rga_convert_finalize);
+  gobject_class->dispose = GST_DEBUG_FUNCPTR (gst_rga_convert_dispose);
   element_class->change_state = GST_DEBUG_FUNCPTR
       (gst_rga_convert_change_state);
 

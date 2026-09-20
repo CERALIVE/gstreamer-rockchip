@@ -280,10 +280,100 @@ pixels or silicon. Do not APT-swap libraries on sysext-backed `/usr`: use the
 separately approved restoration procedure, or label process-local selection as
 isolated evidence, not an installed-runtime restoration.
 
-### C6b-perf: NOT-ADOPTABLE at this pin — the handle path is refused by the driver
+### C6b-perf: default-off import cache, hardware validation pending
 
-**Verdict: BLOCKED. No DMA-BUF handle import cache is implemented, and none can
-be while librga R1 and the current island driver disagree about `v_addr`.**
+**Implementation GO; in-element adoption NOT YET QUALIFIED.** librga
+[#25](https://github.com/CERALIVE/librga/pull/25), merged as `428dd291`, fixes
+the handle-plane request defect described in the historical finding below.
+Its Rock 5B+ process-local, real-hardware measurement changed 4K NV16→NV12
+from 4820.58 to 3238.31 µs/frame (207.4→308.8 fps, **+48.9%**) and 1080p
+from 1333.51 to 799.75 µs/frame (749.9→1250.4 fps, **+66.7%**), with **0/440**
+handle refusals at each geometry. This is direct im2d evidence, not a plugin
+cache benchmark or Orange Pi qualification. The fixed library is on main;
+the released `1.10.5+ceralive.1` pin still predates it.
+
+`GST_MPP_RGA_HANDLE_CACHE=1` is sampled at element construction. Unset, `0`,
+or any other value leaves existing FD submission unchanged. The cache is
+converter-local; it does not affect encoder/decoder blits or the compositor.
+
+Ownership and failure contract:
+
+- The fd number is a lookup key, **not identity**. Every lookup compares
+  `fstat` device/inode/size plus import width-stride, height-stride and format.
+  A `F_DUPFD_CLOEXEC` duplicate pins the original inode until release, so closing
+  or replacing a wrapper's fd cannot recycle both its number and inode into
+  a false hit. The current input/output GstBuffers retain the submitted memory.
+- Each entry also holds a strong GstMemory reference. No weak callbacks are
+  installed, and no cache-held GstBuffer prevents pool recycling. Host tests
+  actually acquire/release a GstVideoBufferPool buffer and assert handle reuse.
+- LRU order updates on a hit. The hard ceiling is **32 live imports per
+  converter**, including leased or retired entries. This deliberately replaces
+  the earlier proposed “pool size + 4”: upstream and downstream pools are
+  independent and can declare unlimited maximums, so neither supplies a reliable
+  finite total. Large pools may churn; measuring that cost is part of adoption.
+- Leases cover synchronous calls and live pending/ready/quarantine frames.
+  Eviction skips every leased entry. Caps changes retire old imports, but a
+  retired in-flight handle is released only after its frame reaches terminal
+  completion. Device loss retires entries; stop/restart and backend-test reset
+  clear them. Stop/dispose waits for all frame owners before final cleanup.
+- Failed fstat/dup/import or a cache full of leased entries falls back to FD
+  addressing for **both channels**, not a mixed handle/FD request. A submission
+  error is still the existing typed error, never an unsafe retry. The sole
+  release site reports release errors and never blindly retries a handle ID.
+- Cache code lives only in `gstrgaconvert.c`. The shared backend's two optional
+  borrowed handle fields and conditional wrappers preserve its existing CSC,
+  interpolation, status, health and sync/async submission logic. Zero handles
+  preserve every other caller's path.
+
+Host regressions use the real element vfuncs, real GstMemory/pools, real file
+descriptors, `dup2`, byte-distinguishable backing objects and controlled fences.
+The import/release seam is simulated; these tests do not claim DMA or RGA pixel
+execution. They assert 10,000-call reuse, changed-fd and same-fd/new-inode
+imports, changed size/layout, LRU bounds, import failure, default-off behavior,
+stop/restart/dispose cleanup, concurrent-submission leases and quarantine
+survival across eviction/caps changes. Import/release equality and live-handle
+counts are assertions, not log inference.
+
+Host verification (2026-09-20, no board access): both arm64 Debian container
+lanes built all four plugins, passed all 16 Meson suites (40 converter cases,
+including eight new cache cases), the standalone MPI interposer's five tests
+and eight decoded mock-output scenarios, GLIBC-floor and MPP-ABI checks,
+suite/provider regressions and real package contracts. Disabling the cache
+made both reuse and replaced-fd assertions fail before the enabled run passed.
+All four changed C/header files passed clangd diagnostics with native header
+paths. These are regular-file/fence fixtures, not hardware evidence.
+
+The unchanged librga `428dd29` was separately built and tested in both Debian
+container lanes: 46 passed, two explicit `LIBRGA_TEST_QEMU_USER=1` skips
+(`shim-contract` closed-fd ioctl and `board-timing`), zero failed. Initial
+30-second harness timeouts under concurrent emulation are retained as failed
+runs; completing the suite required `--timeout-multiplier 4 --num-processes 2`,
+not changed assertions. Trixie package/staged contracts and ABI floors passed.
+This is not a claim to have rerun librga's separate analyzer, ABI-comparison,
+reproducibility or sanitizer workflow jobs.
+
+**Before merge, once the RSS investigations release the boards:** first use
+Rock 5B+ (the measured baseline), or Orange Pi 5+ if it becomes available first,
+with process-isolated fixed librga #25 and this exact plugin artifact. Re-run
+`tests/board/d6-c6b-measurement.sh` at 3840×2160 and 1920×1080 NV16→NV12,
+including the RGBA and zero-refusal controls. Then measure the **actual
+rgaconvert** path with `GST_MPP_RGA_HANDLE_CACHE=0` versus `=1`, bracketed
+off→on→off, using real DMA-BUF pool-backed input (the d5
+`dmabuf-rgaconvert.c` helper is the starting point, not plain videotestsrc).
+Record per-frame conversion time and sustained 4K60 source-rate cadence with
+latency tracing, actual import counts and identical decoded output checks;
+repeat with `async-depth=0` and `1`, pool churn and stop/start. Require the
+≥5% improvement gate without frame/counter regressions. Repeat on the other
+board; run d2 (300/300 both codecs), d4, d5 and the existing
+`c6b-fence-lifetime.c` drill with caching enabled, verifying no outstanding
+imports after teardown. d6 alone cannot validate a cache it never instantiates.
+No board is contacted by the implementation/host-test work, no package pin or
+MNH-27 boundary is changed, and the PR stays draft pending those receipts.
+
+#### Historical pre-fix finding (released R1 bytes remain affected)
+
+**Historical verdict: BLOCKED.** At this measurement no cache existed; the
+released librga R1 and island driver disagreed about `v_addr`.
 
 The proposal was to `importbuffer_fd()` once per pool buffer and describe each
 frame with `wrapbuffer_handle()`, so the per-job DMA-BUF attach/map is paid once
