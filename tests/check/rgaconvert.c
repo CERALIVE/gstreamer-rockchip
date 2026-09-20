@@ -25,6 +25,61 @@ static gint submitted_interp;
 static gint submitted_usage;
 static im_rect submitted_srect;
 static guint legacy_calls;
+static GMutex import_lock;
+static gint imported_fds[32768];
+static guint import_calls, release_calls, outstanding_imports, peak_imports;
+static guint failed_imports;
+
+rga_buffer_handle_t
+importbuffer_fd (int fd, im_handle_param_t * param)
+{
+  guint handle;
+
+  fail_unless (param->width > 0 && param->height > 0);
+  g_mutex_lock (&import_lock);
+  if (failed_imports) {
+    failed_imports--;
+    g_mutex_unlock (&import_lock);
+    return 0;
+  }
+  handle = ++import_calls;
+  fail_unless (handle < G_N_ELEMENTS (imported_fds));
+  imported_fds[handle] = dup (fd);
+  fail_unless (imported_fds[handle] >= 0);
+  outstanding_imports++;
+  peak_imports = MAX (peak_imports, outstanding_imports);
+  g_mutex_unlock (&import_lock);
+  return handle;
+}
+
+IM_STATUS
+releasebuffer_handle (rga_buffer_handle_t handle)
+{
+  g_mutex_lock (&import_lock);
+  fail_unless (handle > 0 && handle <= import_calls);
+  fail_unless (imported_fds[handle] >= 0, "double release: %u", handle);
+  fail_unless_equals_int (close (imported_fds[handle]), 0);
+  imported_fds[handle] = -1;
+  release_calls++;
+  outstanding_imports--;
+  g_mutex_unlock (&import_lock);
+  return IM_STATUS_SUCCESS;
+}
+
+rga_buffer_t
+wrapbuffer_handle_t (rga_buffer_handle_t handle, int width, int height,
+    int wstride, int hstride, int format)
+{
+  rga_buffer_t buffer = { 0, };
+
+  buffer.handle = handle;
+  buffer.width = width;
+  buffer.height = height;
+  buffer.wstride = wstride;
+  buffer.hstride = hstride;
+  buffer.format = format;
+  return buffer;
+}
 
 static IM_STATUS
 fake_process_opt (rga_buffer_t src, rga_buffer_t dst, rga_buffer_t pat,
@@ -88,6 +143,17 @@ improcess (rga_buffer_t src, rga_buffer_t dst, rga_buffer_t pat,
   submitted_calls++;
   submitted_usage = usage;
   submitted_srect = src_rect;
+  if (src.handle || dst.handle) {
+    guint8 value;
+
+    fail_unless (src.handle && dst.handle);
+    g_mutex_lock (&import_lock);
+    fail_unless (imported_fds[src.handle] >= 0);
+    fail_unless (imported_fds[dst.handle] >= 0);
+    fail_unless_equals_int (pread (imported_fds[src.handle], &value, 1, 0), 1);
+    fail_unless_equals_int (pwrite (imported_fds[dst.handle], &value, 1, 0), 1);
+    g_mutex_unlock (&import_lock);
+  }
   (void) pat;
   (void) src_rect;
   (void) dst_rect;
@@ -367,6 +433,7 @@ static void
 clear_cpu_copy_env (void)
 {
   g_unsetenv ("GST_MPP_ALLOW_CPU_COPY");
+  g_unsetenv ("GST_MPP_RGA_HANDLE_CACHE");
 }
 
 GST_START_TEST (test_caps_and_property_contract)
@@ -1780,12 +1847,382 @@ GST_START_TEST (test_backend_async_capability_and_fence_ownership)
 
 GST_END_TEST;
 
+static TestConvert
+cache_convert_new (FakeRga * fake)
+{
+  TestConvert test;
+
+  g_setenv ("GST_MPP_RGA_HANDLE_CACHE", "1", TRUE);
+  test = test_convert_new (fake);
+  set_convert_caps (test.convert,
+      "video/x-raw(memory:DMABuf),format=NV16,width=320,height=240",
+      "video/x-raw(memory:DMABuf),format=NV12,width=320,height=240");
+  return test;
+}
+
+static void
+cache_transform (TestConvert * test, GstBuffer * input, GstBuffer * output)
+{
+  fail_unless_equals_int (GST_BASE_TRANSFORM_GET_CLASS (test->convert)->transform
+      (GST_BASE_TRANSFORM (test->convert), input, output), GST_FLOW_OK);
+}
+
+GST_START_TEST (test_cache_reuses_handles_and_dispose_releases_every_import)
+{
+  FakeRga fake = { .available = TRUE, .submit_im2d = TRUE };
+  TestConvert test = cache_convert_new (&fake);
+  GstBuffer *input = new_nv16_buffer (TRUE, 320, 240, 320, 240);
+  GstBuffer *output = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+  GstMemory *memory = gst_buffer_peek_memory (input, 0);
+  guint handle;
+
+  cache_transform (&test, input, output);
+  handle = submitted_src.handle;
+  fail_unless (handle != 0);
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (memory), 2);
+  for (guint i = 0; i < 10000; i++) {
+    cache_transform (&test, input, output);
+    fail_unless_equals_int (submitted_src.handle, handle);
+  }
+  fail_unless_equals_int (import_calls, 2);
+  fail_unless_equals_int (release_calls, 0);
+  g_object_run_dispose (G_OBJECT (test.convert));
+  fail_unless_equals_int (outstanding_imports, 0);
+  fail_unless_equals_int (release_calls, import_calls);
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (memory), 1);
+  test_convert_clear (&test);
+  fail_unless_equals_int (release_calls, 2);
+  gst_buffer_unref (input);
+  gst_buffer_unref (output);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_cache_new_fd_and_recycled_fd_import_current_bytes)
+{
+  FakeRga fake = { .available = TRUE, .submit_im2d = TRUE };
+  TestConvert test = cache_convert_new (&fake);
+  GstBuffer *a = new_nv16_buffer (TRUE, 320, 240, 320, 240);
+  GstBuffer *b = new_nv16_buffer (TRUE, 320, 240, 320, 240);
+  GstBuffer *output = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+  gint a_fd = gst_dmabuf_memory_get_fd (gst_buffer_peek_memory (a, 0));
+  gint b_fd = gst_dmabuf_memory_get_fd (gst_buffer_peek_memory (b, 0));
+  gint out_fd = gst_dmabuf_memory_get_fd (gst_buffer_peek_memory (output, 0));
+  guint a_handle, b_handle;
+  guint8 value = 0x37;
+
+  fail_unless_equals_int (pwrite (a_fd, &value, 1, 0), 1);
+  cache_transform (&test, a, output);
+  a_handle = submitted_src.handle;
+  value = 0xa9;
+  fail_unless_equals_int (pwrite (b_fd, &value, 1, 0), 1);
+  cache_transform (&test, b, output);
+  b_handle = submitted_src.handle;
+  fail_unless (b_handle != a_handle);
+  /* Same fd AND same GstMemory wrapper, different live inode, same size. */
+  fail_unless_equals_int (dup2 (b_fd, a_fd), a_fd);
+  cache_transform (&test, a, output);
+  fail_unless (submitted_src.handle != a_handle);
+  fail_unless (submitted_src.handle != b_handle);
+  fail_unless_equals_int (pread (out_fd, &value, 1, 0), 1);
+  fail_unless_equals_int (value, 0xa9);
+  fail_unless_equals_int (import_calls, 4);
+  fail_unless_equals_int (release_calls, 1);
+  test_convert_clear (&test);
+  fail_unless_equals_int (outstanding_imports, 0);
+  gst_buffer_unref (a);
+  gst_buffer_unref (b);
+  gst_buffer_unref (output);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_cache_lru_bound_and_import_failure_fd_fallback)
+{
+  FakeRga fake = { .available = TRUE, .submit_im2d = TRUE };
+  TestConvert test = cache_convert_new (&fake);
+  GstBuffer *inputs[40];
+  GstBuffer *output = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+  guint first, recent;
+
+  for (guint i = 0; i < G_N_ELEMENTS (inputs); i++)
+    inputs[i] = new_nv16_buffer (TRUE, 320, 240, 320, 240);
+  cache_transform (&test, inputs[0], output);
+  first = submitted_src.handle;
+  for (guint i = 1; i < G_N_ELEMENTS (inputs); i++)
+    cache_transform (&test, inputs[i], output);
+  recent = submitted_src.handle;
+  fail_unless_equals_int (peak_imports, 32);
+  fail_unless_equals_int (outstanding_imports, 32);
+  cache_transform (&test, inputs[39], output);
+  fail_unless_equals_int (submitted_src.handle, recent);
+  cache_transform (&test, inputs[0], output);
+  fail_unless (submitted_src.handle != first);
+  failed_imports = 1;
+  cache_transform (&test, inputs[1], output);
+  fail_unless_equals_int (submitted_src.handle, 0);
+  fail_unless_equals_int (submitted_dst.handle, 0);
+  cache_transform (&test, inputs[1], output);
+  fail_unless (submitted_src.handle != 0);
+  test_convert_clear (&test);
+  fail_unless_equals_int (outstanding_imports, 0);
+  fail_unless_equals_int (import_calls, release_calls);
+  for (guint i = 0; i < G_N_ELEMENTS (inputs); i++) {
+    fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE
+        (gst_buffer_peek_memory (inputs[i], 0)), 1);
+    gst_buffer_unref (inputs[i]);
+  }
+  gst_buffer_unref (output);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_cache_default_off_and_stop_restart_reimport)
+{
+  FakeRga fake = { .available = TRUE, .submit_im2d = TRUE };
+  TestConvert test = test_convert_new (&fake);
+  GstBuffer *input = new_nv16_buffer (TRUE, 320, 240, 320, 240);
+  GstBuffer *output = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+  GstBaseTransformClass *klass;
+  guint handle;
+
+  set_convert_caps (test.convert,
+      "video/x-raw(memory:DMABuf),format=NV16,width=320,height=240",
+      "video/x-raw(memory:DMABuf),format=NV12,width=320,height=240");
+  cache_transform (&test, input, output);
+  fail_unless_equals_int (import_calls, 0);
+  fail_unless_equals_int (submitted_src.handle, 0);
+  fail_unless_equals_int (submitted_dst.handle, 0);
+  test_convert_clear (&test);
+  test = cache_convert_new (&fake);
+  klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+  cache_transform (&test, input, output);
+  handle = submitted_src.handle;
+  fail_unless (klass->stop (GST_BASE_TRANSFORM (test.convert)));
+  fail_unless_equals_int (outstanding_imports, 0);
+  fail_unless (klass->start (GST_BASE_TRANSFORM (test.convert)));
+  cache_transform (&test, input, output);
+  fail_unless (submitted_src.handle != handle);
+  test_convert_clear (&test);
+  fail_unless_equals_int (import_calls, release_calls);
+  gst_buffer_unref (input);
+  gst_buffer_unref (output);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_cache_real_pool_recycles_without_reimport)
+{
+  FakeRga fake = { .available = TRUE, .submit_im2d = TRUE };
+  TestConvert test = cache_convert_new (&fake);
+  GstBufferPool *pool = gst_video_buffer_pool_new ();
+  GstAllocator *allocator = g_object_new (test_dma_allocator_get_type (), NULL);
+  GstStructure *config = gst_buffer_pool_get_config (pool);
+  GstCaps *caps = caps_from_string
+      ("video/x-raw,format=NV16,width=320,height=240");
+  GstBuffer *output = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+  guint first = 0;
+
+  gst_buffer_pool_config_set_params (config, caps, 320 * 240 * 2, 1, 1);
+  gst_buffer_pool_config_set_allocator (config, allocator, NULL);
+  fail_unless (gst_buffer_pool_set_config (pool, config));
+  fail_unless (gst_buffer_pool_set_active (pool, TRUE));
+  for (guint i = 0; i < 20; i++) {
+    GstBuffer *input;
+    fail_unless_equals_int (gst_buffer_pool_acquire_buffer (pool, &input, NULL),
+        GST_FLOW_OK);
+    cache_transform (&test, input, output);
+    if (!first)
+      first = submitted_src.handle;
+    fail_unless_equals_int (submitted_src.handle, first);
+    gst_buffer_unref (input);
+  }
+  fail_unless_equals_int (import_calls, 2);
+  test_convert_clear (&test);
+  fail_unless_equals_int (outstanding_imports, 0);
+  fail_unless (gst_buffer_pool_set_active (pool, FALSE));
+  gst_object_unref (pool);
+  gst_object_unref (allocator);
+  gst_caps_unref (caps);
+  gst_buffer_unref (output);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_cache_size_and_layout_changes_invalidate_import)
+{
+  FakeRga fake = { .available = TRUE, .submit_im2d = TRUE };
+  TestConvert test = cache_convert_new (&fake);
+  GstBuffer *input = new_nv16_buffer (TRUE, 320, 240, 320, 256);
+  GstBuffer *output = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+  GstVideoMeta *meta = gst_buffer_get_video_meta (input);
+  gint fd = gst_dmabuf_memory_get_fd (gst_buffer_peek_memory (input, 0));
+  guint handle;
+
+  cache_transform (&test, input, output);
+  handle = submitted_src.handle;
+  meta->offset[1] = 320 * 240;
+  cache_transform (&test, input, output);
+  fail_unless (submitted_src.handle != handle);
+  handle = submitted_src.handle;
+  fail_unless_equals_int (ftruncate (fd, 320 * 256 * 2 + 4096), 0);
+  cache_transform (&test, input, output);
+  fail_unless (submitted_src.handle != handle);
+  fail_unless_equals_int (import_calls, 4);
+  test_convert_clear (&test);
+  fail_unless_equals_int (outstanding_imports, 0);
+  gst_buffer_unref (input);
+  gst_buffer_unref (output);
+}
+GST_END_TEST;
+
+GST_START_TEST (test_cache_quarantined_imports_survive_eviction_and_caps_change)
+{
+  FakeRga fake = { .available = TRUE, .process_result = IM_STATUS_SUCCESS,
+    .async_supported = TRUE, .async_result = IM_STATUS_SUCCESS,
+    .unsignalled = TRUE };
+  TestConvert test = cache_convert_new (&fake);
+  GstBuffer *input = new_nv16_buffer (TRUE, 320, 240, 320, 240);
+  GstBuffer *output = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (test.convert);
+  guint src, dst;
+  guint64 signal = 1;
+
+  g_object_set (test.convert, "async-depth", 1, NULL);
+  cache_transform (&test, input, output);
+  src = fake.last_request.src_handle;
+  dst = fake.last_request.dst_handle;
+  fail_unless (src && dst);
+  klass->sink_event (GST_BASE_TRANSFORM (test.convert), gst_event_new_flush_start ());
+  klass->sink_event (GST_BASE_TRANSFORM (test.convert), gst_event_new_flush_stop (TRUE));
+  g_object_set (test.convert, "async-depth", 0, NULL);
+  set_convert_caps (test.convert,
+      "video/x-raw(memory:DMABuf),format=NV16,width=320,height=240",
+      "video/x-raw(memory:DMABuf),format=NV12,width=320,height=240");
+  for (guint i = 0; i < 50; i++) {
+    GstBuffer *next = new_nv16_buffer (TRUE, 320, 240, 320, 240);
+    GstBuffer *out = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+    cache_transform (&test, next, out);
+    gst_buffer_unref (next);
+    gst_buffer_unref (out);
+    fail_unless (imported_fds[src] >= 0 && imported_fds[dst] >= 0);
+    fail_unless (outstanding_imports <= 32);
+  }
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (input), 2);
+  fail_unless_equals_int (write (fake.fences[0], &signal, sizeof signal), sizeof signal);
+  fail_unless (klass->stop (GST_BASE_TRANSFORM (test.convert)));
+  fail_unless_equals_int (outstanding_imports, 0);
+  fail_unless_equals_int (import_calls, release_calls);
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (input), 1);
+  fail_unless_fences_closed (&fake);
+  test_convert_clear (&test);
+  gst_buffer_unref (input);
+  gst_buffer_unref (output);
+}
+GST_END_TEST;
+
+typedef struct
+{
+  GMutex lock;
+  GCond cond;
+  gboolean entered, resume;
+  guint handle;
+  TestConvert *test;
+  GstBuffer *input, *output;
+} CacheSubmit;
+
+static gint
+held_cache_process (const GstMppRgaIm2dRequest * request, gpointer data)
+{
+  CacheSubmit *held = data;
+
+  g_mutex_lock (&held->lock);
+  if (!held->entered) {
+    held->entered = TRUE;
+    held->handle = request->src_handle;
+    g_cond_broadcast (&held->cond);
+    while (!held->resume)
+      g_cond_wait (&held->cond, &held->lock);
+    g_mutex_lock (&import_lock);
+    fail_unless (imported_fds[held->handle] >= 0);
+    g_mutex_unlock (&import_lock);
+  }
+  g_mutex_unlock (&held->lock);
+  return IM_STATUS_SUCCESS;
+}
+
+static gboolean
+cache_probe (gpointer data, GstMppRgaDriverVersion * version, gint * error)
+{
+  FakeRga fake = { .available = TRUE };
+  (void) data;
+  return fake_probe (&fake, version, error);
+}
+
+static gpointer
+cache_submit_thread (gpointer data)
+{
+  CacheSubmit *held = data;
+  cache_transform (held->test, held->input, held->output);
+  return NULL;
+}
+
+GST_START_TEST (test_cache_eviction_during_concurrent_submission_keeps_lease)
+{
+  FakeRga fake = { .available = TRUE };
+  TestConvert test = cache_convert_new (&fake);
+  CacheSubmit held = { .test = &test };
+  GstMppRgaBackendOps ops = fake_ops;
+  GThread *thread;
+
+  ops.probe = cache_probe;
+  ops.process = held_cache_process;
+  gst_mpp_rga_backend_free (test.backend);
+  test.backend = gst_mpp_rga_backend_new (&ops, &held);
+  gst_rga_convert_set_backend_for_test (test.convert, test.backend);
+  g_mutex_init (&held.lock);
+  g_cond_init (&held.cond);
+  held.input = new_nv16_buffer (TRUE, 320, 240, 320, 240);
+  held.output = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+  thread = g_thread_new ("held-cache-submit", cache_submit_thread, &held);
+  g_mutex_lock (&held.lock);
+  while (!held.entered)
+    g_cond_wait (&held.cond, &held.lock);
+  g_mutex_unlock (&held.lock);
+  for (guint i = 0; i < 40; i++) {
+    GstBuffer *input = new_nv16_buffer (TRUE, 320, 240, 320, 240);
+    GstBuffer *output = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+    cache_transform (&test, input, output);
+    gst_buffer_unref (input);
+    gst_buffer_unref (output);
+  }
+  fail_unless (held.handle != 0);
+  fail_unless (imported_fds[held.handle] >= 0);
+  fail_unless_equals_int (peak_imports, 32);
+  g_mutex_lock (&held.lock);
+  held.resume = TRUE;
+  g_cond_broadcast (&held.cond);
+  g_mutex_unlock (&held.lock);
+  g_thread_join (thread);
+  test_convert_clear (&test);
+  fail_unless_equals_int (import_calls, release_calls);
+  fail_unless_equals_int (outstanding_imports, 0);
+  gst_buffer_unref (held.input);
+  gst_buffer_unref (held.output);
+  g_mutex_clear (&held.lock);
+  g_cond_clear (&held.cond);
+}
+GST_END_TEST;
+
 static Suite *
 rgaconvert_suite (void)
 {
   Suite *suite = suite_create ("rgaconvert");
   TCase *test_case = tcase_create ("element");
   tcase_add_test (test_case, test_interpolation_and_seven_argument_fallback);
+  tcase_add_test (test_case, test_cache_reuses_handles_and_dispose_releases_every_import);
+  tcase_add_test (test_case, test_cache_new_fd_and_recycled_fd_import_current_bytes);
+  tcase_add_test (test_case, test_cache_lru_bound_and_import_failure_fd_fallback);
+  tcase_add_test (test_case, test_cache_default_off_and_stop_restart_reimport);
+  tcase_add_test (test_case, test_cache_real_pool_recycles_without_reimport);
+  tcase_add_test (test_case, test_cache_size_and_layout_changes_invalidate_import);
+  tcase_add_test (test_case, test_cache_eviction_during_concurrent_submission_keeps_lease);
+  tcase_add_test (test_case, test_cache_quarantined_imports_survive_eviction_and_caps_change);
   tcase_add_test (test_case, test_mpp_blit_uses_im2d_and_explicit_rollback);
 
   tcase_set_timeout (test_case, 15);

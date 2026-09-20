@@ -83,6 +83,10 @@ typedef struct
   GstVideoColorimetry colorspace_out;
   gboolean csc_fallback;
   gint interp;
+  /* Borrowed for this submission; rgaconvert owns imports and fence lifetime.
+   * Zero preserves the existing FD path for every other caller. */
+  guint src_handle;
+  guint dst_handle;
 } GstMppRgaIm2dRequest;
 
 typedef struct
