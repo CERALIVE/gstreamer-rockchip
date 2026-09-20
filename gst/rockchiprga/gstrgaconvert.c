@@ -69,6 +69,7 @@ typedef struct
 
 typedef struct
 {
+  gatomicrefcount refs;
   GstBuffer *input;
   GstBuffer *output;
   gint fence;
@@ -112,6 +113,9 @@ struct _GstRgaConvert
 
 #define GST_RGA_CONVERT_ASYNC_DEPTH_MAX 1
 #define GST_RGA_CONVERT_FENCE_TIMEOUT_MS 100
+#define GST_RGA_CONVERT_STOP_TIMEOUT_US (5 * G_USEC_PER_SEC)
+#define GST_RGA_REAPER_POLL_US (100 * 1000)
+#define GST_RGA_REAPER_REPORT_US (30 * G_USEC_PER_SEC)
 
 #define gst_rga_convert_parent_class parent_class
 G_DEFINE_TYPE (GstRgaConvert, gst_rga_convert, GST_TYPE_BASE_TRANSFORM);
@@ -974,8 +978,9 @@ static GstFlowReturn gst_rga_convert_transform (GstBaseTransform * transform,
 static GstRgaPendingFrame *
 gst_rga_frame_new (GstBuffer * input, GstBuffer * output, gint fence)
 {
-  GstRgaPendingFrame *frame = g_atomic_rc_box_new0 (GstRgaPendingFrame);
+  GstRgaPendingFrame *frame = g_new0 (GstRgaPendingFrame, 1);
 
+  g_atomic_ref_count_init (&frame->refs);
   frame->input = input ? gst_buffer_ref (input) : NULL;
   frame->output = output;
   frame->fence = fence;
@@ -993,12 +998,138 @@ gst_rga_frame_free (gpointer data)
     close (frame->fence);
   gst_clear_buffer (&frame->input);
   gst_clear_buffer (&frame->output);
+  g_free (frame);
+}
+
+static GstRgaPendingFrame *
+gst_rga_frame_ref (GstRgaPendingFrame * frame)
+{
+  g_atomic_ref_count_inc (&frame->refs);
+  return frame;
 }
 
 static void
 gst_rga_frame_unref (GstRgaPendingFrame * frame)
 {
-  g_atomic_rc_box_release_full (frame, gst_rga_frame_free);
+  if (g_atomic_ref_count_dec (&frame->refs))
+    gst_rga_frame_free (frame);
+}
+
+/* Like cerastream-transport/src/{rist.rs,srt_transport.rs}: retire an owning
+ * reference under the owner's lock, destroy on a reaper only when it is sole
+ * owner. Here sole ownership ALSO needs a terminal DMA fence. No element or
+ * backend pointer escapes. GStreamer loads plugin modules resident; this lazy
+ * process-lifetime worker is never joined by element stop/finalize. */
+static struct
+{
+  GMutex lock;
+  GCond wake;
+  GList *incoming;
+  guint64 escapes;
+  guint64 outstanding;
+  gboolean started;
+} frame_reaper;
+
+static gpointer
+gst_rga_frame_reaper_thread (gpointer unused)
+{
+  GList *frames = NULL;
+  gint64 next_report = g_get_monotonic_time () + GST_RGA_REAPER_REPORT_US;
+
+  (void) unused;
+  for (;;) {
+    GList *item;
+    guint reaped = 0;
+    guint64 escapes, outstanding;
+
+    g_mutex_lock (&frame_reaper.lock);
+    if (!frames) {
+      while (!frame_reaper.incoming)
+        g_cond_wait (&frame_reaper.wake, &frame_reaper.lock);
+      next_report = g_get_monotonic_time () + GST_RGA_REAPER_REPORT_US;
+    } else if (!frame_reaper.incoming) {
+      g_cond_wait_until (&frame_reaper.wake, &frame_reaper.lock,
+          g_get_monotonic_time () + GST_RGA_REAPER_POLL_US);
+    }
+    frames = g_list_concat (frames, frame_reaper.incoming);
+    frame_reaper.incoming = NULL;
+    g_mutex_unlock (&frame_reaper.lock);
+
+    /* Poll every record, not just the oldest: a permanently wedged fence must
+     * not hold up reclamation of unrelated completed frames. No unref under
+     * the queue lock: buffer/pool finalizers can call back into this plugin. */
+    for (item = frames; item;) {
+      GList *next = item->next;
+      GstRgaPendingFrame *frame = item->data;
+
+      /* Once sole-owned, no submitter/poller can acquire another reference or
+       * mutate these fields. The atomic refcount publishes their final writes,
+       * including a fence returned by a submission that outlived stop(). */
+      if (g_atomic_ref_count_compare (&frame->refs, 1) && frame->submitted &&
+          gst_mpp_rga_fence_status (frame->fence, 0) !=
+          GST_MPP_RGA_FENCE_PENDING) {
+        frames = g_list_delete_link (frames, item);
+        gst_rga_frame_unref (frame);
+        reaped++;
+      }
+      item = next;
+    }
+    g_mutex_lock (&frame_reaper.lock);
+    frame_reaper.outstanding -= reaped;
+    outstanding = frame_reaper.outstanding;
+    escapes = frame_reaper.escapes;
+    g_mutex_unlock (&frame_reaper.lock);
+    if (reaped)
+      GST_WARNING ("RGA quarantine reaper: reaped-frames=%u "
+          "quarantine-escapes=%" G_GUINT64_FORMAT " outstanding-frames=%"
+          G_GUINT64_FORMAT, reaped, escapes, outstanding);
+    if (outstanding && g_get_monotonic_time () >= next_report) {
+      GST_WARNING ("RGA quarantine still retains DMA buffers: "
+          "quarantine-escapes=%" G_GUINT64_FORMAT " outstanding-frames=%"
+          G_GUINT64_FORMAT "; hardware completion is not proven",
+          escapes, outstanding);
+      next_report = g_get_monotonic_time () + GST_RGA_REAPER_REPORT_US;
+    }
+  }
+  return NULL;
+}
+
+static void
+gst_rga_frame_reaper_retire (GstRgaConvert * self, GList * frames,
+    guint waiters, guint submits)
+{
+  guint count = g_list_length (frames);
+  guint64 escapes, outstanding;
+  GError *error = NULL;
+
+  g_mutex_lock (&frame_reaper.lock);
+  escapes = ++frame_reaper.escapes;
+  outstanding = frame_reaper.outstanding += count;
+  frame_reaper.incoming = g_list_concat (frame_reaper.incoming, frames);
+  if (!frame_reaper.started) {
+    GThread *thread = g_thread_try_new ("rga-quarantine",
+        gst_rga_frame_reaper_thread, NULL, &error);
+
+    if (thread) {
+      frame_reaper.started = TRUE;
+      g_thread_unref (thread);
+    }
+  }
+  g_cond_signal (&frame_reaper.wake);
+  g_mutex_unlock (&frame_reaper.lock);
+  GST_ELEMENT_ERROR (self, RESOURCE, FAILED,
+      ("RGA stop exceeded 5 s; unresolved DMA ownership escaped to quarantine"),
+      ("quarantine-escapes=%" G_GUINT64_FORMAT " escaped-frames=%u "
+          "outstanding-frames=%" G_GUINT64_FORMAT " active-waiters=%u "
+          "active-submits=%u; buffers/fences retained until terminal completion",
+          escapes, count, outstanding, waiters, submits));
+  if (error) {
+    GST_ERROR ("RGA quarantine reaper could not start: %s; "
+        "quarantine-escapes=%" G_GUINT64_FORMAT " outstanding-frames=%"
+        G_GUINT64_FORMAT "; buffers retained, next escape retries thread creation",
+        error->message, escapes, outstanding);
+    g_error_free (error);
+  }
 }
 
 /* lock owns the state; a poller's record reference keeps its fd alive even
@@ -1027,7 +1158,7 @@ gst_rga_convert_reap (GstRgaConvert * self, gboolean stopping)
   for (item = self->quarantine; item; item = item->next) {
     GstRgaPendingFrame *frame = item->data;
 
-    snapshot = g_list_prepend (snapshot, g_atomic_rc_box_acquire (frame));
+    snapshot = g_list_prepend (snapshot, gst_rga_frame_ref (frame));
   }
   g_mutex_unlock (&self->lock);
 
@@ -1085,7 +1216,7 @@ gst_rga_convert_take_ready (GstRgaConvert * self, GstBuffer ** output)
   g_mutex_lock (&self->lock);
   frame = self->ready;
   if (frame) {
-    g_atomic_rc_box_acquire (frame);
+    gst_rga_frame_ref (frame);
     self->active_waiters++;
   }
   g_mutex_unlock (&self->lock);
@@ -1182,12 +1313,14 @@ GstFlowReturn
 gst_rga_convert_release_pipelined (GstRgaConvert * self, GstBuffer * produced,
     gint release_fence_fd, GstBuffer ** outbuf)
 {
+  g_autoptr (GstRgaConvert) operation_ref = NULL;
   GstFlowReturn ret;
   GstRgaPendingFrame *frame;
 
   g_return_val_if_fail (GST_IS_RGA_CONVERT (self), GST_FLOW_ERROR);
   g_return_val_if_fail (outbuf != NULL, GST_FLOW_ERROR);
 
+  operation_ref = gst_object_ref (self);
   *outbuf = NULL;
   if (release_fence_fd == -1 && produced) {
     /* A synchronous frame must never overtake an older pipelined one. */
@@ -1218,6 +1351,7 @@ gst_rga_convert_submit_input_buffer (GstBaseTransform * transform,
     gboolean is_discont, GstBuffer * input)
 {
   GstRgaConvert *self = GST_RGA_CONVERT (transform);
+  g_autoptr (GstRgaConvert) operation_ref = gst_object_ref (self);
   GstBaseTransformClass *parent = GST_BASE_TRANSFORM_CLASS (parent_class);
   GstBuffer *output = NULL;
   GstFlowReturn ret;
@@ -1272,6 +1406,7 @@ gst_rga_convert_generate_output (GstBaseTransform * transform,
     GstBuffer ** outbuf)
 {
   GstRgaConvert *self = GST_RGA_CONVERT (transform);
+  g_autoptr (GstRgaConvert) operation_ref = gst_object_ref (self);
   gboolean custom, flushing;
 
   gst_rga_convert_reap (self, FALSE);
@@ -1294,6 +1429,12 @@ gst_rga_convert_start (GstBaseTransform * transform)
   GstRgaConvert *self = GST_RGA_CONVERT (transform);
 
   g_mutex_lock (&self->lock);
+  if (self->active_waiters || self->active_submits) {
+    g_mutex_unlock (&self->lock);
+    GST_ELEMENT_ERROR (self, RESOURCE, BUSY,
+        ("RGA host operation from the previous stop is still active"), (NULL));
+    return FALSE;
+  }
   self->flushing = FALSE;
   self->async_disabled = FALSE;
   self->custom_output = FALSE;
@@ -1306,6 +1447,7 @@ static gboolean
 gst_rga_convert_sink_event (GstBaseTransform * transform, GstEvent * event)
 {
   GstRgaConvert *self = GST_RGA_CONVERT (transform);
+  g_autoptr (GstRgaConvert) operation_ref = gst_object_ref (self);
   gboolean flush_stop = GST_EVENT_TYPE (event) == GST_EVENT_FLUSH_STOP;
   gboolean ret;
 
@@ -1333,9 +1475,11 @@ static gboolean
 gst_rga_convert_stop (GstBaseTransform * transform)
 {
   GstRgaConvert *self = GST_RGA_CONVERT (transform);
+  gint64 deadline = g_get_monotonic_time () + GST_RGA_CONVERT_STOP_TIMEOUT_US;
 
   g_mutex_lock (&self->lock);
   self->flushing = TRUE;
+  self->flush_generation++;
   gst_rga_convert_quarantine_locked (self);
   g_mutex_unlock (&self->lock);
   for (;;) {
@@ -1345,6 +1489,15 @@ gst_rga_convert_stop (GstBaseTransform * transform)
     g_mutex_lock (&self->lock);
     empty = self->quarantine == NULL && self->active_waiters == 0 &&
         self->active_submits == 0;
+    if (!empty && g_get_monotonic_time () >= deadline) {
+      GList *escaped = self->quarantine;
+      guint waiters = self->active_waiters, submits = self->active_submits;
+
+      self->quarantine = NULL;
+      g_mutex_unlock (&self->lock);
+      gst_rga_frame_reaper_retire (self, escaped, waiters, submits);
+      return TRUE;
+    }
     g_mutex_unlock (&self->lock);
     if (empty)
       return TRUE;
@@ -1404,6 +1557,10 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
     GstBuffer * output)
 {
   GstRgaConvert *self = GST_RGA_CONVERT (transform);
+  /* A timed-out stop may return while this native submission is still inside
+   * librga. Keep self alive until ALL callback work has returned, independently
+   * of the frame reference transferred to the process-lifetime reaper. */
+  g_autoptr (GstRgaConvert) operation_ref = gst_object_ref (self);
   GstVideoInfo input_info;
   GstVideoInfo output_info;
   GstRgaVideoLayout input_layout = { 0, };
@@ -1555,7 +1712,7 @@ gst_rga_convert_transform (GstBaseTransform * transform, GstBuffer * input,
     generation = self->flush_generation;
     g_assert (self->pending == NULL);
     frame->submitted = FALSE;
-    self->pending = g_atomic_rc_box_acquire (frame);
+    self->pending = gst_rga_frame_ref (frame);
     self->active_submits++;
     g_mutex_unlock (&self->lock);
     result = gst_mpp_rga_backend_process_async (backend,

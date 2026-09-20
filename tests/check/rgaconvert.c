@@ -108,6 +108,9 @@ typedef struct
   gboolean async_supported;
   gboolean unsignalled;
   gboolean missing_fence;
+  gboolean block_submit;
+  gint submit_entered;
+  gint submit_release;
   gint async_result;
   guint process_async_calls;
   guint fences_handed_out;
@@ -192,6 +195,11 @@ fake_process_async (const GstMppRgaIm2dRequest * request,
   fail_unless (*release_fence_fd >= 0);
   fail_unless (fake->fences_handed_out < FAKE_RGA_MAX_FENCES);
   fake->fences[fake->fences_handed_out++] = *release_fence_fd;
+  if (fake->block_submit) {
+    g_atomic_int_set (&fake->submit_entered, 1);
+    while (!g_atomic_int_get (&fake->submit_release))
+      g_usleep (1000);
+  }
   return fake->async_result;
 }
 
@@ -1494,6 +1502,114 @@ GST_START_TEST (test_stop_retains_never_signalled_frame_past_error_deadline)
 GST_END_TEST;
 
 static gboolean (*observed_set_caps_parent) (GstBaseTransform *, GstCaps *, GstCaps *);
+static void
+escaped_buffer_destroyed (gpointer data, GstMiniObject * object)
+{
+  (void) object;
+  g_atomic_int_inc ((gint *) data);
+}
+
+GST_START_TEST (test_stop_escape_reaps_after_element_finalization)
+{
+  gint destroyed[2] = { 0, 0 };
+  gint fences[2], signals[2];
+  guint i;
+
+  /* Leave the first fence pending while a SECOND element escapes and completes.
+   * A FIFO reaper waiting on its first frame would silently leak the second. */
+  for (i = 0; i < 2; i++) {
+    FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
+      .async_supported = TRUE,.async_result = IM_STATUS_SUCCESS,.unsignalled = TRUE
+    };
+    TestConvert test = test_convert_new (&fake);
+    GstBaseTransform *base = GST_BASE_TRANSFORM (test.convert);
+    GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (base);
+    GstBuffer *input = new_nv16_buffer (TRUE, 640, 480, 640, 480);
+    GstBuffer *output = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+    GstBus *bus = gst_bus_new ();
+    GstMessage *message;
+    GWeakRef weak;
+    gint64 begin, elapsed;
+    guint errors = 0;
+    gchar *expected_count = g_strdup_printf ("quarantine-escapes=%u", i + 1);
+
+    gst_element_set_bus (GST_ELEMENT (test.convert), bus);
+    g_weak_ref_init (&weak, test.convert);
+    g_object_set (test.convert, "async-depth", 1, NULL);
+    set_convert_caps (test.convert,
+        "video/x-raw(memory:DMABuf),format=NV16,width=640,height=480",
+        "video/x-raw(memory:DMABuf),format=NV12,width=320,height=240");
+    gst_mini_object_weak_ref (GST_MINI_OBJECT (input),
+        escaped_buffer_destroyed, &destroyed[i]);
+    gst_mini_object_weak_ref (GST_MINI_OBJECT (output),
+        escaped_buffer_destroyed, &destroyed[i]);
+    fail_unless_equals_int (klass->transform (base, input, output), GST_FLOW_OK);
+    fences[i] = fake.fences[0];
+    signals[i] = dup (fences[i]);
+    fail_unless (signals[i] >= 0);
+    gst_buffer_unref (input);
+    gst_buffer_unref (output);
+
+    begin = g_get_monotonic_time ();
+    fail_unless (klass->stop (base));
+    elapsed = g_get_monotonic_time () - begin;
+    fail_unless (elapsed >= 5 * G_USEC_PER_SEC &&
+        elapsed < 6500 * 1000, "stop wait was %" G_GINT64_FORMAT " us", elapsed);
+    fail_unless_equals_int (g_atomic_int_get (&destroyed[i]), 0);
+    fail_unless (fcntl (fences[i], F_GETFD) >= 0);
+    while ((message = gst_bus_pop_filtered (bus, GST_MESSAGE_ERROR))) {
+      GError *error = NULL;
+      gchar *debug = NULL;
+
+      gst_message_parse_error (message, &error, &debug);
+      if (errors == 0) {
+        fail_unless (strstr (error->message, "within 2 s") != NULL);
+      } else {
+        fail_unless (strstr (error->message, "5 s") != NULL);
+        fail_unless (strstr (debug, expected_count) != NULL);
+        fail_unless (strstr (debug, "escaped-frames=1") != NULL);
+      }
+      errors++;
+      g_clear_error (&error);
+      g_free (debug);
+      gst_message_unref (message);
+    }
+    fail_unless_equals_int (errors, 2);
+    g_free (expected_count);
+    begin = g_get_monotonic_time ();
+    fail_unless (klass->stop (base));
+    test_convert_clear (&test);
+    fail_unless (g_get_monotonic_time () - begin < G_USEC_PER_SEC,
+        "repeated stop/finalize must not wait on escaped frames again");
+    fail_unless (g_weak_ref_get (&weak) == NULL,
+        "the reaper must not retain the owning element");
+    g_weak_ref_clear (&weak);
+    gst_object_unref (bus);
+    fail_unless_equals_int (g_atomic_int_get (&destroyed[i]), 0);
+  }
+
+  /* The element AND its injected backend are gone before either fence signals.
+   * This proves actual reclamation rather than detaching a permanent leak. */
+  for (i = 2; i > 0; i--) {
+    guint index = i - 1;
+    guint64 signal = 1;
+    gint64 deadline = g_get_monotonic_time () + G_USEC_PER_SEC;
+
+    fail_unless_equals_int (write (signals[index], &signal, sizeof signal),
+        sizeof signal);
+    close (signals[index]);
+    while (g_atomic_int_get (&destroyed[index]) != 2 &&
+        g_get_monotonic_time () < deadline)
+      g_usleep (1000);
+    fail_unless_equals_int (g_atomic_int_get (&destroyed[index]), 2);
+    fail_unless (fcntl (fences[index], F_GETFD) == -1 && errno == EBADF);
+    if (index == 1)
+      fail_unless_equals_int (g_atomic_int_get (&destroyed[0]), 0);
+  }
+}
+
+GST_END_TEST;
+
 GST_START_TEST (test_old_but_completed_frame_does_not_report_stop_timeout)
 {
   FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
@@ -1514,6 +1630,85 @@ GST_START_TEST (test_old_but_completed_frame_does_not_report_stop_timeout)
       "frame age is not evidence that an already signalled fence timed out");
   gst_object_unref (bus);
   test_convert_clear (&test);
+}
+
+GST_END_TEST;
+
+typedef struct
+{
+  GstBaseTransform *base;
+  GstBuffer *input;
+  GstBuffer *output;
+} EscapedSubmit;
+
+static gpointer
+escaped_submit_thread (gpointer data)
+{
+  EscapedSubmit *submit = data;
+  GstFlowReturn ret = GST_BASE_TRANSFORM_GET_CLASS (submit->base)->transform
+      (submit->base, submit->input, submit->output);
+
+  return GINT_TO_POINTER (ret);
+}
+
+GST_START_TEST (test_stop_escape_keeps_inflight_submit_alive)
+{
+  FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
+    .async_supported = TRUE,.async_result = IM_STATUS_SUCCESS,.block_submit = TRUE
+  };
+  TestConvert test = test_convert_new (&fake);
+  GstBaseTransform *base = GST_BASE_TRANSFORM (test.convert);
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (base);
+  EscapedSubmit submit = { base,
+    new_nv16_buffer (TRUE, 640, 480, 640, 480),
+    new_nv12_buffer (TRUE, 320, 240, 320, 240)
+  };
+  GWeakRef weak;
+  GThread *thread;
+  gpointer retained;
+  gint destroyed = 0;
+  gint64 deadline, begin;
+
+  g_weak_ref_init (&weak, test.convert);
+  g_object_set (test.convert, "async-depth", 1, NULL);
+  set_convert_caps (test.convert,
+      "video/x-raw(memory:DMABuf),format=NV16,width=640,height=480",
+      "video/x-raw(memory:DMABuf),format=NV12,width=320,height=240");
+  gst_mini_object_weak_ref (GST_MINI_OBJECT (submit.input),
+      escaped_buffer_destroyed, &destroyed);
+  gst_mini_object_weak_ref (GST_MINI_OBJECT (submit.output),
+      escaped_buffer_destroyed, &destroyed);
+  thread = g_thread_new ("escaped-submit", escaped_submit_thread, &submit);
+  deadline = g_get_monotonic_time () + G_USEC_PER_SEC;
+  while (!g_atomic_int_get (&fake.submit_entered) &&
+      g_get_monotonic_time () < deadline)
+    g_usleep (1000);
+  fail_unless (g_atomic_int_get (&fake.submit_entered));
+  gst_buffer_unref (submit.input);
+  gst_buffer_unref (submit.output);
+  begin = g_get_monotonic_time ();
+  fail_unless (klass->stop (base));
+  fail_unless (g_get_monotonic_time () - begin < 6500 * 1000);
+  fail_if (klass->start (base), "restart must not race an old native submission");
+  gst_object_unref (test.convert);
+  retained = g_weak_ref_get (&weak);
+  fail_unless (retained != NULL, "the in-flight callback must keep self alive");
+  gst_object_unref (retained);
+  g_usleep (200000);
+  fail_unless_equals_int (g_atomic_int_get (&destroyed), 0);
+  fail_unless (fcntl (fake.fences[0], F_GETFD) >= 0);
+  g_atomic_int_set (&fake.submit_release, 1);
+  fail_unless_equals_int (GPOINTER_TO_INT (g_thread_join (thread)),
+      GST_FLOW_FLUSHING);
+  fail_unless (g_weak_ref_get (&weak) == NULL);
+  g_weak_ref_clear (&weak);
+  gst_mpp_rga_backend_free (test.backend);
+  deadline = g_get_monotonic_time () + G_USEC_PER_SEC;
+  while (g_atomic_int_get (&destroyed) != 2 &&
+      g_get_monotonic_time () < deadline)
+    g_usleep (1000);
+  fail_unless_equals_int (g_atomic_int_get (&destroyed), 2);
+  fail_unless_fences_closed (&fake);
 }
 
 GST_END_TEST;
@@ -1829,6 +2024,8 @@ rgaconvert_suite (void)
       test_flush_start_quarantines_input_and_output_without_waiting);
   tcase_add_test (test_case,
       test_stop_retains_never_signalled_frame_past_error_deadline);
+  tcase_add_test (test_case, test_stop_escape_reaps_after_element_finalization);
+  tcase_add_test (test_case, test_stop_escape_keeps_inflight_submit_alive);
   tcase_add_test (test_case,
       test_old_but_completed_frame_does_not_report_stop_timeout);
   tcase_add_test (test_case,
