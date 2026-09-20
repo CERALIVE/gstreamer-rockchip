@@ -144,6 +144,17 @@ GstMppRgaResult gst_mpp_rga_backend_process_async (GstMppRgaBackend * backend,
     GstMppRgaOperation operation, GstVideoFormat in_format,
     GstVideoFormat out_format, const GstMppRgaIm2dRequest * request,
     gint * release_fence_fd);
+typedef enum
+{
+  GST_MPP_RGA_FENCE_PENDING,
+  GST_MPP_RGA_FENCE_COMPLETE,
+  GST_MPP_RGA_FENCE_ERROR,
+} GstMppRgaFenceStatus;
+
+#define GST_MPP_RGA_FENCE_MISSING (-2)
+
+GstMppRgaFenceStatus gst_mpp_rga_fence_status (gint release_fence_fd,
+    gint timeout_ms);
 gboolean gst_mpp_rga_fence_wait (gint release_fence_fd, gint timeout_ms);
 GstMppRgaResult gst_mpp_rga_backend_composite (GstMppRgaBackend * backend,
     GstVideoFormat in_format, GstVideoFormat out_format,

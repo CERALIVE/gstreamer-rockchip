@@ -763,24 +763,38 @@ gst_mpp_rga_backend_supports_async (GstMppRgaBackend * backend)
   return backend->ops.async_supported (backend->user_data);
 }
 
-gboolean
-gst_mpp_rga_fence_wait (gint release_fence_fd, gint timeout_ms)
+GstMppRgaFenceStatus
+gst_mpp_rga_fence_status (gint release_fence_fd, gint timeout_ms)
 {
   struct pollfd pfd = { release_fence_fd, POLLIN, 0 };
   gint rc;
 
-  if (release_fence_fd < 0)
-    return TRUE;
+  if (release_fence_fd == GST_MPP_RGA_FENCE_MISSING)
+    return GST_MPP_RGA_FENCE_PENDING;
+  if (release_fence_fd == -1)
+    return GST_MPP_RGA_FENCE_COMPLETE;
 
   do {
     rc = poll (&pfd, 1, timeout_ms);
   } while (rc < 0 && errno == EINTR);
 
-  if (rc <= 0)
-    GST_WARNING ("release fence %d did not signal within %d ms (poll=%d, %s)",
-        release_fence_fd, timeout_ms, rc, g_strerror (errno));
-  close (release_fence_fd);
-  return rc > 0;
+  if (rc <= 0 || (pfd.revents & POLLNVAL))
+    return GST_MPP_RGA_FENCE_PENDING;
+  if (pfd.revents & (POLLERR | POLLHUP))
+    return GST_MPP_RGA_FENCE_ERROR;
+  return (pfd.revents & POLLIN) ? GST_MPP_RGA_FENCE_COMPLETE :
+      GST_MPP_RGA_FENCE_PENDING;
+}
+
+gboolean
+gst_mpp_rga_fence_wait (gint release_fence_fd, gint timeout_ms)
+{
+  GstMppRgaFenceStatus status =
+      gst_mpp_rga_fence_status (release_fence_fd, timeout_ms);
+
+  if (status != GST_MPP_RGA_FENCE_PENDING && release_fence_fd >= 0)
+    close (release_fence_fd);
+  return status == GST_MPP_RGA_FENCE_COMPLETE;
 }
 
 GstMppRgaResult
@@ -811,14 +825,14 @@ gst_mpp_rga_backend_process_async (GstMppRgaBackend * backend,
   ret = backend->ops.process_async (request, release_fence_fd,
       backend->user_data);
   blit_errno = errno;
+  if ((ret == IM_STATUS_SUCCESS || ret == IM_STATUS_NOERROR) &&
+      *release_fence_fd < 0) {
+    *release_fence_fd = GST_MPP_RGA_FENCE_MISSING;
+    ret = IM_STATUS_FAILED;
+    GST_ERROR ("Async submission succeeded without a completion fence");
+  }
   result = gst_mpp_rga_backend_finish (backend, &key, ret, blit_errno,
       ret == IM_STATUS_SUCCESS || ret == IM_STATUS_NOERROR);
-  if (result != GST_MPP_RGA_SUCCESS) {
-    /* A refused submission guards no buffer: the callee closes its own fence. */
-    if (*release_fence_fd >= 0)
-      close (*release_fence_fd);
-    *release_fence_fd = -1;
-  }
   if (result == GST_MPP_RGA_BLIT_FAILED &&
       (ret == IM_STATUS_NOT_SUPPORTED || ret == IM_STATUS_INVALID_PARAM ||
           ret == IM_STATUS_ILLEGAL_PARAM || ret == IM_STATUS_ERROR_VERSION))

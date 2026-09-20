@@ -3,6 +3,7 @@
 #include <glib/gstdio.h>
 #include <gst/allocators/gstdmabuf.h>
 #include <gst/check/gstcheck.h>
+#include <gst/check/gstharness.h>
 #include <gst/video/gstvideometa.h>
 #include <gst/video/gstvideopool.h>
 #include <sys/eventfd.h>
@@ -105,6 +106,8 @@ typedef struct
   gboolean submit_im2d;
   GstMppRgaIm2dRequest last_request;
   gboolean async_supported;
+  gboolean unsignalled;
+  gboolean missing_fence;
   gint async_result;
   guint process_async_calls;
   guint fences_handed_out;
@@ -179,8 +182,13 @@ fake_process_async (const GstMppRgaIm2dRequest * request,
   FakeRga *fake = user_data;
 
   fake->process_async_calls++;
+  if (fake->missing_fence) {
+    *release_fence_fd = -1;
+    return fake->async_result;
+  }
   fake->last_request = *request;
-  *release_fence_fd = eventfd (1, EFD_CLOEXEC | EFD_NONBLOCK);
+  *release_fence_fd = eventfd (fake->unsignalled ? 0 : 1,
+      EFD_CLOEXEC | EFD_NONBLOCK);
   fail_unless (*release_fence_fd >= 0);
   fail_unless (fake->fences_handed_out < FAKE_RGA_MAX_FENCES);
   fake->fences[fake->fences_handed_out++] = *release_fence_fd;
@@ -301,6 +309,35 @@ new_nv12_buffer (gboolean dmabuf, guint width, guint height, guint stride,
 
   return new_video_buffer (dmabuf, GST_VIDEO_FORMAT_NV12, width, height, 2,
       offsets, strides, stride * hstride * 3 / 2);
+}
+
+typedef struct { GstDmaBufAllocator parent; } TestDmaAllocator;
+typedef struct { GstDmaBufAllocatorClass parent; } TestDmaAllocatorClass;
+G_DEFINE_TYPE (TestDmaAllocator, test_dma_allocator, GST_TYPE_DMABUF_ALLOCATOR);
+
+static GstMemory *
+test_dma_alloc (GstAllocator * allocator, gsize size, GstAllocationParams * params)
+{
+  gchar *name = NULL;
+  gint fd = g_file_open_tmp ("rga-pool-test-XXXXXX", &name, NULL);
+  (void) params;
+  fail_unless (fd >= 0);
+  fail_unless_equals_int (ftruncate (fd, size), 0);
+  g_unlink (name);
+  g_free (name);
+  return gst_dmabuf_allocator_alloc (allocator, fd, size);
+}
+
+static void
+test_dma_allocator_class_init (TestDmaAllocatorClass * klass)
+{
+  GST_ALLOCATOR_CLASS (klass)->alloc = test_dma_alloc;
+}
+
+static void
+test_dma_allocator_init (TestDmaAllocator * allocator)
+{
+  (void) allocator;
 }
 
 static GstCaps *
@@ -1222,6 +1259,56 @@ release_pipelined (GstRgaConvert * convert, FakeRga * fake, GstBuffer * frame)
   return out;
 }
 
+GST_START_TEST (test_unsignalled_fence_timeout_keeps_descriptor_owned)
+{
+  gint fds[2];
+
+  fail_unless_equals_int (pipe (fds), 0);
+  fail_if (gst_mpp_rga_fence_wait (fds[0], 0));
+  fail_unless (fcntl (fds[0], F_GETFD) >= 0,
+      "timeout must not close an outstanding hardware fence");
+  close (fds[0]);
+  close (fds[1]);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_timeout_never_returns_unfinished_output)
+{
+  FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
+    .async_supported = TRUE,.async_result = IM_STATUS_SUCCESS
+  };
+  TestConvert test = test_convert_new (&fake);
+  GstBuffer *frame_one = gst_buffer_new ();
+  GstBuffer *frame_two = gst_buffer_new ();
+  GstBuffer *out = NULL;
+  gint fds[2];
+  gint signalled = eventfd (1, EFD_CLOEXEC | EFD_NONBLOCK);
+  guint64 dropped = 0;
+
+  fail_unless_equals_int (pipe (fds), 0);
+  fail_unless_equals_int (gst_rga_convert_release_pipelined (test.convert,
+          gst_buffer_ref (frame_one), fds[0], &out), GST_FLOW_OK);
+  fail_unless (out == NULL);
+  fail_unless_equals_int (gst_rga_convert_release_pipelined (test.convert,
+          gst_buffer_ref (frame_two), signalled, &out), GST_FLOW_OK);
+  fail_unless (out == NULL, "an unsignalled output must never reach downstream");
+  fail_unless (fcntl (fds[0], F_GETFD) >= 0);
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (frame_one), 2);
+  g_object_get (test.convert, "conversion-dropped-frames", &dropped, NULL);
+  fail_unless_equals_uint64 (dropped, 1);
+  fail_unless_equals_int (write (fds[1], "x", 1), 1);
+  test_convert_clear (&test);
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (frame_one), 1);
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (frame_two), 1);
+  fail_unless (fcntl (fds[0], F_GETFD) == -1 && errno == EBADF);
+  close (fds[1]);
+  gst_buffer_unref (frame_one);
+  gst_buffer_unref (frame_two);
+}
+
+GST_END_TEST;
+
 GST_START_TEST (test_depth_one_holds_a_frame_and_eos_drains_it_in_order)
 {
   FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
@@ -1281,6 +1368,194 @@ GST_START_TEST (test_depth_one_holds_a_frame_and_eos_drains_it_in_order)
   gst_pad_unlink (srcpad, sinkpad);
   gst_object_unref (sinkpad);
   gst_caps_unref (caps);
+  test_convert_clear (&test);
+}
+
+GST_END_TEST;
+
+static GstPadProbeReturn
+observe_flush (GstPad * pad, GstPadProbeInfo * info, gpointer data)
+{
+  (void) pad;
+  if (GST_EVENT_TYPE (GST_PAD_PROBE_INFO_EVENT (info)) == GST_EVENT_FLUSH_START)
+    g_atomic_int_inc ((gint *) data);
+  return GST_PAD_PROBE_OK;
+}
+
+GST_START_TEST (test_flush_start_quarantines_input_and_output_without_waiting)
+{
+  FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
+    .async_supported = TRUE,.async_result = IM_STATUS_SUCCESS,.unsignalled = TRUE
+  };
+  TestConvert test = test_convert_new (&fake);
+  GstBaseTransform *base = GST_BASE_TRANSFORM (test.convert);
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (base);
+  GstPad *sink = gst_pad_new ("sink", GST_PAD_SINK);
+  GstBuffer *input = new_nv16_buffer (TRUE, 640, 480, 640, 480);
+  GstBuffer *output = new_nv12_buffer (TRUE, 320, 240, 320, 240);
+  gint observed = 0;
+  gint64 started;
+  guint64 signal = 1;
+
+  gst_pad_set_active (sink, TRUE);
+  gst_pad_set_active (base->srcpad, TRUE);
+  fail_unless_equals_int (gst_pad_link (base->srcpad, sink), GST_PAD_LINK_OK);
+  gst_pad_add_probe (sink, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM |
+      GST_PAD_PROBE_TYPE_EVENT_FLUSH, observe_flush, &observed, NULL);
+  g_object_set (test.convert, "async-depth", 1, NULL);
+  set_convert_caps (test.convert,
+      "video/x-raw(memory:DMABuf),format=NV16,width=640,height=480",
+      "video/x-raw(memory:DMABuf),format=NV12,width=320,height=240");
+  fail_unless_equals_int (klass->transform (base, input, output), GST_FLOW_OK);
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (input), 2);
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (output), 2);
+  started = g_get_monotonic_time ();
+  fail_unless (klass->sink_event (base, gst_event_new_flush_start ()));
+  fail_unless (g_get_monotonic_time () - started < 100 * 1000);
+  fail_unless_equals_int (g_atomic_int_get (&observed), 1);
+  fail_unless (fcntl (fake.fences[0], F_GETFD) >= 0);
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (input), 2);
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (output), 2);
+  fail_unless (klass->sink_event (base, gst_event_new_flush_stop (TRUE)));
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (input), 2);
+  fail_unless_equals_int (write (fake.fences[0], &signal, sizeof signal), sizeof signal);
+  fail_unless (klass->sink_event (base, gst_event_new_flush_stop (TRUE)));
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (input), 1);
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (output), 1);
+  fail_unless_fences_closed (&fake);
+  gst_pad_unlink (base->srcpad, sink);
+  gst_object_unref (sink);
+  gst_buffer_unref (input);
+  gst_buffer_unref (output);
+  test_convert_clear (&test);
+}
+
+GST_END_TEST;
+
+typedef struct
+{
+  GstRgaConvert *convert;
+  gint started;
+  gint finished;
+} StopWait;
+
+static gpointer
+stop_wait_thread (gpointer data)
+{
+  StopWait *wait = data;
+  GstBaseTransform *base = GST_BASE_TRANSFORM (wait->convert);
+
+  g_atomic_int_set (&wait->started, 1);
+  GST_BASE_TRANSFORM_GET_CLASS (base)->stop (base);
+  g_atomic_int_set (&wait->finished, 1);
+  return NULL;
+}
+
+GST_START_TEST (test_stop_retains_never_signalled_frame_past_error_deadline)
+{
+  FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
+    .async_supported = TRUE,.async_result = IM_STATUS_SUCCESS
+  };
+  TestConvert test = test_convert_new (&fake);
+  GstBuffer *frame = gst_buffer_new ();
+  GstBuffer *out = NULL;
+  GstBus *bus = gst_bus_new ();
+  GstMessage *message;
+  gint fds[2];
+  StopWait wait = { .convert = test.convert };
+  GThread *thread;
+
+  gst_element_set_bus (GST_ELEMENT (test.convert), bus);
+  fail_unless_equals_int (pipe (fds), 0);
+  fail_unless_equals_int (gst_rga_convert_release_pipelined (test.convert,
+          gst_buffer_ref (frame), fds[0], &out), GST_FLOW_OK);
+  thread = g_thread_new ("stop-wait", stop_wait_thread, &wait);
+  while (!g_atomic_int_get (&wait.started))
+    g_usleep (1000);
+  g_usleep (2200000);
+  fail_unless_equals_int (g_atomic_int_get (&wait.finished), 0);
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (frame), 2);
+  fail_unless (fcntl (fds[0], F_GETFD) >= 0);
+  message = gst_bus_pop_filtered (bus, GST_MESSAGE_ERROR);
+  fail_unless (message != NULL);
+  gst_message_unref (message);
+  fail_unless (gst_bus_pop_filtered (bus, GST_MESSAGE_ERROR) == NULL);
+  fail_unless_equals_int (write (fds[1], "x", 1), 1);
+  g_thread_join (thread);
+  fail_unless_equals_int (g_atomic_int_get (&wait.finished), 1);
+  fail_unless_equals_int (GST_MINI_OBJECT_REFCOUNT_VALUE (frame), 1);
+  fail_unless (fcntl (fds[0], F_GETFD) == -1 && errno == EBADF);
+  close (fds[1]);
+  gst_buffer_unref (frame);
+  gst_object_unref (bus);
+  test_convert_clear (&test);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_real_transform_chain_orders_buffers_events_and_caps)
+{
+  FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
+    .async_supported = TRUE,.async_result = IM_STATUS_SUCCESS
+  };
+  TestConvert test = test_convert_new (&fake);
+  GstAllocator *allocator = g_object_new (test_dma_allocator_get_type (), NULL);
+  GstHarness *h;
+  GstBuffer *input, *out;
+  guint i;
+
+  gst_object_ref_sink (test.convert);
+  gst_object_ref_sink (allocator);
+  gst_rga_convert_set_allocator_for_test (test.convert, allocator);
+  g_object_set (test.convert, "async-depth", 1, NULL);
+  h = gst_harness_new_with_element (GST_ELEMENT (test.convert), "sink", "src");
+  gst_harness_set_propose_allocator (h, allocator, NULL);
+  gst_harness_set_caps_str (h,
+      "video/x-raw(memory:DMABuf),format=NV16,width=320,height=240,framerate=30/1",
+      "video/x-raw(memory:DMABuf),format=NV12,width=320,height=240,framerate=30/1");
+  for (i = 0; i < 2; i++) {
+    input = new_nv16_buffer (TRUE, 320, 240, 320, 240);
+    GST_BUFFER_PTS (input) = i * GST_SECOND;
+    GST_BUFFER_DURATION (input) = GST_SECOND / 30;
+    fail_unless_equals_int (gst_harness_push (h, input), GST_FLOW_OK);
+    fail_unless_equals_int (gst_harness_buffers_in_queue (h), i);
+  }
+  out = gst_harness_pull (h);
+  fail_unless_equals_uint64 (GST_BUFFER_PTS (out), 0);
+  fail_unless_equals_uint64 (GST_BUFFER_DURATION (out), GST_SECOND / 30);
+  gst_buffer_unref (out);
+  fail_unless (gst_harness_push_event (h,
+          gst_event_new_tag (gst_tag_list_new_empty ())));
+  fail_unless_equals_int (gst_harness_buffers_in_queue (h), 1);
+  out = gst_harness_pull (h);
+  fail_unless_equals_uint64 (GST_BUFFER_PTS (out), GST_SECOND);
+  gst_buffer_unref (out);
+
+  input = new_nv16_buffer (TRUE, 320, 240, 320, 240);
+  fail_unless_equals_int (gst_harness_push (h, input), GST_FLOW_OK);
+  fail_unless (gst_harness_push_event (h, gst_event_new_custom (
+              GST_EVENT_CUSTOM_DOWNSTREAM, gst_structure_new_empty ("ordered"))));
+  fail_unless_equals_int (gst_harness_buffers_in_queue (h), 1);
+  gst_buffer_unref (gst_harness_pull (h));
+
+  input = new_nv16_buffer (TRUE, 320, 240, 320, 240);
+  fail_unless_equals_int (gst_harness_push (h, input), GST_FLOW_OK);
+  gst_harness_set_sink_caps_str (h,
+      "video/x-raw(memory:DMABuf),format=NV12,width=640,height=480,framerate=30/1");
+  gst_harness_set_src_caps_str (h,
+      "video/x-raw(memory:DMABuf),format=NV16,width=640,height=480,framerate=30/1");
+  fail_unless_equals_int (gst_harness_buffers_in_queue (h), 1);
+  out = gst_harness_pull (h);
+  fail_unless_equals_int (gst_buffer_get_video_meta (out)->width, 320);
+  gst_buffer_unref (out);
+  input = new_nv16_buffer (TRUE, 640, 480, 640, 480);
+  fail_unless_equals_int (gst_harness_push (h, input), GST_FLOW_OK);
+  fail_unless (gst_harness_push_event (h, gst_event_new_eos ()));
+  out = gst_harness_pull (h);
+  fail_unless_equals_int (gst_buffer_get_video_meta (out)->width, 640);
+  gst_buffer_unref (out);
+  gst_harness_teardown (h);
+  fail_unless_fences_closed (&fake);
   test_convert_clear (&test);
 }
 
@@ -1401,7 +1676,8 @@ GST_START_TEST (test_backend_async_capability_and_fence_ownership)
   fail_unless_equals_int (gst_mpp_rga_backend_process_async (backend,
           GST_MPP_RGA_OP_CONVERT, GST_VIDEO_FORMAT_NV16, GST_VIDEO_FORMAT_NV12,
           &request, &fence), GST_MPP_RGA_NOT_SUPPORTED);
-  fail_unless_equals_int (fence, -1);
+  fail_unless (fence >= 0);
+  fail_unless (gst_mpp_rga_fence_wait (fence, 1000));
   fail_unless_equals_int (fake.process_async_calls, 1);
   fail_unless_fences_closed (&fake);
 
@@ -1413,6 +1689,13 @@ GST_START_TEST (test_backend_async_capability_and_fence_ownership)
   fail_unless (gst_mpp_rga_fence_wait (fence, 1000));
   fail_unless (gst_mpp_rga_fence_wait (-1, 0));
   fail_unless_fences_closed (&fake);
+  fake.missing_fence = TRUE;
+  fail_unless_equals_int (gst_mpp_rga_backend_process_async (backend,
+          GST_MPP_RGA_OP_CONVERT, GST_VIDEO_FORMAT_NV16, GST_VIDEO_FORMAT_NV12,
+          &request, &fence), GST_MPP_RGA_BLIT_FAILED);
+  fail_unless_equals_int (fence, GST_MPP_RGA_FENCE_MISSING);
+  fail_unless_equals_int (gst_mpp_rga_fence_status (fence, 0),
+      GST_MPP_RGA_FENCE_PENDING);
   gst_mpp_rga_backend_free (backend);
 }
 
@@ -1461,6 +1744,14 @@ rgaconvert_suite (void)
       test_async_submit_is_never_reached_without_a_dmabuf_pair);
   tcase_add_test (test_case,
       test_depth_one_holds_a_frame_and_eos_drains_it_in_order);
+  tcase_add_test (test_case, test_unsignalled_fence_timeout_keeps_descriptor_owned);
+  tcase_add_test (test_case, test_timeout_never_returns_unfinished_output);
+  tcase_add_test (test_case,
+      test_flush_start_quarantines_input_and_output_without_waiting);
+  tcase_add_test (test_case,
+      test_stop_retains_never_signalled_frame_past_error_deadline);
+  tcase_add_test (test_case,
+      test_real_transform_chain_orders_buffers_events_and_caps);
   tcase_add_test (test_case,
       test_a_synchronous_frame_never_overtakes_a_pipelined_one);
   tcase_add_test (test_case,
