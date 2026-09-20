@@ -328,14 +328,17 @@ The following are compatibility contracts, not cleanup opportunities:
   latency. Flipping the default needs an in-element measurement, not another
   harness run. `tests/board/d6-c6b-measurement.sh` remains the sole source of
   these numbers.
-- **`async-depth` is refused, silently and by design, in three cases**: the
-  librga runtime resolves no `improcessOpt` (there is nowhere to return a
-  release fence), debug CPU staging is in use (the staged copy reads the
-  destination on the streaming thread the moment the blit returns), or the
-  submission is refused. Each falls back to the synchronous path, so the
-  property can never make a conversion fail that would otherwise have worked.
-  The staged case is guarded in code but is NOT reachable by the host harness —
-  a staging buffer needs a real dma-heap — so it is board territory.
+- **Async fence lifetime is terminal-state-owned.** Pending and ready records
+  retain both input and output; a 100 ms timeout drops the frame logically,
+  increments `conversion-dropped-frames`, and disables async until the next
+  start. The record remains quarantined until its fence is terminal. FLUSH_START
+  forwards immediately without waiting, while other serialized events drain
+  older output before the parent's event handler. Stop waits past two seconds
+  if necessary, posting one error rather than freeing hardware-owned memory.
+  The property stays zero with a warning when Opt is unavailable. Debug staging
+  remains synchronous; a rejected submission remains a typed failure, not an
+  unreported synchronous retry. See `docs/ASYNC-FENCE-LIFETIME.md` for the
+  unsignalled-fence tests and process-isolated Rock fault-injection boundary.
 - **Caps fixation [EXISTS]:** same-memory identity alternatives retain
   explicit colorimetry; raw-format fixation restores omitted colorimetry within
   the same YUV/RGB family. Explicit output requests are never overwritten. The

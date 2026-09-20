@@ -143,9 +143,12 @@ second run), so `rgaconvert` carries `async-depth` (uint, `0`-`1`, **default
 `0`**). The default is 0 because the gate's subject is the standalone
 `tests/board/d6-c6b-measurement.sh` im2d harness rather than the element, and
 depth 1 costs one frame of latency; a default flip needs an in-element board
-measurement. `async-depth=1` falls back to the synchronous path whenever the
-runtime resolves no `improcessOpt`, debug CPU staging is in use, or the
-submission is refused. **C6b-perf remains BLOCKED** — the handle path is refused
+measurement. An unavailable Opt entry point refuses `async-depth=1` with a
+warning; debug CPU staging stays synchronous. A fence timeout switches future
+frames to sync but quarantines both buffers until completion; it never pushes
+or frees unfinished output. A submission refusal remains a typed failure.
+The [fence-lifetime contract](docs/ASYNC-FENCE-LIFETIME.md) records flush/event
+ordering and the bounded Rock fault test. **C6b-perf remains BLOCKED** — the handle path is refused
 by the driver on both boards, so the import cache cannot be measured at all.
 
 The MPP encoder and decoders treat librga as available only after `/dev/rga`
