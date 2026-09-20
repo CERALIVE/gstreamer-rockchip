@@ -1494,6 +1494,30 @@ GST_START_TEST (test_stop_retains_never_signalled_frame_past_error_deadline)
 GST_END_TEST;
 
 static gboolean (*observed_set_caps_parent) (GstBaseTransform *, GstCaps *, GstCaps *);
+GST_START_TEST (test_old_but_completed_frame_does_not_report_stop_timeout)
+{
+  FakeRga fake = {.available = TRUE,.process_result = IM_STATUS_SUCCESS,
+    .async_supported = TRUE,.async_result = IM_STATUS_SUCCESS
+  };
+  TestConvert test = test_convert_new (&fake);
+  GstBuffer *out = NULL;
+  GstBus *bus = gst_bus_new ();
+  GstBaseTransform *base = GST_BASE_TRANSFORM (test.convert);
+  gint fence = eventfd (1, EFD_CLOEXEC | EFD_NONBLOCK);
+
+  gst_element_set_bus (GST_ELEMENT (test.convert), bus);
+  fail_unless_equals_int (gst_rga_convert_release_pipelined (test.convert,
+          gst_buffer_new (), fence, &out), GST_FLOW_OK);
+  g_usleep (2100000);
+  fail_unless (GST_BASE_TRANSFORM_GET_CLASS (base)->stop (base));
+  fail_unless (gst_bus_pop_filtered (bus, GST_MESSAGE_ERROR) == NULL,
+      "frame age is not evidence that an already signalled fence timed out");
+  gst_object_unref (bus);
+  test_convert_clear (&test);
+}
+
+GST_END_TEST;
+
 static guint observed_set_caps_calls;
 
 static gboolean
@@ -1805,6 +1829,8 @@ rgaconvert_suite (void)
       test_flush_start_quarantines_input_and_output_without_waiting);
   tcase_add_test (test_case,
       test_stop_retains_never_signalled_frame_past_error_deadline);
+  tcase_add_test (test_case,
+      test_old_but_completed_frame_does_not_report_stop_timeout);
   tcase_add_test (test_case,
       test_real_transform_chain_orders_buffers_events_and_caps);
   tcase_add_test (test_case,

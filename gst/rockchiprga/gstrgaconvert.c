@@ -1027,22 +1027,31 @@ gst_rga_convert_reap (GstRgaConvert * self, gboolean stopping)
   for (item = self->quarantine; item; item = item->next) {
     GstRgaPendingFrame *frame = item->data;
 
-    if (frame->submitted)
-      snapshot = g_list_prepend (snapshot, g_atomic_rc_box_acquire (frame));
-    if (!self->quarantine_error_posted &&
-        g_get_monotonic_time () - frame->submitted_at >= 2 * G_USEC_PER_SEC) {
-      self->quarantine_error_posted = TRUE;
-      report = TRUE;
-    }
+    snapshot = g_list_prepend (snapshot, g_atomic_rc_box_acquire (frame));
   }
   g_mutex_unlock (&self->lock);
 
   for (item = snapshot; item; item = item->next) {
     GstRgaPendingFrame *frame = item->data;
-    GstMppRgaFenceStatus status = gst_mpp_rga_fence_status (frame->fence, 0);
+    GstMppRgaFenceStatus status;
+    gboolean submitted;
+    gint fence;
     gboolean removed = FALSE;
 
     g_mutex_lock (&self->lock);
+    submitted = frame->submitted;
+    fence = frame->fence;
+    g_mutex_unlock (&self->lock);
+    status = submitted ? gst_mpp_rga_fence_status (fence, 0) :
+        GST_MPP_RGA_FENCE_PENDING;
+    g_mutex_lock (&self->lock);
+    if (status == GST_MPP_RGA_FENCE_PENDING &&
+        !self->quarantine_error_posted &&
+        g_list_find (self->quarantine, frame) &&
+        g_get_monotonic_time () - frame->submitted_at >= 2 * G_USEC_PER_SEC) {
+      self->quarantine_error_posted = TRUE;
+      report = TRUE;
+    }
     if (status != GST_MPP_RGA_FENCE_PENDING &&
         g_list_find (self->quarantine, frame)) {
       self->quarantine = g_list_remove (self->quarantine, frame);
