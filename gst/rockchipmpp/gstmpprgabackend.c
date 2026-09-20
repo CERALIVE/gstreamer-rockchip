@@ -13,6 +13,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/sync_file.h>
 #include <poll.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -767,6 +768,7 @@ GstMppRgaFenceStatus
 gst_mpp_rga_fence_status (gint release_fence_fd, gint timeout_ms)
 {
   struct pollfd pfd = { release_fence_fd, POLLIN, 0 };
+  struct sync_file_info info = { 0, };
   gint rc;
 
   if (release_fence_fd == GST_MPP_RGA_FENCE_MISSING)
@@ -778,12 +780,30 @@ gst_mpp_rga_fence_status (gint release_fence_fd, gint timeout_ms)
     rc = poll (&pfd, 1, timeout_ms);
   } while (rc < 0 && errno == EINTR);
 
-  if (rc <= 0 || (pfd.revents & POLLNVAL))
+  /* Broken descriptors do not establish that DMA has stopped. */
+  if (rc <= 0 || (pfd.revents & (POLLNVAL | POLLERR | POLLHUP)) ||
+      !(pfd.revents & POLLIN))
     return GST_MPP_RGA_FENCE_PENDING;
-  if (pfd.revents & (POLLERR | POLLHUP))
+
+  /* sync_file reports POLLIN for both successful and error-signalled fences.
+   * num_fences=0 requests aggregate status without allocating a fence array. */
+  do {
+    rc = ioctl (release_fence_fd, SYNC_IOC_FILE_INFO, &info);
+  } while (rc < 0 && errno == EINTR);
+
+  if (rc < 0) {
+    GST_WARNING ("Cannot query sync_file fence %d: %s; retaining ownership",
+        release_fence_fd, g_strerror (errno));
+    return GST_MPP_RGA_FENCE_PENDING;
+  }
+  if (info.status > 0)
+    return GST_MPP_RGA_FENCE_COMPLETE;
+  if (info.status < 0)
     return GST_MPP_RGA_FENCE_ERROR;
-  return (pfd.revents & POLLIN) ? GST_MPP_RGA_FENCE_COMPLETE :
-      GST_MPP_RGA_FENCE_PENDING;
+  GST_WARNING
+      ("Readable sync_file fence %d is still active; retaining ownership",
+      release_fence_fd);
+  return GST_MPP_RGA_FENCE_PENDING;
 }
 
 gboolean

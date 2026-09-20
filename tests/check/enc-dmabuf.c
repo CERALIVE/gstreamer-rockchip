@@ -5,11 +5,46 @@
 #include <gst/video/video.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include "../../gst/rockchipmpp/gstmppenc.h"
 
 extern void mpp_mock_reset(void);
 extern void mpp_mock_rga_set_enabled(int enabled);
 extern unsigned mpp_mock_buffer_import_calls(void);
 extern int mpp_mock_last_import_fd(void);
+extern void mpp_mock_enc_arm_reset_drain(void);
+extern void mpp_mock_enc_release_packets(unsigned count);
+extern unsigned mpp_mock_enc_queued_packets(void);
+extern unsigned mpp_mock_enc_dequeued_packets(void);
+
+static gpointer push_eos(gpointer data) {
+  fail_unless(gst_harness_push_event(data, gst_event_new_eos()));
+  return NULL;
+}
+
+static void drain_with_contended_mutex(GstHarness *h) {
+  GstMppEnc *enc = (GstMppEnc *)h->element;
+  gint64 deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+  while (!mpp_mock_enc_queued_packets() && g_get_monotonic_time() < deadline)
+    g_usleep(100);
+  fail_unless_equals_int(mpp_mock_enc_queued_packets(), 1);
+  /* Hold reset at its real mutex acquisition, after it publishes flushing
+   * and drops the stream lock. The output task can now receive its packet. */
+  g_mutex_lock(&enc->mutex);
+  GThread *eos = g_thread_new("contended-eos", push_eos, h);
+  while (!g_atomic_int_get(&enc->flushing) && g_get_monotonic_time() < deadline)
+    g_usleep(100);
+  fail_unless(g_atomic_int_get(&enc->flushing));
+  mpp_mock_enc_release_packets(1);
+  while (!mpp_mock_enc_dequeued_packets() && g_get_monotonic_time() < deadline)
+    g_usleep(100);
+  fail_unless_equals_int(mpp_mock_enc_dequeued_packets(), 1);
+  /* Dequeue precedes finish_frame; wait for the whole output critical section
+   * before allowing reset to acquire its mutex and change the drain policy. */
+  GST_VIDEO_ENCODER_STREAM_LOCK(enc);
+  g_mutex_unlock(&enc->mutex);
+  GST_VIDEO_ENCODER_STREAM_UNLOCK(enc);
+  g_thread_join(eos);
+}
 
 static const char *codecs[] = {"mpph265enc", "mpph264enc"};
 
@@ -48,7 +83,8 @@ GST_START_TEST(test_compositor_links_through_queue_and_preview_tee) {
 GST_END_TEST
 
 static void check_import(const char *codec, gboolean explicit_dmabuf,
-                         guint width, guint height, const char *rate) {
+                          guint width, guint height, const char *rate,
+                          gboolean contend_eos) {
   mpp_mock_reset();
   mpp_mock_rga_set_enabled(0);
   GstHarness *h = gst_harness_new(codec);
@@ -61,6 +97,8 @@ static void check_import(const char *codec, gboolean explicit_dmabuf,
       explicit_dmabuf ? "(memory:DMABuf)" : "", width, height, rate);
   gst_harness_set_src_caps_str(h, caps);
   g_free(caps);
+  if (contend_eos)
+    mpp_mock_enc_arm_reset_drain();
 
   GstVideoInfo info;
   GstVideoAlignment align;
@@ -84,7 +122,10 @@ static void check_import(const char *codec, gboolean explicit_dmabuf,
   GST_BUFFER_PTS(buffer) = 0;
   GST_BUFFER_DURATION(buffer) = GST_SECOND / 30;
   fail_unless_equals_int(gst_harness_push(h, buffer), GST_FLOW_OK);
-  fail_unless(gst_harness_push_event(h, gst_event_new_eos()));
+  if (contend_eos)
+    drain_with_contended_mutex(h);
+  else
+    fail_unless(gst_harness_push_event(h, gst_event_new_eos()));
   GstBuffer *encoded = gst_harness_try_pull(h);
   fail_unless(encoded != NULL, "%s emitted no mock encoded frame", codec);
   gst_buffer_unref(encoded);
@@ -110,17 +151,27 @@ static void check_import(const char *codec, gboolean explicit_dmabuf,
 
 GST_START_TEST(test_explicit_dmabuf_import_without_pixel_copy) {
   for (guint i = 0; i < G_N_ELEMENTS(codecs); i++) {
-    check_import(codecs[i], TRUE, 1920, 1080, "30/1");
-    check_import(codecs[i], TRUE, 3840, 2160, "60000/1001");
+    check_import(codecs[i], TRUE, 1920, 1080, "30/1", FALSE);
+    check_import(codecs[i], TRUE, 3840, 2160, "60000/1001", FALSE);
   }
 }
 GST_END_TEST
 
 GST_START_TEST(test_plain_caps_keep_existing_dmabuf_import) {
   for (guint i = 0; i < G_N_ELEMENTS(codecs); i++) {
-    check_import(codecs[i], FALSE, 1920, 1080, "30/1");
-    check_import(codecs[i], FALSE, 3840, 2160, "60000/1001");
+    check_import(codecs[i], FALSE, 1920, 1080, "30/1", FALSE);
+    check_import(codecs[i], FALSE, 3840, 2160, "60000/1001", FALSE);
   }
+}
+GST_END_TEST
+
+GST_START_TEST(test_h264_contended_eos_preserves_dmabuf_output) {
+  check_import("mpph264enc", TRUE, 1920, 1080, "30/1", TRUE);
+}
+GST_END_TEST
+
+GST_START_TEST(test_h265_contended_eos_preserves_dmabuf_output) {
+  check_import("mpph265enc", TRUE, 1920, 1080, "30/1", TRUE);
 }
 GST_END_TEST
 
@@ -131,6 +182,8 @@ static Suite *enc_dmabuf_suite(void) {
   tcase_add_test(test_case, test_compositor_links_through_queue_and_preview_tee);
   tcase_add_test(test_case, test_explicit_dmabuf_import_without_pixel_copy);
   tcase_add_test(test_case, test_plain_caps_keep_existing_dmabuf_import);
+  tcase_add_test(test_case, test_h264_contended_eos_preserves_dmabuf_output);
+  tcase_add_test(test_case, test_h265_contended_eos_preserves_dmabuf_output);
   suite_add_tcase(suite, test_case);
   return suite;
 }

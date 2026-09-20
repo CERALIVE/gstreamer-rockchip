@@ -1,5 +1,35 @@
 # Encoder runtime contract
 
+## EOS drain admission [EXISTS — host regression]
+
+`gst_mpp_enc_reset()` publishes its existing always-drain policy while holding
+the video encoder stream lock, **before** publishing `flushing` and releasing
+the stream lock to acquire the encoder mutex. The early flushing notification
+still wakes a capacity-blocked input producer; moving that notification after
+the mutex acquisition would risk deadlock.
+
+Previously the output task could acquire the released stream lock while
+`flushing == TRUE` and `draining == FALSE`. A valid pending packet then took
+the drop path, leaving EOS successful but no encoded output. This surfaced in
+PR #47's Bookworm CI run `35488380577` at the existing `enc-dmabuf` output
+assertion. It is a pre-existing encoder scheduling race, not a GStreamer 1.22
+API difference or a converter-reaper interaction: the affected encoder code
+is unchanged from that PR's base, the failing test creates no `rgaconvert`,
+and Meson runs its converter suite in a separate process.
+
+The deterministic H.264/H.265 cases in `tests/check/enc-dmabuf.c` hold the real
+encoder mutex during EOS, release a pending mock packet after observing
+flushing, and wait for the output critical section before unblocking reset.
+The existing non-mappable DMA-BUF, exact FD-import, negotiated caps and zero
+copy/drop/rejection assertions remain enforced. Restoring the old assignment
+order fails both cases on arm64 Bookworm/GStreamer 1.22.0 **and**
+Trixie/GStreamer 1.26.2. No sleep is used as evidence of packet completion.
+
+This changes neither the bounded drain budget nor MPP calls, buffers, package
+pins or DMA handling. The converter's separate five-second stop bound,
+two-second diagnostic and terminal-fence-owned reaper are untouched. Host mock
+coverage is not hardware or release qualification.
+
 ## Late input during teardown [EXISTS — host regression; board rerun outstanding]
 
 All four encoder subclasses (H.264, H.265, VP8 and JPEG) check the atomic
