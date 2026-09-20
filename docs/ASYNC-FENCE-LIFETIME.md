@@ -25,8 +25,10 @@ RED with both `timeout must not close an outstanding hardware fence` and
   is chained exactly once; no direct event push replaces parent handling.
 - Stop quarantines the remaining states and waits for terminal fences and
   outstanding submit/poll references. At two seconds it posts one error and
-  keeps waiting. Closing a sync-file does not cancel the job, so neither a
-  timeout nor teardown can return a hardware-owned buffer to its pool.
+  keeps waiting. At a separate five-second monotonic stop deadline it transfers
+  unresolved records to the process-lifetime reaper, posts a second error, and
+  returns. Closing a sync-file does not cancel the job: neither threshold returns
+  a hardware-owned buffer to its pool.
 - An async-success result without a fence is a protocol failure, not synchronous
   completion. It posts an error and retains both buffers indefinitely because
   no completion can be proven. A fence returned alongside a failure is likewise
@@ -40,6 +42,62 @@ The converter uses `gst_mpp_rga_fence_status` as a non-owning poll. The legacy
 wait helper closes only terminal descriptors; it leaves a timed-out descriptor
 with its caller. A polling error or invalid fd is not proof of DMA completion.
 
+## Bounded stop and escaped ownership
+
+The five-second ceiling bounds the **wait inside the converter stop callback**,
+not arbitrary native calls, GStreamer state-lock acquisition, scheduling delays,
+or the entire application's teardown. It gives recovery three more seconds
+after the existing two-second diagnostic without making a lost fence hold stop
+forever. This is an exceptional fault-path budget, not a promise to fit within
+cerastream's whole-teardown five seconds: its EOS/ring/send drains and egress
+join already consume part of that separate budget. Normal completion returns
+immediately and retains the previous ownership behavior.
+
+The precedent is cerastream's `cerastream-transport/src/rist.rs` and
+`srt_transport.rs`: remove the owning reference under a lock and hand it to a
+dedicated reaper, which destroys it only once other users have released their
+references. RGA additionally requires a terminal completion fence. The converter
+uses explicit atomic frame reference counts for this sole-owner check; the last
+submitter's release publishes the returned fence before the reaper inspects it.
+The queue contains frame records only, **no owning element or backend pointer**.
+
+One lazy `rga-quarantine` thread polls every retained record nonblocking at
+100 ms intervals. A permanently pending record never blocks another record's
+reclamation. Buffer destruction runs outside the queue mutex, so a pool callback
+cannot deadlock a concurrent handoff. There is no stop/finalize join. GStreamer
+loads plugins resident in both supported versions, keeping the worker's code
+mapped. As with any outstanding GStreamer objects, callers must not invoke
+`gst_deinit()` while escaped buffers remain: this is not a drain/cancellation
+API. If worker creation fails, the queue still retains ownership, emits an
+explicit error, and retries worker creation on the next escape.
+
+Streaming callbacks retain their own element reference while running. A native
+submit that itself outlives stop therefore keeps the element alive until its
+callback returns; the reaper cannot release its frame while that callback holds
+a frame reference. Restart is refused while old submit/wait activity remains.
+A frame awaiting only hardware completion does **not** prevent element
+finalization. Repeated stop/finalize does not reacquire escaped frames.
+
+### Operator signal and residual risk
+
+Each deadline escape increments a mutex-protected process-wide 64-bit
+`quarantine-escapes` counter **once per stop escalation**, not once per frame.
+The new `GST_ELEMENT_ERROR` detail includes that exact cumulative count,
+`escaped-frames`, `outstanding-frames`, `active-waiters` and `active-submits`.
+With `GST_DEBUG=rgaconvert:2`, the reaper also logs reclamation counts and a
+reminder every 30 seconds while unresolved frames remain. Counts persist across
+element destruction and stream sessions, resetting only with the process.
+Growing escape/outstanding counts are a driver/hardware investigation signal,
+not an ordinary successful-stop statistic.
+
+**A fence that never becomes terminal retains its frame forever.** This is the
+accepted alternative to silently recycling DMA-active storage, not a repair for
+a wedged RGA device. Only the stop wait and reaper thread count are bounded;
+aggregate retained buffers are NOT bounded across repeated faulting sessions.
+Missing-fence submissions also stay retained. No fence is synthesized, no device
+reset is attempted, and no driver/library cancellation guarantee is assumed.
+This change does not attribute or fix the separate per-cycle RSS residual.
+
 ## Executable coverage
 
 The Meson rgaconvert suite covers pre-signalled normal completion, unsignalled
@@ -47,6 +105,22 @@ pipe timeout with output/refcount/fd assertions, FLUSH_START propagation with
 input and output retained, stop past two seconds with one bus error, and a real
 GstHarness chain through parent negotiation/allocation/generation, TAG/custom
 events, changed caps and EOS. Host DMA-BUF memory is a test memfd, not hardware.
+
+The stop-bound regression uses two independently owned converters and unsignalled
+eventfds. Each stop must take at least five seconds but less than 6.5 seconds
+(test scheduling allowance), preserve both buffers/fd, and post the unchanged
+two-second error plus the counted five-second escalation. Both elements and test
+backends are destroyed before either fence is signalled. The second frame must
+be genuinely destroyed while the first remains pending, then the first must be
+destroyed on its own signal. Repeated stop/finalize must not wait again. A second
+regression blocks native submission across the deadline and proves host lifetime,
+restart refusal, late fence publication, flushing return and eventual release.
+
+Failing-first: unchanged `455ee6f8` times out after 15 seconds in stop. Disabling
+only reaper reclamation makes the new test fail with zero destroyed buffers
+instead of two. Both are distinct negative controls: a bounded return alone
+must not disguise a permanently detached leak. These tests are host/container
+ownership evidence only; no new hardware run accompanies this fix.
 
 ## Rock fault injection — 2026-09-20
 
