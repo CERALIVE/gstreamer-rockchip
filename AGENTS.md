@@ -51,6 +51,23 @@ to establish whether that package is available, not a branch name or CI result.
 Publishing the package and pinning it in an image are separate from installing
 and qualifying that exact image on hardware.
 
+**Release ledger, current at 2026-09-20.** Seven releases exist, one arm64 `.deb`
+plus `.sha256` each: `.1` (nine factories), `.2` (`rgaconvert`/`rgacompositor`,
+PR #27), `.3` (colorimetry fixation, PR #30), `.4` (sRGB transfer VUI mapping,
+PR #32 — pruned from the APT index by its own reindex run and never
+re-published, see its release notes), `.5` (compositor DMA-BUF caps accepted by
+the encoder, PR #33), `.6` (suite-matched release builds + librga R1 pins,
+PR #39/#41), `.7` (C6b explicit colour and im2d compatibility boundary PR #42,
+bounded stop with fence quarantine PR #47, bounded DMA-BUF handle cache PR #46,
+delayed-primary composition start PR #45, real RKVENC fault attribution PR #44,
+teardown admission PR #43). `image-building-pipeline` master pins **`.6`**; `.7`
+is released and served by APT but pinned by no image. Both bench boards have run
+island images carrying `.3` through `.6` — the 2026-09-19 Rock composition
+teardown and encoder-restart rows and the OPi `RUN-30-R3` composition row in
+root `docs/COMPLETENESS-MATRIX.md` §2.2 name the installed package — so "no
+device image has passed it" below is history for those releases and still true
+for `.7`. `tests/board/DRILL-RESULTS.md` remains the per-drill verdict record.
+
 The `1.14.4+ceralive.3` release scope is the omitted-colorimetry fixation fix,
 not complete media-stack qualification. The OPi hardware rerun proves that fix;
 explicit BT.709 CSC and the remaining d5 failures are documented limitations
