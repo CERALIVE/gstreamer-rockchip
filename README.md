@@ -200,6 +200,15 @@ measurement. An unavailable Opt entry point refuses `async-depth=1` with a
 warning; debug CPU staging stays synchronous. A fence timeout switches future
 frames to sync but quarantines both buffers until completion; it never pushes
 or frees unfinished output. A submission refusal remains a typed failure.
+Stop waits at most five seconds for this ownership drain, then reports a counted
+error and transfers unresolved frames to an element-independent reaper. The
+existing two-second diagnostic remains separate. The reaper releases buffers
+only after terminal completion and after host users relinquish their references,
+including after the element is destroyed. `GST_DEBUG=rgaconvert:2` shows cumulative
+`quarantine-escapes`, outstanding frames and periodic retention reminders. A
+truly never-terminal fence is retained forever: the wait is bounded, not total
+retained memory across repeated hardware faults. This is not hardware-wedge or
+RSS-residual closure.
 The [fence-lifetime contract](docs/ASYNC-FENCE-LIFETIME.md) records flush/event
 ordering and the bounded Rock fault test. **C6b-perf remains BLOCKED** — the handle path is refused
 by the driver on both boards, so the import cache cannot be measured at all.
