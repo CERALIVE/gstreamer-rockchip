@@ -24,10 +24,12 @@ the two first-party librga factories.
 with neither `rgaconvert` nor `rgacompositor`. This tree adds both elements and
 encoder hygiene for `1.14.4+ceralive.2`; check the
 [release assets](https://github.com/CERALIVE/gstreamer-rockchip/releases) for
-package availability. The release is being pulled forward to unblock board
-validation, not to claim that a device image has passed it. The earlier d5
-matrix recorded six failing quality cells, and the negotiated-colorimetry fix
-still needs its hardware rerun. See
+package availability. Releases `.2` through `.7` have since shipped;
+`AGENTS.md` carries the ledger and `image-building-pipeline` pins `.6`. The
+paragraph that follows records the state at `.2`/`.3` and is kept as history:
+the release was pulled forward to unblock board validation, not to claim that a
+device image had passed it. The earlier d5 matrix recorded six failing quality
+cells, and the negotiated-colorimetry fix still needed its hardware rerun. See
 [`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md) for the actual
 hardware evidence and remaining limits.
 

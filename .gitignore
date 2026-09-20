@@ -74,3 +74,8 @@ Build
 /stage-deb-*
 /dist
 /test-results/
+
+# ccache build caches. A local build pointed CCACHE_DIR at .cache/ccache and
+# that tree was committed by accident; CI uses .ccache. Neither is source.
+/.cache/
+/.ccache/
