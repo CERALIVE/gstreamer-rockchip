@@ -25,7 +25,8 @@ with neither `rgaconvert` nor `rgacompositor`. This tree adds both elements and
 encoder hygiene for `1.14.4+ceralive.2`; check the
 [release assets](https://github.com/CERALIVE/gstreamer-rockchip/releases) for
 package availability. Releases `.2` through `.7` have since shipped;
-`AGENTS.md` carries the ledger and `image-building-pipeline` pins `.6`. The
+`AGENTS.md` carries the ledger; `image-building-pipeline` pins `.7`, and both
+bench boards booted an image carrying `.7` from a production slot on 2026-09-21. The
 paragraph that follows records the state at `.2`/`.3` and is kept as history:
 the release was pulled forward to unblock board validation, not to claim that a
 device image had passed it. The earlier d5 matrix recorded six failing quality
