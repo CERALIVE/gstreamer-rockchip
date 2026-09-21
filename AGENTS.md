@@ -51,7 +51,7 @@ to establish whether that package is available, not a branch name or CI result.
 Publishing the package and pinning it in an image are separate from installing
 and qualifying that exact image on hardware.
 
-**Release ledger, current at 2026-09-20.** Seven releases exist, one arm64 `.deb`
+**Release ledger, current at 2026-09-21.** Seven releases exist, one arm64 `.deb`
 plus `.sha256` each: `.1` (nine factories), `.2` (`rgaconvert`/`rgacompositor`,
 PR #27), `.3` (colorimetry fixation, PR #30), `.4` (sRGB transfer VUI mapping,
 PR #32 — pruned from the APT index by its own reindex run and never
@@ -60,13 +60,21 @@ the encoder, PR #33), `.6` (suite-matched release builds + librga R1 pins,
 PR #39/#41), `.7` (C6b explicit colour and im2d compatibility boundary PR #42,
 bounded stop with fence quarantine PR #47, bounded DMA-BUF handle cache PR #46,
 delayed-primary composition start PR #45, real RKVENC fault attribution PR #44,
-teardown admission PR #43). `image-building-pipeline` master pins **`.6`**; `.7`
-is released and served by APT but pinned by no image. Both bench boards have run
-island images carrying `.3` through `.6` — the 2026-09-19 Rock composition
-teardown and encoder-restart rows and the OPi `RUN-30-R3` composition row in
-root `docs/COMPLETENESS-MATRIX.md` §2.2 name the installed package — so "no
-device image has passed it" below is history for those releases and still true
-for `.7`. `tests/board/DRILL-RESULTS.md` remains the per-drill verdict record.
+teardown admission PR #43). `image-building-pipeline` master pins **`.7`**
+(image PR #183, `.6` retained commented above it as the rollback), and that pin
+has been booted, not only configured: on 2026-09-21 the Rock 5B+ and the Orange
+Pi 5+ each promoted the image built from it to RAUC slot A, came up with
+`systemctl --failed` empty and `ceralive-healthcheck.service` self-marking the
+slot good, and read `gstreamer1.0-rockchip-ceralive 1.14.4+ceralive.7` back
+through `dpkg-query` on the booted slot (alongside `librga2-ceralive
+1.10.5+ceralive.1`, `cerastream 2026.9.6` and the island `v2026.9.5` kernel).
+Earlier bench runs of `.3` through `.6` on island candidate images are named by
+the 2026-09-19 Rock composition teardown and encoder-restart rows and the OPi
+`RUN-30-R3` composition row in root `docs/COMPLETENESS-MATRIX.md` §2.2. So
+"devices ship it" is the honest wording for `.7` from that date; "pinned but no
+device image has passed it" is history for every release. A clean boot with the
+plugin installed is not a per-element pass: `tests/board/DRILL-RESULTS.md`
+remains the per-drill verdict record and none of its limits are lifted here.
 
 The `1.14.4+ceralive.3` release scope is the omitted-colorimetry fixation fix,
 not complete media-stack qualification. The OPi hardware rerun proves that fix;
