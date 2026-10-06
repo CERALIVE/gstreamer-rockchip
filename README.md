@@ -68,7 +68,7 @@ only, so the Bookworm lane's legacy Radxa pair is a permanent input rather than
 a stopgap: it keeps the GStreamer 1.22 build and test coverage alive without
 claiming R0/R1-on-Bookworm support. librga's own Bookworm CI jobs compile and test
 the source there for the same portability reason and publish nothing.
-See [`AGENTS.md`](AGENTS.md#release-publishing-policy).
+See [release publishing policy](docs/agents/release-publishing-policy.md).
 
 ```bash
 bash ci/install-build-deps.sh
