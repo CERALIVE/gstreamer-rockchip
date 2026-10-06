@@ -1,701 +1,101 @@
 # gstreamer-rockchip
 
-CeraLive's public fork of the Rockchip MPP GStreamer plugins. The fork is based
-on `irlserver/gstreamer-rockchip` at `755aeb9`, preserving the BELABOX and
-datagutt streaming-control work, and carries CeraLive's independently reviewed
-fix ledger for the RK3588 encode/decode path.
+Parent policy: [CeraLive workspace](https://github.com/CERALIVE/ceralive/blob/master/AGENTS.md).
 
-## Role
+<!-- workspace-hard-rules:begin -->
+## Workspace hard rules (identical in every CeraLive AGENTS.md)
+- Commits and PRs carry the human author only: no Co-authored-by, no AI attribution.
+- Start from the updated canonical branch; rebase to update; never `reset --hard` or discard others' work.
+- One focused PR per repo, opened against CERALIVE/<repo>; the root policy PR merges first.
+- A repo is self-contained: no path above its root; consume @ceralive packages from the registry, never link:/file:.
+- Never delete, skip or weaken a test; every behavior change ships with a test.
+- A user-visible change updates docs.ceralive.tv in English and Spanish (es-419), and any ceralive.tv claim it touches, in the same release.
+- AGENTS.md holds rules and routing only, within budget; contracts and history live in docs/agents/.
+- Full canon: https://github.com/CERALIVE/ceralive/blob/master/AGENTS.md
+<!-- workspace-hard-rules:end -->
 
-This repository supplies the RK3588 hardware elements used by `cerastream`:
+## ROLE
 
-```text
-capture -> rgaconvert -> mpph264enc/mpph265enc -> cerastream transport
-primary + secondary -> rgacompositor -> mpph264enc/mpph265enc
-compressed input -> mppvideodec/mppjpegdec -> program graph
-```
+CeraLive's public RK3588 MPP/RGA GStreamer fork. Supplies hardware encode/decode,
+conversion and composition to cerastream; ships one arm64 plugin package.
+Host software coverage and board qualification are distinct.
 
-The package remains a complete plugin set. The factory contract contains
-**eleven built entries** with no reserved slots — but read the release-state note
-below the table before quoting that number as something a device carries:
+## STRUCTURE
 
-| # | Factory | Plugin | Registration expectation |
-|---|---|---|---|
-| 1 | `mpph264enc` | `rockchipmpp` | Registers where `gst_mpp_enc_supported()` finds a VPU. |
-| 2 | `mpph265enc` | `rockchipmpp` | Registers where `gst_mpp_enc_supported()` finds a VPU. |
-| 3 | `mppvp8enc` | `rockchipmpp` | Registers only on SoCs with a VEPU2 VP8 encoder. **RK3588: EXPECTED-ABSENT.** |
-| 4 | `mppjpegenc` | `rockchipmpp` | Registers where `gst_mpp_enc_supported()` finds a VPU. |
-| 5 | `mppvideodec` | `rockchipmpp` | Registers unconditionally. |
-| 6 | `mppjpegdec` | `rockchipmpp` | Registers unconditionally, rank 257. |
-| 7 | `mppvpxalphadecodebin` | `rockchipmpp` | Registers on GStreamer ≥ 1.19. |
-| 8 | `kmssrc` | `kmssrc` | Registers unconditionally. |
-| 9 | `rkximagesink` | `rkximage` | Registers unconditionally. |
-| 10 | `rgaconvert` | `rockchiprga` | Registers unconditionally at rank `NONE`; activation is gated at NULL→READY. |
-| 11 | `rgacompositor` | `rockchiprga` | Registers unconditionally at rank `NONE`; activation is gated at NULL→READY. |
+- `gst/` — MPP/RGA elements, KMS source and X11/KMS sink.
+- `tests/` — host suites, parity goldens, board drills and MPI interposer.
+- `ci/` — target-suite resolution, pinned dependencies and ABI/GLIBC gates.
+- `packaging/` — Debian build and package/provider contracts.
+- `docs/` — runtime contracts, fix evidence and extracted agent contracts.
+- `hooks/` — upstream C formatting checker.
+- `.github/` — Build Check and release workflows.
 
-`mppvp8enc`'s absence on RK3588 is a **silicon fact, not a registration
-failure**: the SoC has no VEPU2 VP8 block, the historical Radxa package behaves
-identically on the same board, and `d1-runtime-parity.sh` scores it
-EXPECTED-ABSENT rather than failing. Do not "fix" it and do not remove it — it
-registers on the SoCs that do carry the block.
+## COMMANDS
 
-CeraLive deeply validates the four MPP factories used by the engine plus
-`rgaconvert` and `rgacompositor`; the remaining five retain
-build-and-registration coverage.
-
-**RELEASE BOUNDARY — `1.14.4+ceralive.1` carries nine factories.** It predates
-both `rockchiprga` elements. This tree adds `rgaconvert`, `rgacompositor` and
-encoder hygiene for `1.14.4+ceralive.2`; use the
-[published releases](https://github.com/CERALIVE/gstreamer-rockchip/releases)
-to establish whether that package is available, not a branch name or CI result.
-Publishing the package and pinning it in an image are separate from installing
-and qualifying that exact image on hardware.
-
-**Release ledger, current at 2026-09-21.** Seven releases exist, one arm64 `.deb`
-plus `.sha256` each: `.1` (nine factories), `.2` (`rgaconvert`/`rgacompositor`,
-PR #27), `.3` (colorimetry fixation, PR #30), `.4` (sRGB transfer VUI mapping,
-PR #32 — pruned from the APT index by its own reindex run and never
-re-published, see its release notes), `.5` (compositor DMA-BUF caps accepted by
-the encoder, PR #33), `.6` (suite-matched release builds + librga R1 pins,
-PR #39/#41), `.7` (C6b explicit colour and im2d compatibility boundary PR #42,
-bounded stop with fence quarantine PR #47, bounded DMA-BUF handle cache PR #46,
-delayed-primary composition start PR #45, real RKVENC fault attribution PR #44,
-teardown admission PR #43). `image-building-pipeline` master pins **`.7`**
-(image PR #183, `.6` retained commented above it as the rollback), and that pin
-has been booted, not only configured: on 2026-09-21 the Rock 5B+ and the Orange
-Pi 5+ each promoted the image built from it to RAUC slot A, came up with
-`systemctl --failed` empty and `ceralive-healthcheck.service` self-marking the
-slot good, and read `gstreamer1.0-rockchip-ceralive 1.14.4+ceralive.7` back
-through `dpkg-query` on the booted slot (alongside `librga2-ceralive
-1.10.5+ceralive.1`, `cerastream 2026.9.6` and the island `v2026.9.5` kernel).
-Earlier bench runs of `.3` through `.6` on island candidate images are named by
-the 2026-09-19 Rock composition teardown and encoder-restart rows and the OPi
-`RUN-30-R3` composition row in root `docs/COMPLETENESS-MATRIX.md` §2.2. So
-"devices ship it" is the honest wording for `.7` from that date; "pinned but no
-device image has passed it" is history for every release. A clean boot with the
-plugin installed is not a per-element pass: `tests/board/DRILL-RESULTS.md`
-remains the per-drill verdict record and none of its limits are lifted here.
-
-The `1.14.4+ceralive.3` release scope is the omitted-colorimetry fixation fix,
-not complete media-stack qualification. The OPi hardware rerun proves that fix;
-explicit BT.709 CSC and the remaining d5 failures are documented limitations
-accepted by the owner for this release, not silently passing board gates.
-[`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md) retains the actual
-drill verdicts and their limits. A passing build or install smoke does not erase
-those limits or establish a working 4K59.94 capture-to-encode stream.
-
-Release through `.github/workflows/publish-release.yml` on `main` only, after
-the merged commit's Build Check passes. Dispatch with `release_type=stable`
-and `dry_run=false` for publication; `dry_run=true` rehearses without publishing.
-The workflow derives the next upstream-style version from existing tags, gates
-both suite builds and their suite-matched install smokes, publishes exactly one arm64 `.deb` plus
-its `.sha256`, then dispatches `apt-reindex` to `CERALIVE/apt-worker`. Do not
-pre-create the tag. Independently download and checksum the release archive
-before image pinning, and verify the stable arm64 APT index and package bytes
-after reindexing; a successful dispatch alone is not serving proof.
-
-Production defaults to **Trixie / glibc 2.41 / GStreamer 1.26** in
-`ci/target-suite.env`. Bookworm builds explicitly set `TARGET_SUITE=bookworm`
-and select the existing `RGA_COMPAT_SUITE=bookworm` legacy pair. Both release
-builds run all four gates and package contracts; each smoke starts in a fresh
-matching container and verifies the package's `X-CeraLive-Build-Suite` field.
-Only Trixie's `release-assets` is published. Bookworm's `~bookworm` package is
-an internal `portability-bookworm` artifact, never a GitHub release asset or APT
-input. Its green smoke is not a claim that the Trixie/R1 binary runs on Bookworm.
-
-## Release publishing policy
-
-**Our APT publishes Trixie variants only. Bookworm is compile and portability
-coverage, never published.** Owner decision, recorded 2026-09-16: "we dont want
-to publish bookworm variants but trixie's in our apt". This is a permanent
-policy, not a staging state waiting on a Bookworm librga release, and it is why
-the release matrix below is deliberately asymmetric.
-
-**The matrix builds two, publishes one.** `publish-release.yml`'s `build` job is
-a `[bookworm, trixie]` matrix (line 158). Each leg runs the full four-gate suite
-and packaging, then uploads its `dist/` under a name chosen by whether the leg
-matches the suite from `ci/target-suite.env`: the suite-matched leg uploads
-`release-assets`, the other uploads `portability-<suite>` (line 323). The
-`publish` job downloads `release-assets` by name and nothing else (line 384),
-so the portability artifact is discarded at the end of the run. Only one `.deb`
-is ever published. The Bookworm package additionally carries a `~bookworm`
-version suffix (line 163), so it could never collide with the released name
-even if it escaped.
-
-**The "exactly one `.deb`" assertion is correct BY POLICY.** Both the `build`
-job (line 268, "Assemble and verify the release assets") and the `publish` job
-(line 390, "Assert exactly one .deb and its checksum") assert set equality
-between `dist/` and `{<deb>, <deb>.sha256}`. Do not "fix" either to admit a
-second artifact. The assertion is also load-bearing downstream: apt-worker's
-reindex downloads every `.deb` attached to the tag and hard-fails when a package
-name differs from the dispatched component, so a stray second archive is a
-failed publish, not a cosmetic one.
-
-**The Bookworm leg's real value is GStreamer 1.22 API coverage.** Bookworm
-ships 1.22 and Trixie ships 1.26; `build-check.yml` asserts each leg's actual
-`pkg-config` minor against its declared one (lines 175-184) so a base-image
-change cannot quietly turn the 1.22 leg into a second 1.26 leg. This coverage is
-live, not theoretical: PR #38's `GstVideoAggregator` allocator-ownership fix
-(`a7b6fe37`) was validated against both 1.22 and 1.26, and the Frozen contracts
-entry for it names both versions. Dropping the Bookworm leg would delete that
-coverage. Not publishing Bookworm is a reason to keep the leg internal, not a
-reason to remove it.
-
-**The Bookworm leg links legacy Radxa librga, with R1 headers only.** Published
-R0/R1 require `libc6 (>= 2.38)` and cannot
-install on Bookworm's glibc 2.36, so the Bookworm leg selects the SHA-pinned
-Radxa `librga2`/`librga-dev` `2.2.0-1` pair through `RGA_COMPAT_SUITE=bookworm`
-in `ci/mpp-pin.env`. A Bookworm artifact would therefore not be a supported
-configuration even if it were published. `build-check.yml`'s summary already
-labels the leg "legacy Radxa 2.2.0-1 (plugin portability only; NOT R0/R1
-support)" (line 267). No Bookworm librga is needed under this policy and none
-is planned; the legacy runtime pin is permanent, not a placeholder. C6b extracts
-only checksum-verified R1 headers into `/usr/local/include/rga`, never installs
-R1 packages there. Both suites enforce the ≥1.10.5 header assertion; older
-runtime loading uses dynamic Opt lookup.
-
-**`RGA_COMPAT_SUITE` must be wired into every job that installs or fetches
-librga, per leg.** The `1.14.4+ceralive.6` release run at `800f92a8` failed
-(run 35094258487) in `Gate and package · debian:bookworm · arm64` at the
-dependency-install step: the installer logged `compatibility suite: none; R0
-release pair` and apt refused with `librga2-ceralive : Depends: libc6 (>= 2.38)
-but 2.36-9+deb12u14 is to be installed`. Before PR #39, `build-check.yml`
-already set `RGA_COMPAT_SUITE` on its install step (now line 158), but
-`publish-release.yml` set it nowhere. PR #39 (`b0892d94`) wired it into all
-three places the release workflow touches librga: the `build` job's install
-step (line 181), the `install-smoke` job's runtime fetch (line 352), and the
-`docker run` environment for the smoke itself (line 368). Every one uses the
-same expression, `${{ matrix.suite == 'bookworm' && 'bookworm' || '' }}`. The
-same file got this right in one job and wrong in another because the selector
-is per-step `env:`, not job-level, so a new step or job that installs librga
-does not inherit it. Any future step that sources `ci/mpp-pin.env` or runs
-`ci/install-build-deps.sh` inside a suite matrix needs the selector added
-explicitly, or the Bookworm leg will try to install the incompatible release pair.
-
-## Repository map
-
-| Area | Location |
-|---|---|
-| MPP encoder/decoder plugin | `gst/rockchipmpp/` |
-| RGA 2D converter/compositor plugin | `gst/rockchiprga/` |
-| RGA backend, tuple health, conversion counters | `gst/rockchipmpp/gstmpprga*.c`, `gstmppconversionstats.c` |
-| Cross-layer kernel fault bridge (tracefs/procfs → restart) | `gst/rockchipmpp/gstmppfaultbridge.{c,h}` |
-| RGA ↔ MPP interaction reference | `docs/RGA-MPP-INTERACTION.md` |
-| KMS source | `gst/kmssrc/` |
-| Rockchip X11/KMS sink | `gst/rkximage/` |
-| Hardware-independent tests | `tests/` |
-| Board-gated drills | `tests/board/` |
-| Runtime parity goldens | `tests/golden/` |
-| Per-fix evidence ledger | `docs/fix-audit.md` |
-| Encoder latency/recovery/color/VUI/IDR/DTS contract | `docs/ENCODER-RUNTIME-CONTRACT.md` |
-| Debian package contract | `packaging/` |
-| Target suite and MPP/RGA pins | `ci/` |
-
-## Commit strategy
-
-Three tiers preserve provenance and reviewability:
-
-1. **Tier (a), ported upstream fixes.** Clean ports use `git cherry-pick -x`,
-   preserving the original Author and message. Adapted ports use the adapter's
-   authorship and credit the owner plus full source SHA in the message. Never
-   squash either form.
-2. **Tier (b), first-party bug fixes.** One commit per bug, titled for the defect
-   mechanism rather than implementation trivia. Never squash these commits.
-3. **Tier (c), CI, packaging, docs, and mechanical work.** These may be squashed
-   under the normal CeraLive Rule C convention.
-
-The integration PR contains tier-(a)/(b) history and therefore merges with
-**Rebase and merge** or **Create a merge commit**. Squash-merge is forbidden for
-that PR because it destroys the provenance the first two tiers exist to retain.
-No commit may carry a `Co-authored-by` or AI/tool attribution trailer. A clean
-cherry-pick's real upstream Author field is provenance, not a trailer.
-
-## PR-TARGETING
-
-Every PR targets `CERALIVE/gstreamer-rockchip`, never the fork parent. Working
-clones retain only the CERALIVE `origin`; do not leave a remote named `upstream`
-attached. If a source comparison is required, add a descriptively named,
-temporary remote, fetch an explicit ref, verify the expected SHA, and remove the
-remote before pushing or opening a PR.
-
-Open the PR explicitly against the CERALIVE repository's canonical `main`
-branch:
+Full CI runs both Debian Bookworm/GStreamer 1.22 and Trixie/1.26 on arm64.
+Use `RGA_COMPAT_SUITE=bookworm` on the Bookworm dependency-install step only.
 
 ```bash
-gh pr create --repo CERALIVE/gstreamer-rockchip \
-  --base main
+bash ci/install-build-deps.sh
+export CC="ccache gcc"
+meson setup build -Drkximage=enabled -Drockchipmpp=enabled -Dkmssrc=enabled -Drga=enabled
+meson compile -C build
+meson test -C build --print-errorlogs
+shellcheck tests/mpi-interposer/check.sh
+CC="ccache gcc" bash tests/mpi-interposer/check.sh build
+bash ci/check-glibc-floor.test.sh
+bash ci/check-glibc-floor.sh build/gst/rockchipmpp/libgstrockchipmpp.so
+bash ci/check-mpp-abi.sh build/gst/rockchipmpp/libgstrockchipmpp.so
+shellcheck -x ci/install-build-deps.sh ci/rga-suite-pins.test.sh
+shellcheck -x ci/target-suite.test.sh ci/install-smoke.sh packaging/build-deb.sh
+bash ci/target-suite.test.sh
+bash ci/rga-suite-pins.test.sh
+shellcheck -x packaging/package-contract.sh packaging/rga-provider-contract{,.test}.sh
+bash packaging/rga-provider-contract.test.sh
+bash packaging/build-deb.sh
+bash packaging/package-contract.sh stage-deb-arm64 dist
 ```
 
-Before handoff, verify the PR URL starts with
-`https://github.com/CERALIVE/gstreamer-rockchip/`. A PR carrying tier-(a)/(b)
-commits is never self-merged; an independent reviewer must confirm its evidence
-and merge method.
+`.github/workflows/build-check.yml` also rejects undefined `improcessOpt` symbols
+in both built MPP/RGA plugins. It is the complete gate authority.
 
-## Cherry-pick source registry
+## WHERE TO LOOK
 
-The upstream audit is frozen at JeffyCN/mirrors branch `gstreamer-rockchip` tip
-`a0d45af504099b4b82f3d3377019a63d357e7cef`. Later JeffyCN work is a new audit,
-not an implicit extension of this ledger.
-
-| Source | Resolution in this fork |
+| Code path or task | Contract |
 |---|---|
-| irlserver `755aeb9` | Fork base; includes BELABOX and irlserver-datagutt features. |
-| JeffyCN `1ceaf42` | Clean `-x` port: decoder DMA-BUF caps. |
-| kelvinlawson `d27ae92` | Clean `-x` port: unmatched-PTS pending-frame bound. |
-| JeffyCN `7ffd7f4` | Already an ancestor; regression lock only. |
-| JeffyCN `5f45bd4` | Adapted packet-ownership/reset cleanup for this fork's older decoder callback layout. |
-| kelvinlawson `892f662` | Selective DMA_DRM negotiation port; linear output only, GStreamer 1.22 preserved. |
-| kelvinlawson `b93ecb6` / BoxCloudIRL `3b58acf` | DMA32 and used-path RGA behavior already inherited; regression lock only. |
-| JeffyCN `c560118` | Adapted encoder reset output-queue drain. |
-| JeffyCN `a910efe` | Ported JPEG input timeout handling, subsequently corrected against pinned MPP timeout semantics. |
-| kelvinlawson `44578bd` | Adapted into codec-aware no-output decoder accounting; broad size/PTS heuristics were rejected in review. |
-| JeffyCN `31ee8bd` | `SKIP-ALREADY-PRESENT`; stride semantics remain board-gated. |
-| radxa-pkg `3ccc1e3` | Rejected: packaging wrapper for already-present `31ee8bd`, no source delta. |
-| JeffyCN `973fd0e` | Cherry-picked then reverted after independent review falsified its allocator-order premise. |
+| Before changing anything else here, open docs/agents/README.md and read the contract for the subsystem you touch | [Contract index](docs/agents/README.md) |
+| Overview | [overview](docs/agents/overview.md) |
+| Role | [role](docs/agents/role.md) |
+| Release publishing policy | [release-publishing-policy](docs/agents/release-publishing-policy.md) |
+| Repository map | [repository-map](docs/agents/repository-map.md) |
+| Commit strategy | [commit-strategy](docs/agents/commit-strategy.md) |
+| PR-TARGETING | [pr-targeting](docs/agents/pr-targeting.md) |
+| Cherry-pick source registry | [cherry-pick-source-registry](docs/agents/cherry-pick-source-registry.md) |
+| Frozen contracts | [frozen-contracts](docs/agents/frozen-contracts.md) |
+| Test and board-drill contract | [test-and-board-drill-contract](docs/agents/test-and-board-drill-contract.md) |
+| Licensing and credits | [licensing-and-credits](docs/agents/licensing-and-credits.md) |
+| Pre-commit formatting | [pre-commit-formatting](docs/agents/pre-commit-formatting.md) |
+| Anti-patterns | [anti-patterns](docs/agents/anti-patterns.md) |
 
-The complete red/green, MPP-ABI, hardware-gate, and independent-review record is
-`docs/fix-audit.md`; this table is a routing index, not a replacement for it.
+## HARD RULES
 
-## Frozen contracts
-
-The following are compatibility contracts, not cleanup opportunities:
-
-- **Plugin filenames:** `libgstrockchipmpp.so` remains unchanged — the image's
-  sysext exclusion globs and its MPP runtime-contract test key on that exact
-  name. The RGA converter and compositor ship alongside it as
-  `libgstrockchiprga.so`, in the same package and the same plugin directory;
-  both names are frozen.
-- **Package prefix/name:** Rockchip packages retain the
-  `gstreamer1.0-rockchip` prefix; this fork ships
-  `gstreamer1.0-rockchip-ceralive` and replaces
-  `gstreamer1.0-rockchip1` plus `belabox-gstreamer1.0-rockchip`.
-- **Factory set:** the eleven-entry table under **Role** is the contract. All
-  eleven factories continue to register on the platforms named in their
-  expectation column, with `mppvp8enc` EXPECTED-ABSENT on RK3588. Registering
-  fewer factories than the SoC can carry is a defect; registering an unlisted
-  factory is a contract change.
-- **Encoder properties used by the engine:** `bitrate`, `bitrate-min`,
-  `bitrate-max`, `zero-copy-pkt`, `rc-mode`, `qp-max`, `gop`, `width`, and
-  `height` keep their names, types, defaults, ranges, and enum nicks. The
-  inherited fork spelling is `bitrate`, not the historical Radxa `bps` spelling;
-  consumer migration is a separate release prerequisite.
-- **Decoder properties:** `mppvideodec` keeps `format`, `width`, and `height`;
-  `mppjpegdec` keeps NV12 output. The four used elements remain at least
-  `GST_RANK_MARGINAL`; `mppjpegdec` remains rank 257.
-- **Caps and allocation:** existing golden caps are additive-only. The MPP
-  encoder's DMA-BUF pool, 1080-to-1088 `GstVideoAlignment`, and DMA32 allocator
-  request are runtime contracts.
-  H.264/H.265 sinks additionally accept linear NV12 `memory:DMABuf`, so the
-  DMA-BUF-only compositor can link through a queue and preview tee. Plain caps
-  remain supported; caps features and actual buffer backing are distinct.
-  `tests/check/enc-dmabuf.c` exercises real pad links and the existing FD-import
-  path with CPU copying and RGA conversion disabled. This is host software
-  coverage, not item-30 composition or per-frame board FD qualification; see
-  `docs/ENCODER-RUNTIME-CONTRACT.md` for the separate 1080p30 finding.
-- **Encoder runtime hygiene:** latency follows the tracked pending depth;
-  non-timeout MPP failures get at most three context restarts per ten seconds;
-  explicit sink colorimetry reaches MPP VUI config without guessing absent
-  values; both force-key-unit directions request IDR; and the no-B-frame output
-  contract is `DTS = PTS`. The read-only `encoder-restarts` counter is additive,
-  and so is the read-only `kernel-faults` counter the fault bridge publishes.
-  The sRGB transfer mapping [EXISTS] preserves `2:4:7:1` as limited-range
-  BT.601 matrix / IEC 61966-2-1 transfer / BT.709 primaries. GStreamer transfer
-  enum 7 maps to MPP/H.26x code 13, not 7. Host config tests cover cold starts
-  and color-only BT.709↔sRGB renegotiation for both codecs; hardware output and
-  ten-cycle live-switch acceptance remain separate gates. See the encoder
-  runtime contract for unmapped values and the bitstream evidence boundary.
-- **RGA conversion:** `/dev/rga` must pass the driver-version ioctl before use;
-  librga init alone is never sufficient. Blit health is isolated per operation
-  and format pair. MPP/`rgaconvert` CPU staging remains debug-only behind
-  `GST_MPP_ALLOW_CPU_COPY=1`; `rgacompositor` has no CPU pixel path at all.
-  Normal operation fails negotiation instead. The three read-only conversion
-  counters are additive element properties. The build pins matching
-  `librga-ceralive-dev` and `librga2-ceralive` R1 `1.10.5+ceralive.1` assets from
-  `CERALIVE/librga` in `ci/mpp-pin.env`; `ci/install-build-deps.sh` installs both.
-  The runtime owns `librga.so.2` and provides `librga2 (= 2.2.0)`, so the plugin's
-  `Depends: librga2` remains unchanged. The staged package contract accepts only
-  `librga2-ceralive` (with its virtual Provides) or legacy Radxa `librga2` as the
-  SONAME owner. Build Check runs the provider regressions and real staged package
-  contract on both suites.
-  **Suite boundary:** published R0/R1 require `libc6 (>= 2.38)`;
-  they cannot run on Bookworm's glibc 2.36.
-  Build Check and Publish Release set `RGA_COMPAT_SUITE=bookworm` only for that leg's
-  installer, selecting the prior SHA-pinned Radxa `librga2`/`librga-dev`
-  `2.2.0-1` pair. The installer rejects that selection outside Debian Bookworm.
-  Trixie uses released R1; the default headers/runtime pins move together. Both required
-  legs retain every test and the staged provider contract. Bookworm green means
-  plugin portability on GStreamer 1.22, **not R0/R1-on-Bookworm support**. The
-  `ci/rga-suite-pins.test.sh` gate pins both pairs and rejects unknown selectors.
-  No Bookworm librga build is planned: our APT publishes Trixie only, so the
-  legacy pair is the permanent Bookworm input (see **Release publishing
-  policy**). Do not force-install R0/R1, lower their dependency floor or drop the
-  compatibility leg.
-- **C6b im2d color conversion:** complete colorimetry is retained from video
-  info; directional CSC is applied with `imsetColorSpace`, never OR-ed into
-  transform usage. Unexpressible rows use D29's default-matrix fallback, a
-  one-time warning and `csc-fallback-frames`, distinct from CPU-copy accounting.
-  Only SUCCESS/NOERROR succeed; other statuses reach typed flow failures.
-  MPP blits use synchronous im2d; `GST_MPP_RGA_LEGACY_BLIT=1` retains rollback.
-  Build against ≥1.10.5 headers, retain the explicit GModule handle and resolve
-  Opt dynamically, never link it. See `docs/RGA-MPP-INTERACTION.md`; both-board
-  qualification remains NOT-RUN.
-- **C6b-perf is implemented, default-off and hardware-unqualified.**
-  `GST_MPP_RGA_HANDLE_CACHE=1` at element construction enables rgaconvert's
-  fd-keyed, identity-checked LRU (32 total imports, including in-flight leases).
-  A retained duplicate fd pins the inode; each lookup checks device/inode/size
-  and import geometry, so recycled fd numbers never identify old storage.
-  Entries retain GstMemory, not GstBuffer/pool references. Pending/ready/
-  quarantine records own leases until terminal completion; never evict a lease
-  to satisfy the bound. Import failure or saturation uses FD mode for BOTH
-  channels. Stop/dispose drains frames before releasing every import once.
-  Cache logic stays in `gstrgaconvert.c`; backend fields only transport borrowed
-  handles. librga #25 fixed the handle-plane defect on main, NOT in the pinned
-  released R1 archive. Opt-in validation requires those fixed library bytes.
-  Rock's direct-API +48.9%/+66.7% measurements justify implementation, not
-  in-element or both-board adoption. See the C6b-perf contract below.
-- **C6b-async is ADOPTED on both boards, and it ships DEFAULT-OFF.** Depth-1
-  `IM_ASYNC` pipelining cleared the ≥5 % gate on Rock (+17.8 % 4K / +28.1 %
-  1080p) and on Orange Pi (+18.4 % / +28.0 %, reproduced +18.4 % / +28.1 % on a
-  second run), so `rgaconvert` carries an `async-depth` property (uint, `0`-`1`,
-  **default `0`**). The default is 0 because the measurement's subject is the
-  standalone `tests/board/d6-c6b-measurement.sh` im2d harness, not the element:
-  no in-element board measurement exists yet, and depth 1 costs one frame of
-  latency. Flipping the default needs an in-element measurement, not another
-  harness run. `tests/board/d6-c6b-measurement.sh` remains the sole source of
-  these numbers.
-- **Async fence lifetime is terminal-state-owned.** Pending and ready records
-  retain both input and output; a 100 ms timeout drops the frame logically,
-  increments `conversion-dropped-frames`, and disables async until the next
-  start. The record remains quarantined until its fence is terminal. FLUSH_START
-  forwards immediately without waiting, while other serialized events drain
-  older output before the parent's event handler. The two-second error stays;
-  after a separate five-second stop deadline, unresolved frame references move
-  to an element-independent reaper with a counted error. Only sole-owned,
-  terminal frames are released, even after element finalization. Truly stuck
-  fences remain retained forever; this bounds waiting, not aggregate memory
-  across faulting sessions. `GST_DEBUG=rgaconvert:2` exposes the cumulative
-  `quarantine-escapes`/outstanding counts and 30-second retention reminders.
-  The property stays zero with a warning when Opt is unavailable. Debug staging
-  remains synchronous; a rejected submission remains a typed failure, not an
-  unreported synchronous retry. See `docs/ASYNC-FENCE-LIFETIME.md` for the
-  unsignalled-fence tests and process-isolated Rock fault-injection boundary.
-- **Caps fixation [EXISTS]:** same-memory identity alternatives retain
-  explicit colorimetry; raw-format fixation restores omitted colorimetry within
-  the same YUV/RGB family. Explicit output requests are never overwritten. The
-  OPi omitted-colorimetry U1 case passes. Explicit BT.709 remains a known CSC
-  limitation deferred to convergence todo 49 after librga R1
-  `1.10.5+ceralive.1`. The three d5 rotation failures reproduce identically on
-  baseline in the same kernel boot; they are separate from U3 chroma limits.
-  The owner authorizes `.3` with these documented limitations. See the
-  2026-09-08 evidence and release disposition in `tests/board/DRILL-RESULTS.md`.
-- **`rgaconvert` properties used by the engine:** the six transform properties
-  keep their names, types, defaults, ranges, and enum/flag nicks. A consumer
-  graph names them literally, so a rename is a cross-repository migration.
-
-  | Property | Type | Default | Range / nicks |
-  |---|---|---|---|
-  | `rotation` | enum `GstRgaRotation` | `0` | nicks `0`, `90`, `180`, `270` — clockwise |
-  | `hflip` | boolean | `FALSE` | — |
-  | `vflip` | boolean | `FALSE` | — |
-  | `core-mask` | flags `GstRgaCoreMask` | `auto` | nicks `auto`, `rga3-core0`, `rga3-core1`, `rga2` |
-  | `priority` | int | `0` | `0`–`6` |
-  | `interpolation` | enum `GstRgaInterpolation` | `default` | `default`, `linear`, `cubic`; older runtimes use default with a warning |
-  | `crop-x` / `crop-y` | uint | `0` | `0`–`G_MAXUINT`, input crop origin |
-  | `crop-w` / `crop-h` | uint | `0` | `0`–`G_MAXUINT`; **zero means "the remaining extent"**, not "an empty crop" |
-  | `async-depth` | uint | `0` | `0`–`1`; `0` submits synchronously (the shipped behaviour), `1` enables depth-1 `IM_ASYNC` pipelining and adds one frame of latency |
-
-  `crop-{x,y,w,h}` are four separate properties by design — an operator sets
-  only the edges it wants and leaves the rest at the default. Zero width or
-  height is therefore load-bearing: it selects the remainder of the input, so
-  the default property set is a full-frame no-crop conversion.
-
-  `rgaconvert` also carries the same three read-only counters as the MPP
-  elements — `conversion-fallback-frames`, `conversion-dropped-frames`,
-  `layout-rejections` — with identical semantics, because all three elements
-  share `gstmppconversionstats.c`. Output geometry comes from negotiated src
-  caps, including the width/height swap that 90°/270° rotation forces; it is
-  never a property. The factory registers at rank `NONE` and never autoplugs;
-  activation, not registration, is what a missing `/dev/rga` blocks.
-
-- **`rgacompositor` element and pad properties:** the element is a
-  `GstVideoAggregator` with request pads `sink_%u`, capped at `sink_0` and
-  `sink_1` in v1. Its per-pad contract is:
-
-  | Property | Type | Default | Range / meaning |
-  |---|---|---|---|
-  | `xpos` | int | `0` | `0`–`G_MAXINT`; custom-layout left edge |
-  | `ypos` | int | `0` | `0`–`G_MAXINT`; custom-layout top edge |
-  | `width` | int | `0` | `0`–`G_MAXINT`; custom requires a positive even value |
-  | `height` | int | `0` | `0`–`G_MAXINT`; custom requires a positive even value |
-  | `alpha` | double | `1.0` | `0.0`–`1.0`; global alpha when the pad is composited |
-  | `zorder` | uint | request index | Lower values render first; ties use pad index |
-
-  Element property `layout` is enum `GstRgaCompositorLayout`, default
-  `pip-top-right`, with nicks `pip-top-right`, `pip-top-left`,
-  `pip-bottom-right`, `pip-bottom-left`, `pbp-left-right`, `pbp-top-bottom`, and
-  `custom`. PiP makes `sink_0` the full output and scales `sink_1` to half of
-  each output axis (one-quarter area), inset by an even-aligned 5% margin. PbP
-  splits the output into even-aligned left/right or top/bottom halves. `custom`
-  uses each pad's four geometry properties verbatim and rejects zero, odd, or
-  out-of-bounds rectangles.
-
-  `sink_0` and output are progressive NV12 DMA-BUF; `sink_1` is progressive
-  BGRA DMA-BUF. The asymmetric input contract is required by librga's
-  NV12-output three-channel blend: the NV12 accumulator is the source/dst and
-  the RGB overlay is the `pat` channel. Upstream `rgaconvert` supplies BGRA when
-  a secondary source starts as YUV. Two inputs run one primary `improcess`
-  copy/scale, a BGRA scale when the secondary dimensions differ from its target,
-  then one geometry-aware composite pass. `pat` cannot scale: reducing its crop
-  alone would discard part of the secondary. The intermediate uses a reusable
-  16-aligned DMA-BUF pool, recreated on target-size changes and released at stop;
-  equal-size secondaries need no intermediate. Both passes are synchronous and
-  keep the intermediate alive through the blend. Output allocation
-  uses the same 16-aligned dma-heap allocator as `rgaconvert`. With only
-  `sink_0` connected and output caps unchanged, the input buffer is passed
-  through by reference with no RGA or CPU pixel operation. The element exposes
-  `conversion-fallback-frames`, `conversion-dropped-frames`, and
-  `layout-rejections` through `gstmppconversionstats.c`; fallback remains zero
-  because no CPU path exists. Its rank and READY failure contract match
-  `rgaconvert`.
-
-  **Missing-primary intervals are skipped, not fatal.** `create_output_buffer`
-  returns OK/NULL when no usable primary covers the current interval, before
-  allocating DMA memory. GstVideoAggregator advances time without rendering or
-  pushing, so a later primary can start normally. Do not substitute NEED_DATA
-  from `aggregate_frames`: it retries the same interval and can spin. Do not
-  return OK with an allocated, unwritten surface either. Failed latency queries
-  alone do not force a zero deadline; queue readiness and video-frame selection
-  are distinct. The Rock BRIO-primary/Osmo-secondary startup repair, host RED/GREEN
-  and same-run output controls are recorded in
-  [`docs/notes/compositor-primary-startup.md`](docs/notes/compositor-primary-startup.md).
-  Permanent primary absence still yields no output; secondary-only fallback is
-  not implemented by this rule.
-
-  **Output color selection [EXISTS].** `find_best_format` selects `sink_0`'s
-  NV12 video info before the parent constructs preferred caps. The generic base
-  selector compares plain-memory possible caps with DMA-BUF downstream caps and
-  can fall back to BT.601 even for a BT.709 primary. Do not copy only geometry
-  from the primary after that fallback. The BGRA overlay is not output-color
-  authority. Keep the parent's downstream-alternative negotiation; the regression
-  uses unconstrained output caps rather than pre-forcing the expected color.
-
-  **Allocation-query ownership [EXISTS].**
-  `gst_query_parse_nth_allocation_pool()` returns an owned reference, including
-  during inspection and reordering. `rgaconvert` must release every parsed pool,
-  whether selected or rejected, after installing replacement query references.
-  A NULL pool remains a valid proposal. Returning DMA buffers at stop does not
-  prove the pool/config/allocator objects were freed. Weak-reference regressions
-  and the OPi allocation profile are recorded in
-  [`docs/notes/allocation-pool-lifetime.md`](docs/notes/allocation-pool-lifetime.md).
-
-  **Compositor allocator lifetime [EXISTS].** Its allocation callback finishes
-  with the configured DMA-BUF pool and explicit 16-byte allocation alignment.
-  Do not re-enter the generic video-aggregator allocation callback: its allocator
-  alignment loop leaks a transfer-full parser reference on the tested GStreamer
-  1.22/1.26 versions. The regression independently weak-watches the compositor
-  and its allocator through real composed-buffer teardown. This is separate from
-  the converter pool-reference fix and from the RSS acceptance criterion.
-
-  **Composition remains hardware-blocked on librga R0.** The instrumented OPi-B
-  run returns `improcess=-1` (`IM_STATUS_NOT_SUPPORTED`), `errno=0`, with R0's
-  `Blend mode background layer unsupport non-RGB format, dst format = 0xa00(nv12)`.
-  This separate userspace guard precedes pat geometry validation; the corrected
-  geometry does not fix that library defect. See the source citations and bounded
-  board receipt in `docs/RGA-MPP-INTERACTION.md#compositor-pattern-contract`.
-  `GST_DEBUG=mpprgabackend:2` preserves composite status, errno, librga error text
-  and descriptors, and distinguishes imconfig refusal. The backend is
-  **driver-probed**, not trial-composite/pixel-verified. Host geometry tests now
-  enforce a documented rectangle contract at the improcess seam and were proven
-  RED by mutation; they do not substitute for real-library or decoded-pixel proof.
-
-`tests/parity-check.sh`, `tests/golden/`, `packaging/package-contract.sh`, and
-the board drills are the executable authorities. Update a frozen contract only
-through an explicit cross-repository migration, never as incidental refactoring.
-
-## Test and board-drill contract
-
-**Late teardown input:** every encoder subclass must check atomic `flushing`
-before per-frame property application, delegating rejection to the unchanged
-common handler. H.264/H.265 otherwise renegotiate after final reset dirties
-properties and clears output caps; VP8/JPEG share the ordering defect without
-the caps call. `tests/check/enc-teardown.c` pins the real concurrent queue/state
-transition with no FLUSH_START workaround, zero property applies and zero bus
-errors. See `docs/ENCODER-RUNTIME-CONTRACT.md`; hardware rerun is separate.
-
-**Cross-layer kernel fault bridge:** `gstmppfaultbridge.{c,h}` reads the
-island's own `rockchip_mpp` ftrace events out of a private tracefs instance and
-joins them, through `(task_id, core_id)`, back to the rkvenc sessions this
-element owns — resolved once at `start()` by intersecting `/proc/self/task/*`
-with `/proc/mpp_service/sessions-summary`, whose `pid` field is a **TID**. On
-crossing its threshold it calls the **unchanged**
-`gst_mpp_enc_handle_runtime_error()`, so the existing bounded restart and
-`encoder-restarts` are the recovery. It is shared by all four encoder
-subclasses through `gstmppenc.c`, exactly as the teardown fix above is. It is
-**opt-in** (`GST_MPP_FAULT_BRIDGE=1`), fail-open on every error path, and
-refuses to act on any fault it cannot attribute — including a `task_id` two
-taskqueues hold at once, where it abandons both candidates rather than guess.
-`tests/check/fault-bridge.c` and `tests/check/enc-fault-bridge.c` are
-mutation-verified host suites; **no board has produced a real fault through this
-path**, and doing so needs an `edge-test` kernel carrying the forbidden
-`CONFIG_ROCKCHIP_MPP_CERALIVE_TEST` seam. See
-`docs/ENCODER-RUNTIME-CONTRACT.md`.
-
-Hardware-independent gates run in both bookworm/GStreamer 1.22 and
-trixie/GStreamer 1.26 environments. The mock-MPP suites prove software state,
-ownership, caps construction, and MPP ABI closure; they do not emulate RK3588 DMA
-addresses, RGA2, or the encoder firmware.
-
-The registration/parity checker indexes literal golden lines in Bash rather than
-launching a process per line; the latter exhausted its unchanged 30-second
-deadline under QEMU. Caps multiplicity and every baseline comparison remain
-enforced. `tests/parity-comparator.test.sh` runs inside the registration gate and
-rejects per-line grep launches while covering literal matching and negative cases.
-
-The standalone **test-only MPI interposer [EXISTS]** is in
-[`tests/mpi-interposer/`](tests/mpi-interposer/README.md). Build Check runs its
-separate debug-only gate after the existing tests; it is absent from the
-production build graph and has no install targets. It injects one pre-submit
-`MPP_ERR_STREAM` on an explicitly selected healthy context, never writes the
-counter and never changes plugin recovery or libmpp. Its independently decoded
-synthetic host-output test is **not** a live engine/session or hardware receipt,
-and does **not** discharge item 30's literal island-knob row. The production
-async-error propagation gap and H.265 poll-error overwrite are recorded in
-[`docs/ENCODER-RUNTIME-CONTRACT.md`](docs/ENCODER-RUNTIME-CONTRACT.md#hardware-error-propagation-gap-partial).
-Do not replace that finding with another kernel errno knob or ship this harness.
-
-The board suite is deliberately outside Meson:
-
-| Drill | Hardware claim |
-|---|---|
-| `d1-runtime-parity.sh` | Package installation, registration of every built factory the board's SoC can carry, four-element golden contract. `mppvp8enc` is scored EXPECTED-ABSENT on an `rk3588` board and PRESENT-REQUIRED elsewhere. |
-| `d2-radxa-fork-ab.sh` | Radxa/fork encode A/B over **H.265 primary and H.264 secondary**: 300/300 AUs per codec, SPS geometry/profile/level, zero `RGA_BLIT fail`, and `conversion-fallback-frames = 0` on the fork variant. |
-| `d3-main10-stride-ab.sh` | Report-only Main10 current-vs-`*8/pixel_stride0` frame-checksum experiment. |
-| `d4-allocation-soak.sh` | 136 s DMA allocation soak with live bitrate, resolution, and temporal-SVC changes, run **on a trial-verified librga backend** and scored on the three conversion counters. |
-| `d5-rgaconvert-matrix.sh` | `rgaconvert` conversion matrix — {CSC, scale, crop, rotate} × representative format pairs, each cell measured as PSNR against a software reference of the same operation. |
-| `d6-c6b-measurement.sh` | The C6b-perf / C6b-async go/no-go gate. Standalone im2d harness against the board's own librga: no plugin installed, no element instantiated, no capture device opened. Scores fd-vs-handle buffer description (with a single-plane RGBA control that separates a handle-path refusal from a chroma-plane question) and depth-1 `IM_ASYNC` sustained throughput, bracketed by two independent synchronous runs so clock or thermal drift cannot be read as an async gain. |
-
-The latest executed verdicts and their hardware scope are recorded in
-[`tests/board/DRILL-RESULTS.md`](tests/board/DRILL-RESULTS.md). That tracked
-summary preserves failed and inconclusive outcomes; it is not a substitute for
-the retained raw transcripts. A criteria change does not carry an old verdict
-forward: when a drill's acceptance criteria are reworked, its prior result
-becomes history and the drill is **not yet run** under the new criteria until a
-board actually executes it.
-
-Every script requires `CERALIVE_BOARD_TEST=1` and otherwise exits 77. Board
-identity is supplied only through `BOARD_IP`, `BOARD_SSH_USER`, and
-`BOARD_SSH_PASS`; repository files never locate credentials or reference a
-workspace parent. d1/d2/d4/d5 also take package paths through environment
-variables.
-
-### The suite proves
-
-- The exact package and kernel named in each transcript loaded on the reachable
-  board used for that run.
-- Registration/property/caps/rank behavior and the finite runtime observations
-  scored by each completed drill.
-- For d2/d4, zero matching `RGA_BLIT fail` and `rga_api version` journal lines in
-  the measured window, and `conversion-fallback-frames = 0` read from the
-  element's own end-of-run counter summary — never inferred from silence.
-- For d3, only the enum written by its frame-count/checksum/error oracle:
-  `CURRENT_CORRECT`, `ALTERNATIVE_CORRECT`, or `INCONCLUSIVE`.
-- For d4, that the backend under test is the trial-verified librga one: the
-  `mpprgabackend` probe logged a driver version at or above the 1.2.4 floor in
-  that run. A run whose log carries no such probe line FAILS; availability is
-  never assumed from the absence of an error.
-- For d5, only the measured PSNR of each executed cell against its software
-  reference. An unexecuted cell is `NOT-RUN`; it is never scored from a
-  neighbouring cell, from a previous drill, or from the element's own logs.
-
-### The suite does NOT prove
-
-- Hardware not named by the transcript, including the separate mainline/edge 7.2
-  fleet when a drill runs on the vendor 6.1 bench board.
-- Long-term thermal, suspend/resume, OTA, or every capture-device path.
-- That an `INCONCLUSIVE` d3 result authorizes a stride change. d3 is report-only;
-  no shipped stride edit follows without decisive evidence and separate review.
-- The pre-existing 4K59.94 H.265 SIGSEGV. That fault is out of scope and must not
-  be chased or reclassified by these drills.
-- ThreadSanitizer or LeakSanitizer cleanliness. TSAN cannot start under the known
-  qemu-user VMA layout and LSan cannot complete there; deterministic mock seams
-  and counters substitute only for the specific properties they assert.
-- A result from an unreachable board. Such a run is `SKIPPED-unreachable` with an
-  attempt transcript, never PASS.
-- That d5's PSNR threshold means bit-exactness. RGA is a fixed-function 2D
-  engine and its chroma resampling does not match libgstvideo's; a passing cell
-  says the hardware result is faithful to the reference at the recorded dB, not
-  that the two are identical. A cell that RGA cannot perform at all fails
-  negotiation instead, which is a distinct, separately recorded outcome.
-
-## Licensing and credits
-
-The project remains LGPL-2.1. Keep `COPYING`, source headers, and
-`packaging/copyright` intact. Copyright holders represented in the shipped tree
-are Rockchip Electronics Co., Ltd.; Collabora Ltd.; Igalia; and Julien Moutte.
-Igalia and Julien Moutte are scoped to `gst/rkximage/`, not the MPP plugin;
-CERALIVE owns the new RGA backend, tuple-health, and conversion-counter files
-and the whole of `gst/rockchiprga/`.
-
-Provenance credits are distinct: Rockchip originated the plugin family, JeffyCN
-maintains the audited upstream line, BELABOX rebased and carried the downstream
-tree, and irlserver-datagutt added the streaming-control features inherited by
-this fork. See `README.md` for the public maintainer notice.
-
-## Pre-commit formatting
-
-`hooks/pre-commit.hook` runs GNU indent 2.2.12 with the upstream parameter set
-against the index contents of every C/H file under `gst/rockchipmpp/`. The
-encoder source and header intentionally retain inherited CRLF line endings;
-GNU indent 2.2.12 misparses those carriage returns as input, producing
-misleading unmatched-`else`, statement-nesting, and unexpected-EOF errors.
-The hook strips CR only in its temporary checker input, so it can validate
-those files without changing their stored line endings. It also leaves the
-working tree untouched when a style diff is found.
-
-The two genuinely non-compliant LF files (`gstmppallocator.c` and
-`gstmpph265enc.c`) are kept at the hook's two-pass output. The encoder's
-failure was introduced by commit `dd3ce32c` restoring inherited CRLF; the
-underlying C was valid and the original file passed GNU indent before that
-line-ending-only change.
-
-## Anti-patterns
-
-- Do not rename `libgstrockchipmpp.so`, `libgstrockchiprga.so`, or the package
-  prefix, and do not split the RGA elements into a second `.deb`: the release
-  publishes exactly one archive.
-- Do not publish the Bookworm `~bookworm` package, widen the "exactly one
-  `.deb`" assertion to admit it, or remove the Bookworm build/smoke legs. The
-  first two break the Trixie-only APT policy and apt-worker's reindex; the
-  third deletes the GStreamer 1.22 coverage. Do not start a Bookworm librga
-  build on the strength of the legacy pin either; it is permanent by policy.
-- Do not remove unused factories to reduce the package.
-- Do not extend `rgacompositor` beyond two sink pads or add a CPU compositor;
-  v1 is deliberately one primary plus one secondary on librga.
-- Do not treat `mppvp8enc`'s absence on RK3588 as a bug to fix or as a drill
-  failure to suppress. It is silicon, it reproduces on the Radxa package, and
-  d1 scores it explicitly.
-- Do not rename `bitrate` back to `bps` or add a legacy alias here.
-- Do not change Main10 stride semantics on static-analysis confidence alone.
-- Do not treat plugin registration success as proof all factories registered;
-  `plugin_init` historically swallows individual registration failures.
-- Do not arm the kernel fault bridge by default, and do not describe it as
-  detecting IOMMU faults. It is off until a board has driven a real injected
-  hardware fault through it end to end, and the IOMMU path emits no tracepoint
-  at all — what arrives is the ~500 ms timeout consequence, as a timeout.
-- Do not resolve an ambiguous `task_id` in the fault bridge by picking the
-  newest, the oldest, or the nearest-in-time candidate. `task_id` is per
-  taskqueue, so a wrong pick restarts a healthy encoder on another process's
-  fault. Losing detection is the safe failure; abandoning both candidates is
-  deliberate.
-- Do not re-resolve fault-bridge session ownership by matching TIDs on a timer,
-  and do not make the re-resolve after a restart replace the cached set. The
-  `pid` in `sessions-summary` is the creating thread's TID and that thread can
-  die while the session lives, which is why ownership is resolved at `start()`,
-  cached, and only ever unioned.
-- Do not claim sanitizer coverage that the qemu-user environment cannot run.
-- Do not let a board drill install a package without recording package, kernel,
-  and final verdict, and do not infer PASS from a command merely completing.
-- Do not run the pre-commit hook casually: it checks the whole MPP subtree and
-  is intentionally baseline-wide. Review `git status` immediately if it runs.
-- Preserve mixed line endings in inherited files; avoid text-mode whole-file
-  rewrites and compare raw versus whitespace-ignored diffs.
+- Freeze `gstreamer1.0-rockchip` package prefix and `libgstrockchipmpp.so` / `libgstrockchiprga.so`; ship one `.deb`, not split RGA.
+- Never add this package to device-image REPOS; seed it only through the platform-layer URL+SHA pin swap.
+- Release versions are upstream-style `1.14.4+ceralive.N`, never CalVer. Release only from main after merged-head Build Check passes.
+- Our MPP/RGA elements are the production path; no generic fallback. CPU staging is debug-only; compositor has no CPU pixel path.
+- Publish only Trixie. Keep both suite build/smoke legs; Bookworm is internal portability coverage, never an APT/release input.
+- Wire `RGA_COMPAT_SUITE` per librga-fetch/install step; never force-install R0/R1 on Bookworm or lower their dependency floor.
+- Keep all eleven factories and frozen properties/caps/ranks; changes require explicit cross-repository migration.
+- Preserve clean upstream ports with `cherry-pick -x`; never squash tier-(a)/(b) commits or self-merge their integration PR.
+- Upstream-sync merges use merge-commit merge, never squash; retain upstream ancestry. Tier-(c) mechanical work may squash.
+- PRs target CERALIVE/gstreamer-rockchip main, never fork parents; retain only CERALIVE origin at rest. No AI attribution trailers.
+- Never pre-create release tags; independently verify archive checksums before pinning and APT index/package bytes after reindex.
+- Probe `/dev/rga` driver version before use; librga init alone is insufficient. Preserve per-operation/format-pair blit health.
+- Resolve Opt dynamically with a retained GModule handle, never link it; build against >=1.10.5 headers and retain legacy rollback.
+- Async/cache/fault-bridge opt-ins stay default-off; defaults require their own in-element/end-to-end hardware evidence.
+- Keep buffers/leases until terminal fences, including quarantine; never evict live leases or free unresolved frames at stop.
+- Fault bridge never guesses ambiguous task ownership; cache start-time TIDs and union after restarts, never replace the owned set.
+- Reject late encoder input before property application; preserve bounded restarts, explicit VUI and no-B-frame DTS = PTS.
+- Board drills require CERALIVE_BOARD_TEST=1 and explicit environment credentials; preserve failed/inconclusive/unreachable verdicts.
+- Host/mock/build/registration evidence is not hardware qualification; never infer PASS or sanitizer coverage from unavailable tests.
+- Keep LGPL notices, copyright/provenance and inherited mixed line endings; formatting checks must not rewrite working files.
